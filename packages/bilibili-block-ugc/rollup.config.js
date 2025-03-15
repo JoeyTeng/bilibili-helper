@@ -9,10 +9,10 @@ import terser from '@rollup/plugin-terser'
 
 const userScriptMetaData = `
 // ==UserScript==
-// @name         Block UGC for Bilibili
+// @name         Bilibili UGC
 // @namespace    https://github.com/ipcjs
 // @version      0.0.1
-// @description  Block UGC for Bilibili
+// @description  Bilibili UGC
 // @author       ipcjs
 // @match        https://www.bilibili.com/*
 // @require      https://greasemonkey.github.io/gm4-polyfill/gm4-polyfill.js
