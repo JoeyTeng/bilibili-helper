@@ -11,7 +11,7 @@ const userScriptMetaData = `
 // ==UserScript==
 // @name         Bilibili UGC
 // @namespace    https://github.com/ipcjs
-// @version      0.0.1
+// @version      0.0.2
 // @description  Bilibili UGC
 // @author       ipcjs
 // @match        https://www.bilibili.com/*

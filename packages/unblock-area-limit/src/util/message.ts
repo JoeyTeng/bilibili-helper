@@ -3,7 +3,7 @@ import { util_init } from './initiator'
 import { util_log } from './log'
 import { util_notify } from './notification'
 import { ui } from './ui'
-import { Func } from './utils'
+import { noop } from './utils'
 /**
  * {@link BiliMessageBox}
  * MessageBox -> from base.core.js
@@ -32,7 +32,7 @@ let alertPopMessage: BiliMessageBox = {
     show: function (referenceElement, message, closeTime, boxType, buttonTypeConfirmCallback) {
         ui.alert(message, buttonTypeConfirmCallback)
     },
-    close: Func.noop
+    close: noop
 }
 
 util_init(() => {

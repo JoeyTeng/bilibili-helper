@@ -1,5 +1,5 @@
-import { r } from "../feature/r"
 import { Objects } from "./objects"
+import { Scripts } from "./scripts"
 import { Strings } from "./strings"
 
 const tag = GM_info.script.name + '.msg'
@@ -42,7 +42,7 @@ type ConsoleLogFunctions = {
 }
 
 function logImpl(type: keyof ConsoleLogFunctions): (...args: any) => void {
-    if (r.script.is_dev) {
+    if (Scripts.isDev) {
         // 直接打印, 会显示行数
         return window.console[type].bind(window.console, type + ':');
     } else {

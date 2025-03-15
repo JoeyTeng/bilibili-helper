@@ -1,4 +1,6 @@
-import { RegExps, Windows, injectXhr, util_info as log } from "../unblock-area-limit/index";
+import { RegExps, Scripts, Windows, injectXhr, util_info, noop } from "../unblock-area-limit/index";
+
+const log = Scripts.isDev ? util_info : noop
 
 const LONG_VIDEO_DURATION = 10 * 60
 

@@ -1,3 +1,5 @@
+import { Scripts } from "../util/scripts"
+
 const r_text = {
     ok: { en: 'OK', zh_cn: '确定', },
     close: { en: 'Close', zh_cn: '关闭' },
@@ -25,7 +27,7 @@ export const r = {
         readme: 'https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md#%E8%A7%A3%E9%99%A4b%E7%AB%99%E5%8C%BA%E5%9F%9F%E9%99%90%E5%88%B6',
     },
     script: {
-        is_dev: GM_info.script.name.includes('.dev'),
+        is_dev: Scripts.isDev,
     },
     const: {
         mode: {

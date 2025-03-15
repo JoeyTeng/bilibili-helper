@@ -4,8 +4,9 @@ export async function asyncTest() {
     return 'asyncTest'
 }
 
+export function noop() { }
+
 export namespace Func {
-    export function noop() { }
 
     export function runCatching(func: Function, onError?: (e: any) => any) {
         let ret = function (this: any) {

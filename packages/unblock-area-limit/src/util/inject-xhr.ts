@@ -1,6 +1,6 @@
 // @ts-nocheck
-import { r } from "../feature/r"
 import { util_debug } from "./log"
+import { Scripts } from "./scripts"
 let noReferrerHostArray: string[] = []
 /// 注入Xhr
 ///
@@ -10,12 +10,12 @@ let noReferrerHostArray: string[] = []
 /// [transformResponse]:
 /// {@macro xhr_transform_response}
 export function injectXhr({ transformRequest, transformResponse }) {
-    util_debug('XMLHttpRequest的描述符:', Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest'))
+    // util_debug('XMLHttpRequest的描述符:', Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest'))
     let firstCreateXHR = true
     window.XMLHttpRequest = new Proxy(window.XMLHttpRequest, {
         construct: function (target, args) {
             // 第一次创建XHR时, 打上断点...
-            if (firstCreateXHR && r.script.is_dev) {
+            if (firstCreateXHR && Scripts.isDev) {
                 firstCreateXHR = false
                 // debugger
             }
