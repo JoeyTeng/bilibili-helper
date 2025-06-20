@@ -1,9 +1,13 @@
 // ==UserScript==
-// @name         developer.android.com redirect to lang
+// @name         Google redirect to lang
 // @namespace    https://github.com/ipcjs/
-// @version      1.1.2
-// @description  Android开发者官网重定向到特定语言
+// @version      1.2.0
+// @description  Google网站重定向到特定语言
 // @author       ipcjs
+// @match        https://www.google.com/*
+// @match        https://developers.google.com/*
+// @match        https://console.cloud.google.com/*
+// @match        https://play.google.com/*
 // @match        https://developer.android.com/*
 // @match        https://developer.android.google.cn/*
 // @include      http://localhost:8880/*
@@ -14,6 +18,7 @@
 // @grant        GM_unregisterMenuCommand
 // @run-at       document-start
 // ==/UserScript==
+const KEY_OPTION = `${location.host}.key_option`
 const URL_ANDROID = 'developer.android.com'
 const URL_ANDROID_CN = 'developer.android.google.cn'
 const OptionEnum = Object.freeze({
@@ -75,7 +80,7 @@ const OptionEnum = Object.freeze({
     }
 })
 
-let option = OptionEnum.valueOf(GM_getValue('key_option', OptionEnum.DEFAULT.value))
+let option = OptionEnum.valueOf(GM_getValue(KEY_OPTION, OptionEnum.DEFAULT.value))
 
 console.log(`option: ${JSON.stringify(option)}`)
 
@@ -92,7 +97,7 @@ function main() {
     OptionEnum.values().forEach(it => {
         GM_registerMenuCommand((it === option ? '=>' : '　') + it.name, () => {
             // debugger
-            GM_setValue('key_option', it.value)
+            GM_setValue(KEY_OPTION, it.value)
             if (!it.onMenuClicked) {
                 location.reload() // 默认直接刷新
             } else {
@@ -120,7 +125,9 @@ function main() {
 function ensureHrefEndWithLang(item) {
     if (!item.href) return
     const url = new URL(item.href)
-    option.processUrl(item, url)
+    if (url.host === location.host) {
+        option.processUrl(item, url)
+    }
 }
 
 function createGotoLang(lang) {
