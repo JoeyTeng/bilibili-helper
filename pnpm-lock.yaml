@@ -14,13 +14,13 @@ importers:
     devDependencies:
       '@rollup/plugin-commonjs':
         specifier: ^24.0.1
-        version: 24.1.0(rollup@2.79.1)
+        version: 24.1.0(rollup@2.80.0)
       '@rollup/plugin-terser':
         specifier: ^0.4.4
-        version: 0.4.4(rollup@2.79.1)
+        version: 0.4.4(rollup@2.80.0)
       '@rollup/plugin-typescript':
         specifier: ^6.1.0
-        version: 6.1.0(rollup@2.79.1)(tslib@2.6.2)(typescript@5.8.2)
+        version: 6.1.0(rollup@2.80.0)(tslib@2.6.2)(typescript@5.8.2)
       '@types/greasemonkey':
         specifier: ^4.0.2
         version: 4.0.7
@@ -28,8 +28,8 @@ importers:
         specifier: ^0.25.7
         version: 0.25.9
       rollup:
-        specifier: ^2.32.1
-        version: 2.79.1
+        specifier: ^2.80.0
+        version: 2.80.0
       rollup-plugin-html:
         specifier: ^0.2.1
         version: 0.2.1
@@ -208,7 +208,7 @@ packages:
   glob@8.1.0:
     resolution: {integrity: sha512-r8hpEjiQEYlF2QU0df3dS+nxxSIreXQS1qRhMJM0Q5NDdR386C7jb7Hwwod8Fgiuex+k0GFjgft18yvxm5XoCQ==}
     engines: {node: '>=12'}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   hasown@2.0.1:
     resolution: {integrity: sha512-1/th4MHjnwncwXsIW6QMzlvYL9kG5e/CpVvLRZe4XPa8TOUNbCELqmvhDmnkNsAjwaG4+I8gJJL0JBvTTLO9qA==}
@@ -322,8 +322,8 @@ packages:
   rollup-pluginutils@2.8.2:
     resolution: {integrity: sha512-EEp9NhnUkwY8aif6bxgovPHMoMoNr2FulJziTndpt5H9RdwC47GSGuII9XxpSdzVGM0GWrNPHV6ie1LTNJPaLQ==}
 
-  rollup@2.79.1:
-    resolution: {integrity: sha512-uKxbd0IhMZOhjAiD5oAFp7BqvkA4Dv47qpOCtaNvng4HBwdbWtdOh8f5nZNuk2rp51PMGk3bzfWu5oayNEuYnw==}
+  rollup@2.80.0:
+    resolution: {integrity: sha512-cIFJOD1DESzpjOBl763Kp1AH7UE/0fcdHe6rZXUdQ9c50uvgigvW97u3IcSeBwOkgqL/PXPBktBCh0KEu5L8XQ==}
     engines: {node: '>=10.0.0'}
     hasBin: true
 
@@ -412,47 +412,47 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.4.15
 
-  '@rollup/plugin-commonjs@24.1.0(rollup@2.79.1)':
+  '@rollup/plugin-commonjs@24.1.0(rollup@2.80.0)':
     dependencies:
-      '@rollup/pluginutils': 5.1.0(rollup@2.79.1)
+      '@rollup/pluginutils': 5.1.0(rollup@2.80.0)
       commondir: 1.0.1
       estree-walker: 2.0.2
       glob: 8.1.0
       is-reference: 1.2.1
       magic-string: 0.27.0
     optionalDependencies:
-      rollup: 2.79.1
+      rollup: 2.80.0
 
-  '@rollup/plugin-terser@0.4.4(rollup@2.79.1)':
+  '@rollup/plugin-terser@0.4.4(rollup@2.80.0)':
     dependencies:
       serialize-javascript: 6.0.2
       smob: 1.5.0
       terser: 5.39.0
     optionalDependencies:
-      rollup: 2.79.1
+      rollup: 2.80.0
 
-  '@rollup/plugin-typescript@6.1.0(rollup@2.79.1)(tslib@2.6.2)(typescript@5.8.2)':
+  '@rollup/plugin-typescript@6.1.0(rollup@2.80.0)(tslib@2.6.2)(typescript@5.8.2)':
     dependencies:
-      '@rollup/pluginutils': 3.1.0(rollup@2.79.1)
+      '@rollup/pluginutils': 3.1.0(rollup@2.80.0)
       resolve: 1.22.8
-      rollup: 2.79.1
+      rollup: 2.80.0
       tslib: 2.6.2
       typescript: 5.8.2
 
-  '@rollup/pluginutils@3.1.0(rollup@2.79.1)':
+  '@rollup/pluginutils@3.1.0(rollup@2.80.0)':
     dependencies:
       '@types/estree': 0.0.39
       estree-walker: 1.0.1
       picomatch: 2.3.1
-      rollup: 2.79.1
+      rollup: 2.80.0
 
-  '@rollup/pluginutils@5.1.0(rollup@2.79.1)':
+  '@rollup/pluginutils@5.1.0(rollup@2.80.0)':
     dependencies:
       '@types/estree': 1.0.5
       estree-walker: 2.0.2
       picomatch: 2.3.1
     optionalDependencies:
-      rollup: 2.79.1
+      rollup: 2.80.0
 
   '@types/estree@0.0.39': {}
 
@@ -665,7 +665,7 @@ snapshots:
     dependencies:
       estree-walker: 0.6.1
 
-  rollup@2.79.1:
+  rollup@2.80.0:
     optionalDependencies:
       fsevents: 2.3.3
 
