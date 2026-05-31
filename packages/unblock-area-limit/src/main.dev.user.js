@@ -26,7 +26,7 @@
 // @match        https://www.mcbbs.net/template/mcbbs/image/special_photo_bg.png*
 // @run-at       document-start
 // @grant        none
-// @require      file:///C:/GitHub/bilibili-helper/scripts/bilibili_bangumi_area_limit_hack.user.js
+// @require      file:///C:/GitHub/bilibili-helper/dist/unblock-area-limit.user.js
 // ==/UserScript==
 
 `
@@ -35,7 +35,7 @@
 2. 新建本地脚本, 将当前文件内容粘贴进去
 3. 依据你本地文件路径, 修改@require部分的url
 4. npm install, 安装依赖
-5. npm dev:balh, 打包最终的脚本文件
+5. pnpm run dev, 打包最终的脚本文件
 6. 编辑本地代码后, 刷新网页, 就可让新的内容生效
 `;
 console.log(`${GM_info.script.name} running`);

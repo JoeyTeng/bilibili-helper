@@ -9,8 +9,7 @@
         ],
     },
     "include": [
-        "packages/**/*.ts",
-        "types/**/*.ts",
-        // "scripts/vuejs_switch_lang.user.js"
+        "packages/unblock-area-limit/**/*.ts",
+        "types/**/*.ts"
     ],
 }

@@ -13,20 +13,18 @@ export default function ({ filePath, contentTag = 'template-content' } = {}) {
         renderChunk(code, renderedChunk, outputOptions) {
             const magicString = new MagicString(code)
             const template = readFileSync(filePath, { encoding: 'utf8' })
-            // 坑点: \s在多行模式下可能会匹配到\n (╯°口°)╯(┴—┴) 
-            // 匹配出内容标签所在行
+            // Match the line that contains the template placeholder.
             const group = template.match(new RegExp(`[\\r\\n]+(\\s*)\\/\\/.*@${contentTag}.*([\\r\\n]+)`))
             if (group) {
                 const lastIndex = group.index + group[0].length
-                magicString.indent(group[1]) // group[1], 是标签所在行的缩进部分
+                magicString.indent(group[1])
                     .prepend(template.substring(0, lastIndex))
-                    .append(group[2]) // group[2], 当前平台的换行符
+                    .append(group[2])
                     .append(template.substring(lastIndex))
             } else {
                 magicString.prepend(template)
             }
 
-            // 参考: https://github.com/FlandreDaisuki/rollup-plugin-userscript-metablock/blob/master/src/index.js/#L113
             const result = { code: magicString.toString() }
             if (outputOptions.sourcemap !== false) {
                 result.map = magicString.generateMap({ hires: true })

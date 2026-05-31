@@ -1,22 +1,25 @@
 import path from 'path'
 import scss from 'rollup-plugin-scss'
-import typescript from '@rollup/plugin-typescript'
-import template from '../rollup-plugin-output-template/index'
+import { nodeResolve } from '@rollup/plugin-node-resolve'
+import typescriptTranspile from './tools/typescript-transpile.js'
+import template from './tools/output-template.js'
 import html from 'rollup-plugin-html'
 import commonjs from '@rollup/plugin-commonjs';
 
 export default {
     input: path.resolve(__dirname, 'src/main.ts'),
     output: {
-        file: path.resolve(__dirname, '../../scripts/bilibili_bangumi_area_limit_hack.user.js'),
+        file: path.resolve(__dirname, '../../dist/unblock-area-limit.user.js'),
         format: 'es',
     },
     plugins: [
         scss({
             output: false
         }),
-        typescript({
-            // 支持BigInt, async等
+        nodeResolve({
+            extensions: ['.mjs', '.js', '.json', '.node', '.ts'],
+        }),
+        typescriptTranspile({
             target: 'ES2020',
         }),
         template({

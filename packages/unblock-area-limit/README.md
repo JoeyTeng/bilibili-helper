@@ -49,7 +49,7 @@ CDN本质也是反向代理（
 
 ## 开发
 
-最新版引入了rollup.js来打包脚本, 克隆代码后要执行`npm i`安装依赖, 修改代码时要执行`npm run dev:balh`生成打包好的user.js
+项目使用 Rollup 打包脚本。克隆代码后执行`pnpm install`安装依赖，修改代码时执行`pnpm run dev`生成打包好的`dist/unblock-area-limit.user.js`。
 
 ## 问&答
 

@@ -18,18 +18,14 @@ jobs:
         with:
           version: 10
           run_install: false
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: |
-          npx rollup --config packages/unblock-area-limit/rollup.config.js
-          npx rollup --config packages/bilibili-block-ugc/rollup.config.js
-          npx rollup --config packages/s3_mobile_style/rollup.config.js
-          npx rollup --config packages/zhihu_mobile_style/rollup.config.js
+        run: pnpm run check
 
       - name: Commit
         continue-on-error: true
