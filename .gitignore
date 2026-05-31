@@ -1,6 +1,7 @@
 .idea/
 .codex-tmp/
 .pnpm-store/
+/dist/
 /test.js
 /test/
 *.min.js

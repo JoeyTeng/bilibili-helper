@@ -3,31 +3,25 @@
   "version": "1.0.0",
   "description": "Userscript for 解除B站区域限制",
   "private": true,
+  "packageManager": "pnpm@10.15.0",
   "dependencies": {
     "opencc-js": "^1.0.5"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^24.0.1",
-    "@rollup/plugin-node-resolve": "^16.0.3",
     "@types/greasemonkey": "^4.0.2",
-    "magic-string": "^0.25.7",
-    "rollup": "^2.32.1",
-    "rollup-plugin-html": "^0.2.1",
-    "rollup-plugin-scss": "^3.0.0",
-    "sass": "^1.69.5",
-    "tslib": "^2.0.3",
+    "esbuild": "^0.28.0",
     "typescript": "^5.8.2"
   },
   "scripts": {
-    "build": "rollup --config packages/unblock-area-limit/rollup.config.js",
-    "dev": "rollup --config packages/unblock-area-limit/rollup.config.js -w",
-    "dev:balh": "rollup --config packages/unblock-area-limit/rollup.config.js -w",
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "dev:balh": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm run build"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ipcjs/bilibili-helper.git"
+    "url": "git+https://github.com/JoeyTeng/bilibili-helper.git"
   },
   "keywords": [
     "userscript",
@@ -36,7 +30,7 @@
   "author": "ipcjs",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/ipcjs/bilibili-helper/issues"
+    "url": "https://github.com/JoeyTeng/bilibili-helper/issues"
   },
-  "homepage": "https://github.com/ipcjs/bilibili-helper#readme"
+  "homepage": "https://github.com/JoeyTeng/bilibili-helper#readme"
 }

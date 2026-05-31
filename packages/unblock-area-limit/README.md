@@ -49,7 +49,9 @@ CDN本质也是反向代理（
 
 ## 开发
 
-项目使用 Rollup 打包脚本。克隆代码后执行`pnpm install`安装依赖，修改代码时执行`pnpm run dev`生成打包好的`dist/unblock-area-limit.user.js`。
+项目使用 esbuild 打包脚本。克隆代码后执行`pnpm install`安装依赖，修改代码时执行`pnpm run dev`生成打包好的`dist/unblock-area-limit.user.js`。
+
+当前维护版本是新的 GreasyFork 分发脚本，不作为旧 `ipcjs` 脚本的自动升级路径发布。旧脚本用户需要按新脚本重新安装。
 
 ## 问&答
 
@@ -127,8 +129,8 @@ Chrome 80+上有可能出现的问题，详见：https://github.com/ipcjs/bilibi
 
 ## 开源
 
-1. 源码仓库：[ipcjs/bilibili-helper at user.js](https://github.com/ipcjs/bilibili-helper/tree/user.js)
-2. 代码贡献者：[Contributions](https://github.com/ipcjs/bilibili-helper/graphs/contributors)
+1. 源码仓库：[JoeyTeng/bilibili-helper at dev](https://github.com/JoeyTeng/bilibili-helper/tree/dev)
+2. 代码贡献者：[Contributions](https://github.com/JoeyTeng/bilibili-helper/graphs/contributors)
 3. 部分源码取自：
     - 通知相关：[Yet Another Weibo Filter - 看真正想看的微博](https://tiansh.github.io/yawf/zh-cn.html)
     - 自动跳转相关：[我就是要跳轉(B站番劇投稿頁跳轉去番劇頁)](https://greasyfork.org/zh-CN/scripts/29151)
@@ -140,4 +142,4 @@ Chrome 80+上有可能出现的问题，详见：https://github.com/ipcjs/bilibi
 1. [yujincheng08/BiliRoaming: 哔哩漫游，解除B站客户端番剧区域限制的Xposed模块，并且提供其他小功能](https://github.com/yujincheng08/BiliRoaming)
 2. [kghost/bilibili-area-limit: Bilibili 港澳台, 解除区域限制](https://github.com/kghost/bilibili-area-limit)
 
-## [高级设置/更新日志/测试页面 等](https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.dev.md)
+## [高级设置/更新日志/测试页面 等](https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.dev.md)

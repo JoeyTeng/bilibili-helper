@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping non-stable release tag: $GITHUB_REF_NAME"
+            exit 0
+          fi
+
+          echo "stable=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v6
+        if: steps.release.outputs.stable == 'true'
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - uses: actions/setup-node@v6
+        if: steps.release.outputs.stable == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+        if: steps.release.outputs.stable == 'true'
+
+      - name: Build release userscript
+        if: steps.release.outputs.stable == 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          pnpm run typecheck
+          pnpm run build -- --version "$VERSION"
+          grep -F "// @version      $VERSION" dist/unblock-area-limit.user.js
+
+          mkdir -p release-artifacts
+          cp dist/unblock-area-limit.user.js "release-artifacts/unblock-area-limit-$VERSION.user.js"
+          cp dist/unblock-area-limit.meta.js "release-artifacts/unblock-area-limit-$VERSION.meta.js"
+          (cd release-artifacts && sha256sum ./* > SHA256SUMS)
+
+      - name: Publish immutable GitHub release
+        if: steps.release.outputs.stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release $GITHUB_REF_NAME"
+
+      - name: Update main distribution branch
+        if: steps.release.outputs.stable == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          release_dir="$(mktemp -d)"
+          git init "$release_dir"
+          cd "$release_dir"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if git ls-remote --exit-code --heads origin main > /dev/null; then
+            git fetch --depth=1 origin main
+            git checkout -B main FETCH_HEAD
+          else
+            git checkout -B main
+          fi
+
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp "$GITHUB_WORKSPACE/dist/unblock-area-limit.user.js" unblock-area-limit.user.js
+          cp "$GITHUB_WORKSPACE/.github/release-branch/README.md" README.md
+          cp "$GITHUB_WORKSPACE/LICENSE" LICENSE
+          cp "$GITHUB_WORKSPACE/SECURITY.md" SECURITY.md
+
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "release: $GITHUB_REF_NAME"
+          git push origin main

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         解除B站区域限制
-// @namespace    https://github.com/ipcjs
+// @namespace    https://github.com/JoeyTeng
 // @version      8.5.3
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
-// @supportURL   https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md
+// @supportURL   https://github.com/JoeyTeng/bilibili-helper
 // @compatible   chrome
 // @compatible   firefox
 // @license      MIT

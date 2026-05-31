@@ -1,6 +1,6 @@
 import { _ } from '../../util/react'
 import { util_page } from '../page'
-import css from './hide_adblock_tips.scss'
+import css from './hide_adblock_tips.css'
 
 export function hide_adblock_tips() {
     if (util_page.home()) {

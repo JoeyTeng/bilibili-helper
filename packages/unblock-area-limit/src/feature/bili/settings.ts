@@ -7,7 +7,7 @@ import { util_page } from "../page"
 import { r } from "../r"
 import { util_ui_msg } from '../../util/message'
 import { bilibili_login } from "./bilibili_login"
-import css from './settings.scss'
+import css from './settings.css'
 
 const balh_feature_runPing = function () {
     const pingOutput = document.getElementById('balh_server_ping');
@@ -256,7 +256,7 @@ export function settings() {
         _('div', { style: { position: 'absolute', background: '#FFF', borderRadius: '10px', padding: '20px', top: '50%', left: '50%', width: '600px', transform: 'translate(-50%,-50%)', cursor: 'default' } }, [
             _('h1', {}, [_('text', `${GM_info.script.name} v${GM_info.script.version} 参数设置`)]),
             _('br'),
-            _('h6', { style: { color: '#d01d00', display: balh_config.server_custom ? 'none' : '' } }, [_('text', 'BiliPlus已被屏蔽，请填写自定义代理服务, 详见: '), _('a', { href: 'https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BB%A3%E7%90%86%E6%9C%8D%E5%8A%A1%E5%99%A8', target: '_blank' }, [_('text', '帮助>自定义代理服务器')])]),
+            _('h6', { style: { color: '#d01d00', display: balh_config.server_custom ? 'none' : '' } }, [_('text', 'BiliPlus已被屏蔽，请填写自定义代理服务, 详见: '), _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BB%A3%E7%90%86%E6%9C%8D%E5%8A%A1%E5%99%A8', target: '_blank' }, [_('text', '帮助>自定义代理服务器')])]),
             _('br'),
             _('form', { id: 'balh-settings-form', event: { change: onSettingsFormChange } }, [
                 _('text', '代理服务器：'), _('a', { href: 'javascript:', event: { click: balh_feature_runPing } }, [_('text', '测速')]), _('br'),
@@ -375,7 +375,7 @@ export function settings() {
                 ]), _('br'),
                 _('text', '其他：'), _('br'),
                 _('div', { style: { display: 'flex' } }, [
-                    _('label', { style: { flex: 1 } }, [_('input', { type: 'checkbox', name: 'balh_blocked_vip' }), _('text', '被永封的大会员'), _('a', { href: 'https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md#大会员账号被b站永封了', target: '_blank' }, [_('text', '(？)')])]),
+                    _('label', { style: { flex: 1 } }, [_('input', { type: 'checkbox', name: 'balh_blocked_vip' }), _('text', '被永封的大会员'), _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E5%85%B3%E4%BA%8E%E8%A2%AB%E6%B0%B8%E5%B0%81%E7%9A%84%E5%A4%A7%E4%BC%9A%E5%91%98%E9%80%89%E9%A1%B9', target: '_blank' }, [_('text', '(？)')])]),
                     _('label', { style: { flex: 1 } }, [_('input', { type: 'checkbox', name: 'balh_enable_in_av' }), _('text', '在AV页面启用'), _('a', { href: 'https://github.com/ipcjs/bilibili-helper/issues/172', target: '_blank' }, [_('text', '(？)')])]),
                     _('div', { style: { flex: 1, display: 'flex' } }, [
                         _('label', { style: { flex: 1 } }, [_('input', { type: 'checkbox', name: 'balh_remove_pre_ad' }), _('text', '去前置广告')]),
@@ -395,14 +395,14 @@ export function settings() {
                 _('a', { href: 'javascript:', event: { click: function () { util_ui_msg.show(window.$(this), '如果你的帐号进行了付费，不论是大会员还是承包，\n进行授权之后将可以在解除限制时正常享有这些权益\n\n你可以随时在这里授权或取消授权\n\n不进行授权不会影响脚本的正常使用，但可能会缺失1080P', 1e4); } } }, [_('text', '（这是什么？）')]),
                 _('br'), _('br'),
                 _('div', { style: { whiteSpace: 'pre-wrap' }, event: { mouseenter: onMouseEnterSettingBottom } }, [
-                    _('a', { href: 'https://greasyfork.org/zh-CN/scripts/25718-%E8%A7%A3%E9%99%A4b%E7%AB%99%E5%8C%BA%E5%9F%9F%E9%99%90%E5%88%B6', target: '_blank' }, [_('text', '脚本主页')]),
+                    _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper', target: '_blank' }, [_('text', '脚本主页')]),
                     _('text', '　'),
-                    _('a', { href: 'https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md', target: '_blank' }, [_('text', '帮助说明')]),
+                    _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md', target: '_blank' }, [_('text', '帮助说明')]),
                     _('text', '　'),
                     _('a', { id: 'balh-copy-log', href: 'javascript:;', event: { click: onCopyClick } }, [_('text', '复制日志&问题反馈')]),
                     _('text', '　'),
                     _('a', { id: 'balh-issue-link', href: 'javascript:;', event: { click: openIssuePage }, style: { display: 'none' } }, [_('text', '问题反馈')]),
-                    _('a', { href: 'https://github.com/ipcjs/bilibili-helper/graphs/contributors' }, [_('text', '贡献者')]),
+                    _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/graphs/contributors' }, [_('text', '贡献者')]),
                     _('text', ' 接口：'),
                     _('a', { href: 'https://www.biliplus.com/' }, [_('text', 'BiliPlus ')]),
                     _('a', { href: 'https://github.com/kghost/bilibili-area-limit' }, [_('text', 'kghost ')]),

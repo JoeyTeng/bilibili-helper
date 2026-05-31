@@ -22,9 +22,9 @@ export const r = {
     html: {},
     attr: {},
     url: {
-        issue: 'https://github.com/ipcjs/bilibili-helper/issues',
-        issue_new: 'https://github.com/ipcjs/bilibili-helper/issues/new',
-        readme: 'https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md#%E8%A7%A3%E9%99%A4b%E7%AB%99%E5%8C%BA%E5%9F%9F%E9%99%90%E5%88%B6',
+        issue: 'https://github.com/JoeyTeng/bilibili-helper/issues',
+        issue_new: 'https://github.com/JoeyTeng/bilibili-helper/issues/new',
+        readme: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E8%A7%A3%E9%99%A4b%E7%AB%99%E5%8C%BA%E5%9F%9F%E9%99%90%E5%88%B6',
     },
     script: {
         is_dev: Scripts.isDev,

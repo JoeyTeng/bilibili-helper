@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         解除B站区域限制.dev
-// @namespace    https://github.com/ipcjs
+// @namespace    https://github.com/JoeyTeng
 // @version      8.4.3
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
-// @supportURL   https://github.com/ipcjs/bilibili-helper/blob/user.js/packages/unblock-area-limit/README.md
+// @supportURL   https://github.com/JoeyTeng/bilibili-helper
 // @compatible   chrome
 // @compatible   firefox
 // @license      MIT
@@ -34,7 +34,7 @@
 1. 给脚本管理扩展(Tampermonkey等)赋予文件访问权限
 2. 新建本地脚本, 将当前文件内容粘贴进去
 3. 依据你本地文件路径, 修改@require部分的url
-4. npm install, 安装依赖
+4. pnpm install, 安装依赖
 5. pnpm run dev, 打包最终的脚本文件
 6. 编辑本地代码后, 刷新网页, 就可让新的内容生效
 `;
