@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.10
+// @version      8.5.11
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -64,7 +64,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260601T114549163Z"
+    const __BALH_BUILD_VERSION__ = "20260601T153054911Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -3197,13 +3197,17 @@ function scriptSource(invokeBy) {
           ep.badge_type = 0;
         }
       }
+      function removeSeasonRightsAreaLimit(rights) {
+        if (!rights) return;
+        rights.area_limit = 0;
+        rights.ban_area_show = 0;
+        rights.can_watch = 1;
+      }
       function removeSeasonAreaLimit(season) {
         if (!season) return;
-        if (season.rights) {
-          season.rights.area_limit = 0;
-          season.rights.ban_area_show = 0;
-          season.rights.can_watch = 1;
-        }
+        removeSeasonRightsAreaLimit(season.rights);
+        removeSeasonRightsAreaLimit(season.mediaInfo?.rights);
+        removeSeasonRightsAreaLimit(season.seasonInfo?.mediaInfo?.rights);
         season.episodes?.forEach(removeEpAreaLimit);
         season.initEpList?.forEach(removeEpAreaLimit);
         season.mediaInfo?.episodes?.forEach(removeEpAreaLimit);
@@ -3453,6 +3457,16 @@ function scriptSource(invokeBy) {
               }
             }
           }
+          function normalizeProxyPlayUrl(playUrl) {
+            if (!playUrl) return playUrl;
+            if (playUrl.dash) {
+              Objects.convertKeyToSnakeCase(playUrl.dash);
+            }
+            if (!window.__balh_app_only__ && balh_config.upos_server) {
+              return Converters.replaceUpos(playUrl, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
+            }
+            return playUrl;
+          }
           function redactProxyHost(proxyHost) {
             try {
               const url = new URL(proxyHost);
@@ -3472,7 +3486,7 @@ function scriptSource(invokeBy) {
           function fetchPlayInfoByProxy(value) {
             const arc = value?.result?.arc;
             const episode = value?.result?.supplement?.ogv_episode_info;
-            if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return void 0;
+            if (!arc?.cid || !episode?.episode_id) return void 0;
             util_debug("replace playinfo by proxy start", {
               epId: String(episode.episode_id),
               aid: arc.aid,
@@ -3496,6 +3510,7 @@ function scriptSource(invokeBy) {
             addCandidate(balh_config.server_custom_th, "th");
             addCandidate(balh_config.server_custom_hk, "hk");
             addCandidate(balh_config.server_custom_tw, "tw");
+            if (!candidates.length) return void 0;
             const params = new URLSearchParams({
               avid: String(arc.aid || ""),
               cid: String(arc.cid),
@@ -3517,26 +3532,37 @@ function scriptSource(invokeBy) {
               const query = `${candidateParams}${access_key_param_if_exist(true)}`;
               const originUrl = `//api.bilibili.com/pgc/player/web/playurl?${candidateParams}`;
               const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost);
-              const url = candidate.area === "th" && isBilibiliApiProxy ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area) : isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
+              const shouldUseMobiPlayUrl = candidate.area === "th" || window.__balh_app_only__ === true;
+              if (shouldUseMobiPlayUrl && !localStorage.access_key) {
+                util_warn("skip mobi proxy candidate without access_key", describeProxyCandidate(candidate));
+                return requestCandidate(index + 1);
+              }
+              const url = (() => {
+                if (shouldUseMobiPlayUrl) {
+                  return isBilibiliApiProxy ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area) : `${candidate.proxyHost}?${generateMobiPlayUrlParams(originUrl, candidate.area)}`;
+                }
+                return isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
+              })();
               return Promise2.race([
                 Async.ajax(url),
                 Async.timeout(8e3).then(() => Promise2.reject(new Error("proxy playurl timeout")))
               ]).then((json) => {
-                const playUrl = candidate.area === "th" && json?.data?.video_info ? fixThailandPlayUrlJson(json) : Promise2.resolve(json?.result || json?.data);
+                const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info ? fixThailandPlayUrlJson(json) : window.__balh_app_only__ === true && json?.type === "DASH" ? fixMobiPlayUrlJson(json) : Promise2.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data);
                 return playUrl.then((playUrl2) => ({ json, playUrl: playUrl2 }));
               }).then(({ json, playUrl }) => {
-                if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl);
+                if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || shouldUseMobiPlayUrl && normalizedPlayUrl?.dash) && normalizedPlayUrl?.dash) {
                   util_debug("replace playinfo by proxy success", {
                     epId: String(episode.episode_id),
                     proxyHost: redactProxyHost(candidate.proxyHost),
                     area: candidate.area,
-                    videoCount: playUrl.dash?.video?.length,
-                    audioCount: playUrl.dash?.audio?.length
+                    videoCount: normalizedPlayUrl.dash?.video?.length,
+                    audioCount: normalizedPlayUrl.dash?.audio?.length
                   });
                   value.result.play_video_type = "dash";
                   delete value.result.play_check;
-                  value.result.video_info = playUrl;
-                  value.video_info = playUrl;
+                  value.result.video_info = normalizedPlayUrl;
+                  value.video_info = normalizedPlayUrl;
                   removePlayInfoAreaLimit(value);
                   return value;
                 }
