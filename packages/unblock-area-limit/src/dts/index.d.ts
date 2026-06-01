@@ -1,7 +1,3 @@
-
-/** https://static.hdslb.com/js/md5.js */
-declare var hex_md5: (hex: string) => string
-
 /** {@link NonNullable} 的反义词 */
 type Nullable<T> = T | null | undefined
 

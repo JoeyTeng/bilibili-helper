@@ -1,5 +1,6 @@
 import { BOOL } from "../feature/r";
 import { util_error } from "./log";
+import { md5Hex } from "./md5";
 
 
 /** @see https://github.com/yujincheng08/BiliRoaming/blob/f689b138da7ac45d2591d375f19698c969844324/app/src/main/res/values/strings.xml#L112-L131 */
@@ -111,7 +112,7 @@ export namespace Converters {
             data += (data ? "&" : "") + s_keys[i] + "=" + encodeURIComponent(params[s_keys[i]]);
         }
         return {
-            sign: hex_md5(data + key),
+            sign: md5Hex(data + key),
             params: data,
         };
     }
