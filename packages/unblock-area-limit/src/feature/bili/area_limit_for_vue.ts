@@ -1,5 +1,7 @@
 import { BiliBiliApi } from "../../api/bilibili"
-import { BiliPlusApi } from "../../api/biliplus"
+import { access_key_param_if_exist } from "../../api/bilibili-utils"
+import { BiliPlusApi, fixThailandPlayUrlJson, getMobiPlayUrl } from "../../api/biliplus"
+import { Async, Promise as NativePromise } from "../../util/async"
 import { BalhDb } from "../../util/balh-db"
 import { Converters } from "../../util/converters"
 import { cookieStorage } from "../../util/cookie"
@@ -13,6 +15,7 @@ import { ifNotNull } from "../../util/utils"
 import { Windows } from "../../util/windows"
 import { balh_config, isClosed } from "../config"
 import { util_page } from "../page"
+import { r } from "../r"
 import pageTemplate from './bangumi-play-page-template.html'
 import { bilibili_login } from "./bilibili_login"
 
@@ -130,6 +133,9 @@ function fixBangumiPlayPage() {
             cookieStorage.set('balh_curr_season_id', window?.__INITIAL_STATE__?.mediaInfo?.season_id, '')
         }
         if (util_page.anime_ep() || util_page.anime_ss()) {
+            if (document.getElementById('__next') || document.getElementById('__NEXT_DATA__')) {
+                return
+            }
             // 旧版偶尔会出现client-app，why？
             const $app = document.getElementById('app') || document.getElementById('client-app');
             if ((!$app || invalidInitialState) && !window.__NEXT_DATA__) {
@@ -399,6 +405,7 @@ function fixBangumiPlayPage() {
 }
 
 export function removeEpAreaLimit(ep: StringAnyObject) {
+    if (!ep) return
     if (ep.epRights) {
         ep.epRights.area_limit = false
         ep.epRights.allow_dm = 1
@@ -407,10 +414,28 @@ export function removeEpAreaLimit(ep: StringAnyObject) {
         ep.rights.area_limit = 0
         ep.rights.allow_dm = 1
     }
-    if (ep.badge === '受限' || ep.badge_info.text === '受限') {
+    if (ep.badge === '受限' || ep.badge_info?.text === '受限') {
         ep.badge = ''
         ep.badge_info = { "bg_color": "#FB7299", "bg_color_night": "#BB5B76", "text": "" }
         ep.badge_type = 0
+    }
+}
+
+function removeSeasonAreaLimit(season: StringAnyObject | undefined) {
+    if (!season) return
+    if (season.rights) {
+        season.rights.area_limit = 0
+        season.rights.ban_area_show = 0
+        season.rights.can_watch = 1
+    }
+    season.episodes?.forEach(removeEpAreaLimit)
+    season.initEpList?.forEach(removeEpAreaLimit)
+    season.mediaInfo?.episodes?.forEach(removeEpAreaLimit)
+    season.seasonInfo?.mediaInfo?.episodes?.forEach(removeEpAreaLimit)
+    season.sections?.forEach((section: StringAnyObject) => section?.episodes?.forEach(removeEpAreaLimit))
+    season.section?.forEach((section: StringAnyObject) => section?.episodes?.forEach(removeEpAreaLimit))
+    if (season.epMap) {
+        Object.keys(season.epMap).forEach(epId => removeEpAreaLimit(season.epMap[epId]))
     }
 }
 
@@ -426,6 +451,155 @@ export function area_limit_for_vue() {
         log("window.__playinfo__", window.__playinfo__)
         window.__playinfo__origin = window.__playinfo__
         let playinfo: any = undefined
+        function shouldReplaceHydrationPlayInfo(value: any) {
+            return (util_page.anime_ep() || util_page.anime_ss())
+                && value?.result?.supplement?.ogv_episode_info
+                && value?.result?.supplement?.ogv_season_info
+                && value?.result?.play_video_type === 'none'
+        }
+        function removePlayInfoAreaLimit(value: any) {
+            const plugins = value?.result?.plugins
+            if (!Array.isArray(plugins)) return
+            for (const plugin of plugins) {
+                if (plugin?.name === 'AreaLimitPanel') {
+                    plugin.config = { ...plugin.config, is_block: false }
+                }
+            }
+        }
+        function fetchPlayInfoByProxy(value: any) {
+            const arc = value?.result?.arc
+            const episode = value?.result?.supplement?.ogv_episode_info
+            if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return undefined
+            const candidates: { proxyHost: string, area: string }[] = []
+            const addCandidate = (proxyHost: string | undefined, area: string) => {
+                if (!proxyHost) return
+                proxyHost = proxyHost.replace(/\/$/, '')
+                if (candidates.some(it => it.proxyHost === proxyHost && it.area === area)) return
+                candidates.push({ proxyHost, area })
+            }
+            if (/(僅|仅)限?港澳/.test(document.title) && balh_config.server_custom_hk) {
+                addCandidate(balh_config.server_custom_hk, 'hk')
+            } else if (/(僅|仅)限?(臺|台)(灣|湾)/.test(document.title) && balh_config.server_custom_tw) {
+                addCandidate(balh_config.server_custom_tw, 'tw')
+            }
+            addCandidate(balh_config.server_custom, '')
+            addCandidate(balh_config.server_custom_cn, 'cn')
+            addCandidate(balh_config.server_custom_th, 'th')
+            addCandidate(balh_config.server_custom_hk, 'hk')
+            addCandidate(balh_config.server_custom_tw, 'tw')
+            const params = new URLSearchParams({
+                avid: String(arc.aid || ''),
+                cid: String(arc.cid),
+                qn: '64',
+                type: '',
+                otype: 'json',
+                ep_id: String(episode.episode_id),
+                fourk: '1',
+                fnver: '0',
+                fnval: '4048',
+                session: '',
+                module: 'bangumi',
+            })
+            const requestCandidate = (index: number): Promise<any> => {
+                const candidate = candidates[index]
+                if (!candidate) return NativePromise.reject(new Error('proxy playurl failed'))
+                const candidateParams = new URLSearchParams(params)
+                if (candidate.area) candidateParams.set('area', candidate.area)
+                const query = `${candidateParams}${access_key_param_if_exist(true)}`
+                const originUrl = `//api.bilibili.com/pgc/player/web/playurl?${candidateParams}`
+                const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost)
+                const url = candidate.area === 'th' && isBilibiliApiProxy
+                    ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area)
+                    : isBilibiliApiProxy
+                    ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}`
+                    : `${candidate.proxyHost}?${query}`
+                return NativePromise.race([
+                    Async.ajax<any>(url),
+                    Async.timeout(8000).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
+                ]).then(json => {
+                    const playUrl = candidate.area === 'th' && json?.data?.video_info
+                        ? fixThailandPlayUrlJson(json)
+                        : NativePromise.resolve(json?.result || json?.data)
+                    return playUrl.then(playUrl => ({ json, playUrl }))
+                }).then(({ json, playUrl }) => {
+                    if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                        value.result.play_video_type = 'dash'
+                        delete value.result.play_check
+                        value.result.video_info = playUrl
+                        value.video_info = playUrl
+                        removePlayInfoAreaLimit(value)
+                        return value
+                    }
+                    return NativePromise.reject(json)
+                }).catch(error => {
+                    util_warn('replace playinfo by proxy candidate failed', candidate, error)
+                    return requestCandidate(index + 1)
+                })
+            }
+            return requestCandidate(0)
+        }
+        function deferNanoCreatePlayer(playInfoPromise: Promise<any>) {
+            const installCreatePlayerWrapper = (nano: any): boolean => {
+                if (!nano) return false
+                if (nano.__balh_create_player_deferred__) return true
+                if (!nano.createPlayer) {
+                    if (nano.__balh_waiting_create_player__) return true
+                    nano.__balh_waiting_create_player__ = true
+                    let createPlayerValue = nano.createPlayer
+                    Object.defineProperty(nano, 'createPlayer', {
+                        configurable: true,
+                        enumerable: true,
+                        get: () => createPlayerValue,
+                        set: (value) => {
+                            createPlayerValue = value
+                            installCreatePlayerWrapper(nano)
+                        },
+                    })
+                    return true
+                }
+                nano.__balh_create_player_deferred__ = true
+                const createPlayer = nano.createPlayer
+                nano.createPlayer = function (config: any) {
+                    if (config?.prefetch?.playUrl?.result?.play_video_type !== 'none') {
+                        return createPlayer.apply(this, arguments as any)
+                    }
+                    config.prefetch.playUrl = undefined
+                    config.requestConfig = {
+                        ...config.requestConfig,
+                        reqHttpPlayUrlInfo: () => playInfoPromise
+                            .then(value => {
+                                playinfo = value
+                                ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
+                                return { status: 200, data: value }
+                            })
+                            .catch(error => {
+                                util_warn('replace playinfo by proxy failed', error)
+                                return NativePromise.reject(error)
+                            }),
+                    }
+                    return createPlayer.apply(this, arguments as any)
+                }
+                return true
+            }
+            const currentNano = (window as any).nano
+            if (installCreatePlayerWrapper(currentNano)) return
+            const anyWindow = window as any
+            if (anyWindow.__balh_waiting_nano__) return
+            anyWindow.__balh_waiting_nano__ = true
+            let nanoValue = currentNano
+            Object.defineProperty(window, 'nano', {
+                configurable: true,
+                enumerable: true,
+                get: () => nanoValue,
+                set: (value) => {
+                    nanoValue = value
+                    installCreatePlayerWrapper(value)
+                },
+            })
+            if (nanoValue) {
+                anyWindow.nano = nanoValue
+            }
+        }
         // 将__playinfo__置空, 让播放器去重新加载它...
         Object.defineProperty(window, '__playinfo__', {
             configurable: true,
@@ -441,6 +615,13 @@ export function area_limit_for_vue() {
                 if (!window.__playinfo__origin && window.document.readyState === 'loading') {
                     log('__playinfo__', 'init in html', value)
                     window.__playinfo__origin = value
+                    if (shouldReplaceHydrationPlayInfo(value)) {
+                        const playInfoPromise = fetchPlayInfoByProxy(value)
+                        if (playInfoPromise) {
+                            deferNanoCreatePlayer(playInfoPromise)
+                        }
+                        return
+                    }
                     return
                 }
                 playinfo = value
@@ -485,23 +666,29 @@ export function area_limit_for_vue() {
                     if (!queries) return value
                     for (const query of queries) {
                         const data = query.state.data
-                        switch (query.queryKey[0]) {
+                        switch (query.queryKey?.[0]) {
                             case 'pgc/view/web/season':
                                 if (data.epMap) {
                                     // 最重要的一项数据, 直接决定页面是否可播放
-                                    Object.keys(data.epMap).forEach(epId => removeEpAreaLimit(data.epMap[epId]))
-                                    data.mediaInfo.episodes.forEach(removeEpAreaLimit)
+                                    removeSeasonAreaLimit(data)
                                     // 其他字段对结果似乎没有影响, 故注释掉(
                                     // data.mediaInfo.hasPlayableEp = true
                                     // data.initEpList.forEach(removeEpAreaLimit)
                                     // data.rights.area_limit = false
                                     // data.rights.allow_dm = 1
-                                } else if (data.seasonInfo.mediaInfo.episodes.length > 0) {
-                                    data.seasonInfo.mediaInfo.episodes.forEach(removeEpAreaLimit)
-                                } else if (data.seasonInfo && !data.seasonInfo.mediaInfo.rights.can_watch) {
+                                } else if (data.seasonInfo?.mediaInfo?.episodes?.length > 0) {
+                                    removeSeasonAreaLimit(data)
+                                } else if (data.seasonInfo && !data.seasonInfo.mediaInfo?.rights?.can_watch) {
                                     // 新版没有Playable的是预告 PV，不能直接跳过，can_watch=false 才替换
                                     return;
                                 }
+                                break;
+                            case 'pgc/view/web/simple/season':
+                                removeSeasonAreaLimit(data)
+                                break;
+                            case 'pgc/view/web/ep/list':
+                                data.episodes?.forEach(removeEpAreaLimit)
+                                data.sections?.forEach((section: StringAnyObject) => section?.episodes?.forEach(removeEpAreaLimit))
                                 break;
                             case 'season/user/status':
                                 processUserStatus(data)
