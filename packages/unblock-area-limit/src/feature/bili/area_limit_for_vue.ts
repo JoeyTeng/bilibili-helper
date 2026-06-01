@@ -421,13 +421,18 @@ export function removeEpAreaLimit(ep: StringAnyObject) {
     }
 }
 
+function removeSeasonRightsAreaLimit(rights: StringAnyObject | undefined) {
+    if (!rights) return
+    rights.area_limit = 0
+    rights.ban_area_show = 0
+    rights.can_watch = 1
+}
+
 function removeSeasonAreaLimit(season: StringAnyObject | undefined) {
     if (!season) return
-    if (season.rights) {
-        season.rights.area_limit = 0
-        season.rights.ban_area_show = 0
-        season.rights.can_watch = 1
-    }
+    removeSeasonRightsAreaLimit(season.rights)
+    removeSeasonRightsAreaLimit(season.mediaInfo?.rights)
+    removeSeasonRightsAreaLimit(season.seasonInfo?.mediaInfo?.rights)
     season.episodes?.forEach(removeEpAreaLimit)
     season.initEpList?.forEach(removeEpAreaLimit)
     season.mediaInfo?.episodes?.forEach(removeEpAreaLimit)
@@ -781,7 +786,7 @@ export function area_limit_for_vue() {
                         : NativePromise.resolve(json?.result || json?.data)
                     return playUrl.then(playUrl => ({ json, playUrl }))
                 }).then(({ json, playUrl }) => {
-                    if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                    if ((json?.code === 0 || playUrl?.code === 0 || (shouldUseMobiPlayUrl && playUrl?.dash)) && playUrl?.dash) {
                         log('replace playinfo by proxy success', {
                             epId: String(episode.episode_id),
                             proxyHost: redactProxyHost(candidate.proxyHost),
