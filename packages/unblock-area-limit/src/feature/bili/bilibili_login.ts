@@ -1,5 +1,3 @@
-import { Async } from "../../util/async"
-import { Converters } from "../../util/converters"
 import { cookieStorage } from "../../util/cookie"
 import { util_init } from "../../util/initiator"
 import { _ } from "../../util/react"
@@ -10,12 +8,19 @@ import { FALSE, TRUE, r } from "../r"
 
 
 function isLogin() {
-    return localStorage.access_key && localStorage.oauth_expires_at && Date.now() < +localStorage.oauth_expires_at
+    if (!localStorage.access_key) {
+        return false
+    }
+    if (!localStorage.oauth_expires_at) {
+        return true
+    }
+    return Date.now() < +localStorage.oauth_expires_at
 }
 
 function clearLoginFlag() {
-    // 只要清除过期时间, isLogin()就会返回false
     delete localStorage.oauth_expires_at
+    delete localStorage.access_key
+    delete localStorage.refresh_token
 }
 
 function showLogout() {
@@ -65,77 +70,95 @@ function checkLoginState() {
     localStorage.balh_pre_server = balh_config.server
 }
 
-async function showLogin() {
-    const balh_auth_window = window.open('about:blank')!;
-    balh_auth_window.document.title = 'BALH - 授权';
-    balh_auth_window.document.body.innerHTML = '<meta charset="UTF-8" name="viewport" content="width=device-width">正在获取授权，请稍候……';
-    window.balh_auth_window = balh_auth_window;
+function normalizeExpiresAt(value: string | null) {
+    if (!value) {
+        return ''
+    }
+    const timestamp = Number(value)
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        return ''
+    }
+    return String(timestamp < 1e12 ? timestamp * 1000 : timestamp)
+}
 
-    try {
-        const { sign, params } = Converters.generateSign({
-            appkey: '27eb53fc9058f8c3',
-            local_id: "0",
-            ts: (Date.now() / 1000).toFixed(0)
-        }, 'c2ed53a74eeefe3cf99fbd01d8c9c375')
-        const data1 = await (await fetch('https://passport.bilibili.com/x/passport-tv-login/qrcode/auth_code?' + params + '&sign=' + sign, {
-            method: 'POST'
-        })).json()
+function saveCredentials(credentials: StringStringObject) {
+    if (!credentials.access_key) {
+        return false
+    }
 
-        if (data1.code === 0 && data1.data.auth_code) {
-            let authCode = data1.data.auth_code
-            balh_auth_window.document.body.innerHTML += '<br/>正在确认…… auth_code=' + authCode;
-            const bili_jct = cookieStorage.get('bili_jct')
-            const { params } = Converters.generateSign({
-                auth_code: authCode,
-                build: "7082000",
-                csrf: bili_jct
-            }, 'c2ed53a74eeefe3cf99fbd01d8c9c375')
-            const data2 = await (await fetch(('https://passport.bilibili.com/x/passport-tv-login/h5/qrcode/confirm?' + params), {
-                method: 'POST',
-                credentials: 'include',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                }
-            })).json()
+    localStorage.access_key = credentials.access_key
+    if (credentials.refresh_token) {
+        localStorage.refresh_token = credentials.refresh_token
+    } else {
+        delete localStorage.refresh_token
+    }
 
-            if (data2.code === 0 && data2.message === "0") {
-                balh_auth_window.document.body.innerHTML += '<br/>授权成功，正在获取token……';
-                const { sign, params } = Converters.generateSign({
-                    appkey: '27eb53fc9058f8c3',
-                    local_id: "0",
-                    auth_code: authCode,
-                    ts: (Date.now() / 1000).toFixed(0)
-                }, 'c2ed53a74eeefe3cf99fbd01d8c9c375')
-                const data3 = await (await fetch('https://passport.bilibili.com/x/passport-tv-login/qrcode/poll?' + params + '&sign=' + sign, {
-                    method: "POST",
-                })).json()
+    const oauthExpiresAt = normalizeExpiresAt(credentials.oauth_expires_at || credentials.expires_at || '')
+    const expiresIn = Number(credentials.expires_in || '')
+    if (oauthExpiresAt) {
+        localStorage.oauth_expires_at = oauthExpiresAt
+    } else if (Number.isFinite(expiresIn) && expiresIn > 0) {
+        localStorage.oauth_expires_at = String(Date.now() + expiresIn * 1000)
+    } else {
+        delete localStorage.oauth_expires_at
+    }
+    localStorage.balh_must_remind_login_v3 = FALSE
+    return true
+}
 
-                const access_token = data3.data.token_info.access_token
-                const oauth_expires_at = (Date.now() / 1000 + data3.data.token_info.expires_in) * 1000
-                balh_auth_window.document.body.innerHTML += '<br/>正在保存…… access_token=' + access_token + '， 过期于 ' + new Date(oauth_expires_at).toLocaleString();
-                if (data3.code === 0 && data3.message === "0") {
-                    localStorage.access_key = access_token
-                    localStorage.refresh_token = data3.data.token_info.refresh_token
-                    localStorage.oauth_expires_at = oauth_expires_at
-                    balh_auth_window.document.body.innerHTML += '<br/>保存成功！3秒后关闭';
-                    await Async.timeout(3000)
-                }
-            } else {
-                ui.alert(data2.message, () => {
-                    location.href = 'https://passport.bilibili.com/login'
-                })
-            }
-        } else {
-            ui.alert('必须登录B站才能正常授权', () => {
-                location.href = 'https://passport.bilibili.com/login'
-            })
-        }
-    } catch (e: any) {
-        ui.alert(e.message ?? '授权出错')
-    } finally {
-        balh_auth_window.close()
+function readCredentials(message: string) {
+    const payload = message.slice('balh-login-credentials:'.length).trim()
+    if (payload.startsWith('{')) {
+        return JSON.parse(payload)
+    }
+
+    const params = new URL(payload).searchParams
+    return {
+        access_key: params.get('access_key') || params.get('access_token') || '',
+        refresh_token: params.get('refresh_token') || '',
+        oauth_expires_at: params.get('oauth_expires_at') || params.get('expires_at') || '',
+        expires_in: params.get('expires_in') || '',
     }
 }
+
+function showLogin() {
+    const authUrl = new URL('/login', r.const.server.S1)
+    authUrl.searchParams.set('balh_auth', '1')
+    authUrl.searchParams.set('balh_auth_origin', location.origin)
+
+    const balh_auth_window = window.open(authUrl.href, 'balh_auth_window')
+    if (!balh_auth_window) {
+        ui.alert('授权窗口被浏览器拦截了，请允许弹窗后重试')
+        return
+    }
+    window.balh_auth_window = balh_auth_window
+
+    ui.pop({
+        content: [
+            _('text', '已打开 BiliPlus 授权窗口。\n\n请在新窗口完成登录；登录成功后脚本会自动保存 access_key。')
+        ],
+        closeBtn: '我知道了',
+    })
+}
+
+window.addEventListener('message', function (e) {
+    if (e.origin !== r.const.server.S1 || typeof e.data !== 'string' || !e.data.startsWith('balh-login-credentials:')) {
+        return
+    }
+
+    try {
+        const credentials = readCredentials(e.data)
+        if (!saveCredentials(credentials)) {
+            ui.alert('授权返回中没有 access_key，请确认 BiliPlus 登录是否成功')
+            return
+        }
+        window.balh_auth_window?.close()
+        document.querySelector('#AHP_Notice')?.remove()
+        ui.alert('授权成功，access_key 已保存')
+    } catch (error: any) {
+        ui.alert(error?.message ?? '授权返回解析失败')
+    }
+})
 
 util_init(() => {
     if (!(util_page.player() || util_page.av())) {

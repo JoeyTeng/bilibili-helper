@@ -22,6 +22,7 @@
 // @match        *://space.bilibili.com/*
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
+// @match        https://www.biliplus.com/*
 // @match        https://www.mcbbs.net/template/mcbbs/image/special_photo_bg.png*
 // @run-at       document-start
 // @grant        none
