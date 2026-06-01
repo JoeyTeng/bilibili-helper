@@ -528,7 +528,15 @@ export const area_limit_xhr = (() => {
         }
 
         function isBangumiPage() {
-            const mediaInfo = window.__INITIAL_STATE__?.mediaInfo || window.__NEXT_DATA__?.props.pageProps.dehydratedState?.queries[0]?.state.data.seasonInfo?.mediaInfo
+            const queries = window.__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries
+            const seasonData = queries?.find?.((query: any) => {
+                const key = query?.queryKey?.[0]
+                return key === 'pgc/view/web/season' || key === 'pgc/view/web/simple/season'
+            })?.state?.data
+            const mediaInfo = window.__INITIAL_STATE__?.mediaInfo
+                || seasonData?.seasonInfo?.mediaInfo
+                || seasonData?.mediaInfo
+                || seasonData
             return isBangumi(mediaInfo?.season_type || mediaInfo?.ssType)
         }
 

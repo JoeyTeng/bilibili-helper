@@ -3,6 +3,7 @@ import { balh_config } from "../feature/config";
 import { Async } from "../util/async";
 import { Converters, uposMap } from "../util/converters";
 import { addNoRefererHost } from "../util/inject-xhr";
+import { md5Hex } from "../util/md5";
 import { access_key_param_if_exist } from "./bilibili-utils";
 
 function convertPlayUrl(originUrl: string) {
@@ -95,7 +96,7 @@ export function generateMobiPlayUrlParams(originUrl: String, area: string) {
         plaintext = mobi_api_params.slice(0, -1) + `25bdede4e1581c836cab73a48790ca6e`;
     }
     // 生成 sign
-    let ciphertext = hex_md5(plaintext);
+    let ciphertext = md5Hex(plaintext);
     return `${mobi_api_params}sign=${ciphertext}`;
 }
 

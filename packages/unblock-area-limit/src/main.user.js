@@ -8,7 +8,6 @@
 // @compatible   chrome
 // @compatible   firefox
 // @license      MIT
-// @require      https://static.hdslb.com/js/md5.js
 // @match        *://www.bilibili.com/video/av*
 // @match        *://www.bilibili.com/video/BV*
 // @match        *://www.bilibili.com/bangumi/play/ep*
@@ -44,17 +43,6 @@ function injector() {
         log(`脚本已经注入过, 不需要执行`)
         return
     }
-    // @require      https://static.hdslb.com/js/md5.js
-    // @require      https://unpkg.com/opencc-js@1.0.5/dist/umd/full.js
-    GM_info.scriptMetaStr.replace(new RegExp('// @require\\s+https?:(//.*)'), (match, /*p1:*/url) => {
-        log('@require:', url)
-        let $script = document.createElement('script')
-        $script.className = 'balh-injector-require'
-        $script.setAttribute('type', 'text/javascript')
-        $script.setAttribute('src', url)
-        document.head.appendChild($script)
-        return match
-    })
     let $script = document.createElement('script')
     $script.id = 'balh-injector-source'
     $script.appendChild(document.createTextNode(`

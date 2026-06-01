@@ -10,10 +10,12 @@
   "devDependencies": {
     "@types/greasemonkey": "^4.0.2",
     "esbuild": "^0.28.0",
+    "playwright": "^1.60.0",
     "typescript": "^5.8.2"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "debug:bangumi": "node scripts/debug-bangumi.mjs",
     "dev": "node scripts/build.mjs --watch",
     "dev:balh": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",

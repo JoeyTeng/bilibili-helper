@@ -8,7 +8,6 @@
 // @compatible   chrome
 // @compatible   firefox
 // @license      MIT
-// @require      https://static.hdslb.com/js/md5.js
 // @match        *://www.bilibili.com/video/av*
 // @match        *://www.bilibili.com/video/BV*
 // @match        *://www.bilibili.com/bangumi/play/ep*
