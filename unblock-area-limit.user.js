@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.8
+// @version      8.5.9
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -3224,8 +3224,58 @@ function scriptSource(invokeBy) {
           window.__playinfo__origin = initialPlayInfo;
           let playinfo = void 0;
           let currentPlayInfoPromise;
+          let currentPlayInfoEpId;
+          let currentPlayInfoRequestId = 0;
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
+          }
+          function getPlayInfoEpId(value) {
+            const epId = value?.result?.supplement?.ogv_episode_info?.episode_id;
+            return epId == null ? void 0 : String(epId);
+          }
+          function getCurrentEpId() {
+            return window.location.pathname.match(/\/bangumi\/play\/ep(\d+)/)?.[1];
+          }
+          function findEpisodeInSeason(season, epId) {
+            if (!season) return void 0;
+            const isTargetEpisode = (ep) => {
+              const id = ep?.ep_id ?? ep?.episode_id ?? ep?.id;
+              return id != null && String(id) === epId && ep?.cid;
+            };
+            const findInList = (list) => Array.isArray(list) ? list.find(isTargetEpisode) : void 0;
+            return season.epMap && isTargetEpisode(season.epMap[epId]) && season.epMap[epId] || findInList(season.episodes) || findInList(season.initEpList) || findInList(season.mediaInfo?.episodes) || findInList(season.seasonInfo?.mediaInfo?.episodes) || season.sections?.map((section) => findInList(section?.episodes)).find(Boolean) || season.section?.map((section) => findInList(section?.episodes)).find(Boolean);
+          }
+          function findCurrentEpisode() {
+            const epId = getCurrentEpId();
+            if (!epId) return void 0;
+            const nextQueries = window.__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries;
+            if (Array.isArray(nextQueries)) {
+              for (const query of nextQueries) {
+                const episode = findEpisodeInSeason(query?.state?.data, epId);
+                if (episode) return episode;
+              }
+            }
+            return findEpisodeInSeason(window.__INITIAL_STATE__, epId);
+          }
+          function buildPlayInfoFromEpisode(episode) {
+            const epId = episode?.ep_id ?? episode?.episode_id ?? episode?.id;
+            if (!episode?.cid || !epId) return void 0;
+            return {
+              result: {
+                play_video_type: "none",
+                arc: {
+                  aid: episode.aid,
+                  cid: episode.cid
+                },
+                supplement: {
+                  ogv_episode_info: {
+                    episode_id: epId
+                  },
+                  ogv_season_info: {}
+                },
+                plugins: []
+              }
+            };
           }
           function removePlayInfoAreaLimit(value) {
             const plugins = value?.result?.plugins;
@@ -3302,8 +3352,13 @@ function scriptSource(invokeBy) {
             };
             return requestCandidate(0);
           }
-          function deferNanoCreatePlayer(playInfoPromise) {
+          function setCurrentPlayInfoPromise(playInfoPromise, epId) {
             currentPlayInfoPromise = playInfoPromise;
+            currentPlayInfoEpId = epId;
+            currentPlayInfoRequestId += 1;
+          }
+          function deferNanoCreatePlayer(playInfoPromise, value) {
+            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value));
             const installCreatePlayerWrapper = (nano) => {
               if (!nano) return false;
               if (nano.__balh_create_player_deferred__) return true;
@@ -3315,8 +3370,8 @@ function scriptSource(invokeBy) {
                   configurable: true,
                   enumerable: true,
                   get: () => createPlayerValue,
-                  set: (value) => {
-                    createPlayerValue = value;
+                  set: (value2) => {
+                    createPlayerValue = value2;
                     installCreatePlayerWrapper(nano);
                   }
                 });
@@ -3332,14 +3387,23 @@ function scriptSource(invokeBy) {
                 config.requestConfig = {
                   ...config.requestConfig,
                   reqHttpPlayUrlInfo: () => {
+                    syncCurrentPlayInfoWithLocation();
+                    const currentEpId = getCurrentEpId();
+                    if (currentEpId && currentPlayInfoEpId !== currentEpId) {
+                      return Promise2.reject(new Error("proxy playurl missing for current episode"));
+                    }
                     const pendingPlayInfo = currentPlayInfoPromise;
+                    const pendingRequestId = currentPlayInfoRequestId;
                     if (!pendingPlayInfo) {
                       return Promise2.reject(new Error("proxy playurl missing"));
                     }
-                    return pendingPlayInfo.then((value) => {
-                      cachePlayInfo(value);
-                      window.__PLAYURL_HYDRATE_DATA__ = value;
-                      return { status: 200, data: value };
+                    return pendingPlayInfo.then((value2) => {
+                      if (pendingRequestId !== currentPlayInfoRequestId) {
+                        return Promise2.reject(new Error("stale proxy playurl"));
+                      }
+                      cachePlayInfo(value2, false);
+                      window.__PLAYURL_HYDRATE_DATA__ = value2;
+                      return { status: 200, data: value2 };
                     }).catch((error) => {
                       util_warn("replace playinfo by proxy failed", error);
                       return Promise2.reject(error);
@@ -3360,9 +3424,9 @@ function scriptSource(invokeBy) {
               configurable: true,
               enumerable: true,
               get: () => nanoValue,
-              set: (value) => {
-                nanoValue = value;
-                installCreatePlayerWrapper(value);
+              set: (value2) => {
+                nanoValue = value2;
+                installCreatePlayerWrapper(value2);
               }
             });
             if (nanoValue) {
@@ -3373,13 +3437,22 @@ function scriptSource(invokeBy) {
             if (!shouldReplaceHydrationPlayInfo(value)) return false;
             const playInfoPromise = fetchPlayInfoByProxy(value);
             if (!playInfoPromise) return false;
-            deferNanoCreatePlayer(playInfoPromise);
+            deferNanoCreatePlayer(playInfoPromise, value);
             return true;
           }
-          function cachePlayInfo(value) {
-            playinfo = value;
+          function syncCurrentPlayInfoWithLocation() {
+            const currentEpId = getCurrentEpId();
+            if (!currentEpId || currentPlayInfoEpId === currentEpId) return;
+            const episode = findCurrentEpisode();
+            const value = buildPlayInfoFromEpisode(episode);
             if (value) {
-              currentPlayInfoPromise = Promise2.resolve(value);
+              replaceHydrationPlayInfo(value);
+            }
+          }
+          function cachePlayInfo(value, updateCurrentPromise = true) {
+            playinfo = value;
+            if (value && updateCurrentPromise) {
+              setCurrentPlayInfoPromise(Promise2.resolve(value), getPlayInfoEpId(value));
             }
           }
           replaceHydrationPlayInfo(initialPlayInfo);
