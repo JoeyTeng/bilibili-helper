@@ -7,6 +7,7 @@ import { ui } from './util/ui';
 // 当前文件的内容会被包裹在scriptSource函数中执行
 declare function scriptSource(invokeBy: string): void
 declare const invokeBy: string
+declare const __BALH_BUILD_VERSION__: string
 
 function scriptContent() {
     'use strict';
@@ -24,7 +25,7 @@ function scriptContent() {
     }
 
     log = util_debug
-    log(`[${GM_info.script.name} v${GM_info.script.version} (${invokeBy})] run on: ${window.location.href}`);
+    log(`[${GM_info.script.name} v${GM_info.script.version} build ${__BALH_BUILD_VERSION__} (${invokeBy})] run on: ${window.location.href}`);
 
     bili.version_remind()
     bili.switch_to_old_player()

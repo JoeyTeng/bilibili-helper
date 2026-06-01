@@ -447,6 +447,56 @@ export function area_limit_for_vue() {
     )) {
         return
     }
+    function forceBangumiEpisodeFullNavigation() {
+        if (!(util_page.anime_ep() || util_page.anime_ss())) return
+        const resolveEpisodeUrl = (url: string | URL | null | undefined) => {
+            if (!url) return undefined
+            try {
+                const resolved = new URL(url, window.location.href)
+                if (resolved.origin !== window.location.origin || !resolved.pathname.match(/^\/bangumi\/play\/ep\d+/)) return undefined
+                if (resolved.pathname === window.location.pathname) return undefined
+                return resolved
+            } catch (_) {
+                return undefined
+            }
+        }
+        const forceNavigation = (url: URL, source: string, replace = false) => {
+            log('force full navigation for bangumi episode', {
+                source,
+                from: window.location.href,
+                to: url.href,
+                replace,
+            })
+            if (replace) {
+                window.location.replace(url.href)
+            } else {
+                window.location.assign(url.href)
+            }
+        }
+        document.addEventListener('click', (event) => {
+            if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+            const target = event.target as Element | null
+            const anchor = target?.closest?.('a[href*="/bangumi/play/ep"]') as HTMLAnchorElement | null
+            if (!anchor?.href || anchor.target) return
+            const url = resolveEpisodeUrl(anchor.href)
+            if (!url) return
+            event.preventDefault()
+            event.stopImmediatePropagation()
+            forceNavigation(url, 'click')
+        }, true)
+        const wrapHistory = <T extends typeof history.pushState>(method: T, replace = false): T => {
+            return function (this: History, data: any, unused: string, url?: string | URL | null) {
+                const episodeUrl = resolveEpisodeUrl(url)
+                if (episodeUrl) {
+                    forceNavigation(episodeUrl, method.name, replace)
+                    return
+                }
+                return method.apply(this, arguments as any)
+            } as T
+        }
+        history.pushState = wrapHistory(history.pushState)
+        history.replaceState = wrapHistory(history.replaceState as typeof history.pushState, true)
+    }
     function replacePlayInfo() {
         const initialPlayInfo = window.__playinfo__
         log("window.__playinfo__", initialPlayInfo)
@@ -455,6 +505,9 @@ export function area_limit_for_vue() {
         let currentPlayInfoPromise: Promise<any> | undefined
         let currentPlayInfoEpId: string | undefined
         let currentPlayInfoRequestId = 0
+        const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v1:'
+        const proxyPlayInfoReloadPrefix = 'balh_proxy_playinfo_reload_v1:'
+        const proxyPlayInfoCacheTtl = 10 * 60 * 1000
         function shouldReplaceHydrationPlayInfo(value: any) {
             return (util_page.anime_ep() || util_page.anime_ss())
                 && value?.result?.supplement?.ogv_episode_info
@@ -467,6 +520,119 @@ export function area_limit_for_vue() {
         }
         function getCurrentEpId() {
             return window.location.pathname.match(/\/bangumi\/play\/ep(\d+)/)?.[1]
+        }
+        function getPlayInfoCacheKey(value: any) {
+            const epId = getPlayInfoEpId(value)
+            const cid = value?.result?.arc?.cid
+            if (!epId || !cid) return undefined
+            return `${epId}:${cid}`
+        }
+        function getStoredProxyPlayInfo(value: any) {
+            const key = getPlayInfoCacheKey(value)
+            if (!key) return undefined
+            try {
+                const raw = sessionStorage.getItem(`${proxyPlayInfoCachePrefix}${key}`)
+                if (!raw) return undefined
+                const cached = JSON.parse(raw)
+                if (!cached?.value || Date.now() - cached.savedAt > proxyPlayInfoCacheTtl) {
+                    sessionStorage.removeItem(`${proxyPlayInfoCachePrefix}${key}`)
+                    return undefined
+                }
+                log('proxy playinfo cache hit', {
+                    epId: getPlayInfoEpId(cached.value),
+                    videoCount: cached.value?.result?.video_info?.dash?.video?.length,
+                })
+                return cached.value
+            } catch (error) {
+                util_warn('proxy playinfo cache read failed', error)
+                return undefined
+            }
+        }
+        function storeProxyPlayInfo(value: any) {
+            const key = getPlayInfoCacheKey(value)
+            if (!key) return
+            try {
+                sessionStorage.setItem(`${proxyPlayInfoCachePrefix}${key}`, JSON.stringify({
+                    savedAt: Date.now(),
+                    value,
+                }))
+            } catch (error) {
+                util_warn('proxy playinfo cache write failed', error)
+            }
+        }
+        function reloadOnceAfterProxyReady(value: any, delay = 0) {
+            const key = getPlayInfoCacheKey(value)
+            if (!key) return
+            const reloadKey = `${proxyPlayInfoReloadPrefix}${key}`
+            if (sessionStorage.getItem(reloadKey)) return
+            setTimeout(() => {
+                const video = document.querySelector('video') as HTMLVideoElement | null
+                const hasVideoSource = !!(video?.currentSrc || video?.src)
+                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
+                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
+                sessionStorage.setItem(reloadKey, '1')
+                log('reload page to apply cached proxy playinfo', {
+                    epId: getPlayInfoEpId(value),
+                    hasBlockingPanel,
+                    hasPlayerError,
+                })
+                window.location.replace(window.location.href)
+            }, delay)
+        }
+        function reloadExistingPlayerWithProxyPlayInfo(value: any) {
+            if (value?.result?.play_video_type !== 'dash') return false
+            const key = getPlayInfoCacheKey(value)
+            if (!key) return false
+            const anyWindow = window as any
+            if (anyWindow.__balh_proxy_player_reload_key__ === key) return false
+            anyWindow.__balh_proxy_player_reload_key__ = key
+            let retries = 0
+            const tryReload = () => {
+                const player = anyWindow.player
+                if (!player?.updateRequestConfig || !player?.reload) {
+                    if (retries++ < 40) setTimeout(tryReload, 250)
+                    return
+                }
+                const video = document.querySelector('video') as HTMLVideoElement | null
+                const hasVideoSource = !!(video?.currentSrc || video?.src)
+                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
+                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
+                log('reload existing player with proxy playinfo', {
+                    epId: getPlayInfoEpId(value),
+                    hasVideoSource,
+                    hasBlockingPanel,
+                    hasPlayerError,
+                })
+                try {
+                    player.updateRequestConfig({
+                        reqHttpPlayUrlInfo: () => NativePromise.resolve({ status: 200, data: value }),
+                    })
+                    const result = player.reload()
+                    if (result?.catch) {
+                        result.catch((error: any) => util_warn('reload existing player failed', error))
+                    }
+                } catch (error) {
+                    util_warn('reload existing player failed', error)
+                }
+            }
+            setTimeout(tryReload, 0)
+            return true
+        }
+        function shouldApplyProxyPlayInfo(value: any, requestId?: number) {
+            const currentEpId = getCurrentEpId()
+            const playInfoEpId = getPlayInfoEpId(value)
+            const requestIsStale = requestId !== undefined && requestId !== currentPlayInfoRequestId
+            const episodeIsStale = !!currentEpId && !!playInfoEpId && currentEpId !== playInfoEpId
+            if (!requestIsStale && !episodeIsStale) return true
+            log('ignore stale proxy playinfo', {
+                currentEpId,
+                playInfoEpId,
+                requestId,
+                currentPlayInfoRequestId,
+            })
+            return false
         }
         function findEpisodeInSeason(season: any, epId: string): any {
             if (!season) return undefined
@@ -524,10 +690,32 @@ export function area_limit_for_vue() {
                 }
             }
         }
+        function redactProxyHost(proxyHost: string) {
+            try {
+                const url = new URL(proxyHost)
+                url.username = ''
+                url.password = ''
+                return url.href.replace(/\/$/, '')
+            } catch (_) {
+                return proxyHost.replace(/\/\/[^/@]+@/, '//<redacted>@')
+            }
+        }
+        function describeProxyCandidate(candidate: { proxyHost: string, area: string }) {
+            return {
+                proxyHost: redactProxyHost(candidate.proxyHost),
+                area: candidate.area,
+            }
+        }
         function fetchPlayInfoByProxy(value: any) {
             const arc = value?.result?.arc
             const episode = value?.result?.supplement?.ogv_episode_info
             if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return undefined
+            log('replace playinfo by proxy start', {
+                epId: String(episode.episode_id),
+                aid: arc.aid,
+                cid: arc.cid,
+                currentEpId: getCurrentEpId(),
+            })
             const candidates: { proxyHost: string, area: string }[] = []
             const addCandidate = (proxyHost: string | undefined, area: string) => {
                 if (!proxyHost) return
@@ -581,6 +769,13 @@ export function area_limit_for_vue() {
                     return playUrl.then(playUrl => ({ json, playUrl }))
                 }).then(({ json, playUrl }) => {
                     if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                        log('replace playinfo by proxy success', {
+                            epId: String(episode.episode_id),
+                            proxyHost: redactProxyHost(candidate.proxyHost),
+                            area: candidate.area,
+                            videoCount: playUrl.dash?.video?.length,
+                            audioCount: playUrl.dash?.audio?.length,
+                        })
                         value.result.play_video_type = 'dash'
                         delete value.result.play_check
                         value.result.video_info = playUrl
@@ -590,7 +785,7 @@ export function area_limit_for_vue() {
                     }
                     return NativePromise.reject(json)
                 }).catch(error => {
-                    util_warn('replace playinfo by proxy candidate failed', candidate, error)
+                    util_warn('replace playinfo by proxy candidate failed', describeProxyCandidate(candidate), error)
                     return requestCandidate(index + 1)
                 })
             }
@@ -624,6 +819,12 @@ export function area_limit_for_vue() {
                 nano.__balh_create_player_deferred__ = true
                 const createPlayer = nano.createPlayer
                 nano.createPlayer = function (config: any) {
+                    log('nano.createPlayer', {
+                        currentEpId: getCurrentEpId(),
+                        prefetchType: config?.prefetch?.playUrl?.result?.play_video_type,
+                        prefetchEpId: getPlayInfoEpId(config?.prefetch?.playUrl),
+                        currentPlayInfoEpId,
+                    })
                     if (config?.prefetch?.playUrl?.result?.play_video_type !== 'none') {
                         return createPlayer.apply(this, arguments as any)
                     }
@@ -631,8 +832,18 @@ export function area_limit_for_vue() {
                     config.requestConfig = {
                         ...config.requestConfig,
                         reqHttpPlayUrlInfo: () => {
+                            log('reqHttpPlayUrlInfo before sync', {
+                                currentEpId: getCurrentEpId(),
+                                currentPlayInfoEpId,
+                                hasCurrentPlayInfoPromise: !!currentPlayInfoPromise,
+                            })
                             syncCurrentPlayInfoWithLocation()
                             const currentEpId = getCurrentEpId()
+                            log('reqHttpPlayUrlInfo after sync', {
+                                currentEpId,
+                                currentPlayInfoEpId,
+                                hasCurrentPlayInfoPromise: !!currentPlayInfoPromise,
+                            })
                             if (currentEpId && currentPlayInfoEpId !== currentEpId) {
                                 return NativePromise.reject(new Error('proxy playurl missing for current episode'))
                             }
@@ -680,18 +891,51 @@ export function area_limit_for_vue() {
         }
         function replaceHydrationPlayInfo(value: any): boolean {
             if (!shouldReplaceHydrationPlayInfo(value)) return false
+            const cachedPlayInfo = getStoredProxyPlayInfo(value)
+            if (cachedPlayInfo) {
+                if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true
+                cachePlayInfo(cachedPlayInfo, false)
+                ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
+                deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo)
+                reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
+                return true
+            }
             const playInfoPromise = fetchPlayInfoByProxy(value)
             if (!playInfoPromise) return false
+            log('replace hydration playinfo', {
+                epId: getPlayInfoEpId(value),
+                currentEpId: getCurrentEpId(),
+            })
+            cachePlayInfo(value, false)
             deferNanoCreatePlayer(playInfoPromise, value)
+            const pendingRequestId = currentPlayInfoRequestId
+            playInfoPromise.then(value => {
+                if (!shouldApplyProxyPlayInfo(value, pendingRequestId)) return
+                cachePlayInfo(value, false)
+                ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
+                storeProxyPlayInfo(value)
+                const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(value)
+                reloadOnceAfterProxyReady(value, playerReloadScheduled ? 3000 : 0)
+            }).catch(error => util_warn('replace hydration playinfo failed', error))
             return true
         }
         function syncCurrentPlayInfoWithLocation() {
             const currentEpId = getCurrentEpId()
             if (!currentEpId || currentPlayInfoEpId === currentEpId) return
+            log('sync current playinfo with location', {
+                currentEpId,
+                currentPlayInfoEpId,
+            })
             const episode = findCurrentEpisode()
             const value = buildPlayInfoFromEpisode(episode)
             if (value) {
                 replaceHydrationPlayInfo(value)
+            } else {
+                util_warn('current episode data not found for playinfo sync', {
+                    currentEpId,
+                    hasNextData: !!(window as any).__NEXT_DATA__,
+                    hasInitialState: !!(window as any).__INITIAL_STATE__,
+                })
             }
         }
         function cachePlayInfo(value: any, updateCurrentPromise = true) {
@@ -728,6 +972,7 @@ export function area_limit_for_vue() {
             },
         })
     }
+    forceBangumiEpisodeFullNavigation()
 
     function processUserStatus(value: StringAnyObject | undefined) {
         if (value) {

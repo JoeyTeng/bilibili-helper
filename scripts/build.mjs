@@ -15,6 +15,7 @@ const metaPath = path.join(outDir, 'unblock-area-limit.meta.js')
 const args = process.argv.slice(2)
 const watch = args.includes('--watch')
 const version = readOption('--version') || process.env.BUILD_VERSION
+const explicitBuildId = readOption('--build-id') || process.env.BUILD_ID
 
 if (version && !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error(`Invalid release version: ${version}`)
@@ -36,6 +37,10 @@ function readOption(name) {
     return value
 }
 
+function createBuildId() {
+    return new Date().toISOString().replace(/[-:.]/g, '')
+}
+
 function indent(code, prefix) {
     return code
         .replace(/\s+$/, '')
@@ -45,6 +50,7 @@ function indent(code, prefix) {
 }
 
 async function renderUserscript(bundleCode) {
+    const buildId = explicitBuildId || createBuildId()
     let template = await readFile(templatePath, 'utf8')
     if (version) {
         template = template.replace(/^\/\/ @version\s+.+$/m, `// @version      ${version}`)
@@ -58,7 +64,7 @@ async function renderUserscript(bundleCode) {
     const insertAt = placeholder.index + placeholder[0].length
     const rendered = [
         template.slice(0, insertAt),
-        indent(bundleCode, placeholder[1]),
+        indent(`const __BALH_BUILD_VERSION__ = ${JSON.stringify(buildId)}\n${bundleCode}`, placeholder[1]),
         placeholder[2],
         template.slice(insertAt),
     ].join('')
@@ -71,6 +77,7 @@ async function renderUserscript(bundleCode) {
     await mkdir(outDir, { recursive: true })
     await writeFile(userScriptPath, rendered)
     await writeFile(metaPath, meta[0])
+    return buildId
 }
 
 const options = {
@@ -104,8 +111,8 @@ if (watch) {
                     if (!bundle) {
                         throw new Error('esbuild did not return the expected bundle output')
                     }
-                    await renderUserscript(bundle.text)
-                    console.log(`built ${path.relative(rootDir, userScriptPath)}`)
+                    const buildId = await renderUserscript(bundle.text)
+                    console.log(`built ${path.relative(rootDir, userScriptPath)} (${buildId})`)
                 })
             },
         }],
@@ -126,6 +133,6 @@ if (watch) {
     if (!bundle) {
         throw new Error('esbuild did not return the expected bundle output')
     }
-    await renderUserscript(bundle.text)
-    console.log(`built ${path.relative(rootDir, userScriptPath)}`)
+    const buildId = await renderUserscript(bundle.text)
+    console.log(`built ${path.relative(rootDir, userScriptPath)} (${buildId})`)
 }
