@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.5
+// @version      8.5.6
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
 // @compatible   chrome
 // @compatible   firefox
 // @license      MIT
-// @require      https://static.hdslb.com/js/md5.js
 // @match        *://www.bilibili.com/video/av*
 // @match        *://www.bilibili.com/video/BV*
 // @match        *://www.bilibili.com/bangumi/play/ep*
@@ -44,17 +43,6 @@ function injector() {
         log(`脚本已经注入过, 不需要执行`)
         return
     }
-    // @require      https://static.hdslb.com/js/md5.js
-    // @require      https://unpkg.com/opencc-js@1.0.5/dist/umd/full.js
-    GM_info.scriptMetaStr.replace(new RegExp('// @require\\s+https?:(//.*)'), (match, /*p1:*/url) => {
-        log('@require:', url)
-        let $script = document.createElement('script')
-        $script.className = 'balh-injector-require'
-        $script.setAttribute('type', 'text/javascript')
-        $script.setAttribute('src', url)
-        document.head.appendChild($script)
-        return match
-    })
     let $script = document.createElement('script')
     $script.id = 'balh-injector-source'
     $script.appendChild(document.createTextNode(`
@@ -840,6 +828,144 @@ function scriptSource(invokeBy) {
         }, util_init.PRIORITY.DEFAULT, util_init.RUN_AT.DOM_LOADED_AFTER);
       }
 
+      // packages/unblock-area-limit/src/util/md5.ts
+      var shifts = [
+        7,
+        12,
+        17,
+        22,
+        7,
+        12,
+        17,
+        22,
+        7,
+        12,
+        17,
+        22,
+        7,
+        12,
+        17,
+        22,
+        5,
+        9,
+        14,
+        20,
+        5,
+        9,
+        14,
+        20,
+        5,
+        9,
+        14,
+        20,
+        5,
+        9,
+        14,
+        20,
+        4,
+        11,
+        16,
+        23,
+        4,
+        11,
+        16,
+        23,
+        4,
+        11,
+        16,
+        23,
+        4,
+        11,
+        16,
+        23,
+        6,
+        10,
+        15,
+        21,
+        6,
+        10,
+        15,
+        21,
+        6,
+        10,
+        15,
+        21,
+        6,
+        10,
+        15,
+        21
+      ];
+      var constants = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+      function toUtf8Bytes(input) {
+        if (typeof TextEncoder !== "undefined") {
+          return new TextEncoder().encode(input);
+        }
+        const bytes = [];
+        for (const char of unescape(encodeURIComponent(input))) {
+          bytes.push(char.charCodeAt(0));
+        }
+        return Uint8Array.from(bytes);
+      }
+      function rotateLeft(value, count) {
+        return value << count | value >>> 32 - count;
+      }
+      function toLittleEndianHex(value) {
+        let result = "";
+        for (let i = 0; i < 4; i++) {
+          result += (value >>> i * 8 & 255).toString(16).padStart(2, "0");
+        }
+        return result;
+      }
+      function md5Hex(input) {
+        const inputBytes = toUtf8Bytes(input);
+        const bitLength = inputBytes.length * 8;
+        const paddedLength = (inputBytes.length + 8 >>> 6) + 1 << 6;
+        const bytes = new Uint8Array(paddedLength);
+        bytes.set(inputBytes);
+        bytes[inputBytes.length] = 128;
+        const view = new DataView(bytes.buffer);
+        view.setUint32(paddedLength - 8, bitLength, true);
+        view.setUint32(paddedLength - 4, Math.floor(bitLength / 4294967296), true);
+        let a0 = 1732584193;
+        let b0 = 4023233417;
+        let c0 = 2562383102;
+        let d0 = 271733878;
+        for (let offset = 0; offset < paddedLength; offset += 64) {
+          const words = Array.from({ length: 16 }, (_, i) => view.getUint32(offset + i * 4, true));
+          let a = a0;
+          let b = b0;
+          let c = c0;
+          let d = d0;
+          for (let i = 0; i < 64; i++) {
+            let f;
+            let g;
+            if (i < 16) {
+              f = b & c | ~b & d;
+              g = i;
+            } else if (i < 32) {
+              f = d & b | ~d & c;
+              g = (5 * i + 1) % 16;
+            } else if (i < 48) {
+              f = b ^ c ^ d;
+              g = (3 * i + 5) % 16;
+            } else {
+              f = c ^ (b | ~d);
+              g = 7 * i % 16;
+            }
+            const nextD = c;
+            c = b;
+            b = b + rotateLeft(a + f + constants[i] + words[g] >>> 0, shifts[i]) >>> 0;
+            a = d;
+            d = nextD;
+          }
+          a0 = a0 + a >>> 0;
+          b0 = b0 + b >>> 0;
+          c0 = c0 + c >>> 0;
+          d0 = d0 + d >>> 0;
+        }
+        return [a0, b0, c0, d0].map(toLittleEndianHex).join("");
+      }
+
       // packages/unblock-area-limit/src/util/converters.ts
       var rawUposMap = {
         ali: "upos-sz-mirrorali.bilivideo.com",
@@ -942,7 +1068,7 @@ function scriptSource(invokeBy) {
             data3 += (data3 ? "&" : "") + s_keys[i] + "=" + encodeURIComponent(params[s_keys[i]]);
           }
           return {
-            sign: hex_md5(data3 + key),
+            sign: md5Hex(data3 + key),
             params: data3
           };
         }
@@ -1337,7 +1463,7 @@ function scriptSource(invokeBy) {
         } else {
           plaintext = mobi_api_params.slice(0, -1) + `25bdede4e1581c836cab73a48790ca6e`;
         }
-        let ciphertext = hex_md5(plaintext);
+        let ciphertext = md5Hex(plaintext);
         return `${mobi_api_params}sign=${ciphertext}`;
       }
       async function fixMobiPlayUrlJson(originJson) {
