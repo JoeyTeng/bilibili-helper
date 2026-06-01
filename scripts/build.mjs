@@ -64,7 +64,7 @@ async function renderUserscript(bundleCode) {
     const insertAt = placeholder.index + placeholder[0].length
     const rendered = [
         template.slice(0, insertAt),
-        indent(`const __BALH_BUILD_VERSION__ = ${JSON.stringify(buildId)}\n${bundleCode}`, placeholder[1]),
+        indent(`const __BALH_BUILD_VERSION__ = ${JSON.stringify(buildId)};\n${bundleCode}`, placeholder[1]),
         placeholder[2],
         template.slice(insertAt),
     ].join('')
