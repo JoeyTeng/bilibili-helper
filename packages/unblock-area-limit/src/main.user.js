@@ -22,12 +22,56 @@
 // @match        *://space.bilibili.com/*
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
+// @match        https://www.biliplus.com/*
 // @match        https://www.mcbbs.net/template/mcbbs/image/special_photo_bg.png*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 const log = console.log.bind(console, 'injector:')
+
+if (location.href.match(/^https:\/\/www\.biliplus\.com\//) != null) {
+    const allowedOrigins = ['https://www.bilibili.com', 'https://m.bilibili.com', 'https://bangumi.bilibili.com', 'https://space.bilibili.com']
+    const params = new URLSearchParams(location.search)
+    const authOrigin = params.get('balh_auth_origin')
+    if (params.get('balh_auth') === '1' && allowedOrigins.includes(authOrigin)) {
+        sessionStorage.balh_auth_origin = authOrigin
+    }
+
+    let retry = 0
+    const sendCredentials = () => {
+        const targetOrigin = sessionStorage.balh_auth_origin
+        if (!window.opener || !allowedOrigins.includes(targetOrigin)) {
+            return true
+        }
+
+        const accessKey = localStorage.access_key || localStorage.access_token
+        if (!accessKey) {
+            return false
+        }
+
+        const credentials = {
+            access_key: accessKey,
+            refresh_token: localStorage.refresh_token || '',
+            oauth_expires_at: localStorage.oauth_expires_at || localStorage.expires_at || '',
+            expires_in: localStorage.expires_in || '',
+        }
+        window.opener.postMessage('balh-login-credentials: ' + JSON.stringify(credentials), targetOrigin)
+        document.documentElement.innerHTML = '<title>BALH - 授权</title><meta charset="UTF-8" name="viewport" content="width=device-width">授权信息已发送，稍候会自动关闭此窗口。'
+        setTimeout(() => window.close(), 1500)
+        return true
+    }
+
+    if (!sendCredentials()) {
+        const timer = setInterval(() => {
+            retry++
+            if (sendCredentials() || retry > 300) {
+                clearInterval(timer)
+            }
+        }, 1000)
+    }
+    return
+}
 
 if (location.href.match(/^https:\/\/www\.mcbbs\.net\/template\/mcbbs\/image\/special_photo_bg\.png/) != null) {
     if (location.href.match('access_key') != null && window.opener != null) {
