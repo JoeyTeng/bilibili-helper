@@ -453,11 +453,67 @@ export function area_limit_for_vue() {
         window.__playinfo__origin = initialPlayInfo
         let playinfo: any = undefined
         let currentPlayInfoPromise: Promise<any> | undefined
+        let currentPlayInfoEpId: string | undefined
+        let currentPlayInfoRequestId = 0
         function shouldReplaceHydrationPlayInfo(value: any) {
             return (util_page.anime_ep() || util_page.anime_ss())
                 && value?.result?.supplement?.ogv_episode_info
                 && value?.result?.supplement?.ogv_season_info
                 && value?.result?.play_video_type === 'none'
+        }
+        function getPlayInfoEpId(value: any) {
+            const epId = value?.result?.supplement?.ogv_episode_info?.episode_id
+            return epId == null ? undefined : String(epId)
+        }
+        function getCurrentEpId() {
+            return window.location.pathname.match(/\/bangumi\/play\/ep(\d+)/)?.[1]
+        }
+        function findEpisodeInSeason(season: any, epId: string): any {
+            if (!season) return undefined
+            const isTargetEpisode = (ep: any) => {
+                const id = ep?.ep_id ?? ep?.episode_id ?? ep?.id
+                return id != null && String(id) === epId && ep?.cid
+            }
+            const findInList = (list: any[] | undefined) => Array.isArray(list) ? list.find(isTargetEpisode) : undefined
+            return (season.epMap && isTargetEpisode(season.epMap[epId]) && season.epMap[epId])
+                || findInList(season.episodes)
+                || findInList(season.initEpList)
+                || findInList(season.mediaInfo?.episodes)
+                || findInList(season.seasonInfo?.mediaInfo?.episodes)
+                || season.sections?.map((section: any) => findInList(section?.episodes)).find(Boolean)
+                || season.section?.map((section: any) => findInList(section?.episodes)).find(Boolean)
+        }
+        function findCurrentEpisode() {
+            const epId = getCurrentEpId()
+            if (!epId) return undefined
+            const nextQueries = (window as any).__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries
+            if (Array.isArray(nextQueries)) {
+                for (const query of nextQueries) {
+                    const episode = findEpisodeInSeason(query?.state?.data, epId)
+                    if (episode) return episode
+                }
+            }
+            return findEpisodeInSeason((window as any).__INITIAL_STATE__, epId)
+        }
+        function buildPlayInfoFromEpisode(episode: any) {
+            const epId = episode?.ep_id ?? episode?.episode_id ?? episode?.id
+            if (!episode?.cid || !epId) return undefined
+            return {
+                result: {
+                    play_video_type: 'none',
+                    arc: {
+                        aid: episode.aid,
+                        cid: episode.cid,
+                    },
+                    supplement: {
+                        ogv_episode_info: {
+                            episode_id: epId,
+                        },
+                        ogv_season_info: {},
+                    },
+                    plugins: [],
+                },
+            }
         }
         function removePlayInfoAreaLimit(value: any) {
             const plugins = value?.result?.plugins
@@ -540,8 +596,13 @@ export function area_limit_for_vue() {
             }
             return requestCandidate(0)
         }
-        function deferNanoCreatePlayer(playInfoPromise: Promise<any>) {
+        function setCurrentPlayInfoPromise(playInfoPromise: Promise<any>, epId: string | undefined) {
             currentPlayInfoPromise = playInfoPromise
+            currentPlayInfoEpId = epId
+            currentPlayInfoRequestId += 1
+        }
+        function deferNanoCreatePlayer(playInfoPromise: Promise<any>, value: any) {
+            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value))
             const installCreatePlayerWrapper = (nano: any): boolean => {
                 if (!nano) return false
                 if (nano.__balh_create_player_deferred__) return true
@@ -570,12 +631,21 @@ export function area_limit_for_vue() {
                     config.requestConfig = {
                         ...config.requestConfig,
                         reqHttpPlayUrlInfo: () => {
+                            syncCurrentPlayInfoWithLocation()
+                            const currentEpId = getCurrentEpId()
+                            if (currentEpId && currentPlayInfoEpId !== currentEpId) {
+                                return NativePromise.reject(new Error('proxy playurl missing for current episode'))
+                            }
                             const pendingPlayInfo = currentPlayInfoPromise
+                            const pendingRequestId = currentPlayInfoRequestId
                             if (!pendingPlayInfo) {
                                 return NativePromise.reject(new Error('proxy playurl missing'))
                             }
                             return pendingPlayInfo.then(value => {
-                                cachePlayInfo(value)
+                                if (pendingRequestId !== currentPlayInfoRequestId) {
+                                    return NativePromise.reject(new Error('stale proxy playurl'))
+                                }
+                                cachePlayInfo(value, false)
                                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
                                 return { status: 200, data: value }
                             })
@@ -612,13 +682,22 @@ export function area_limit_for_vue() {
             if (!shouldReplaceHydrationPlayInfo(value)) return false
             const playInfoPromise = fetchPlayInfoByProxy(value)
             if (!playInfoPromise) return false
-            deferNanoCreatePlayer(playInfoPromise)
+            deferNanoCreatePlayer(playInfoPromise, value)
             return true
         }
-        function cachePlayInfo(value: any) {
-            playinfo = value
+        function syncCurrentPlayInfoWithLocation() {
+            const currentEpId = getCurrentEpId()
+            if (!currentEpId || currentPlayInfoEpId === currentEpId) return
+            const episode = findCurrentEpisode()
+            const value = buildPlayInfoFromEpisode(episode)
             if (value) {
-                currentPlayInfoPromise = NativePromise.resolve(value)
+                replaceHydrationPlayInfo(value)
+            }
+        }
+        function cachePlayInfo(value: any, updateCurrentPromise = true) {
+            playinfo = value
+            if (value && updateCurrentPromise) {
+                setCurrentPlayInfoPromise(NativePromise.resolve(value), getPlayInfoEpId(value))
             }
         }
         replaceHydrationPlayInfo(initialPlayInfo)
