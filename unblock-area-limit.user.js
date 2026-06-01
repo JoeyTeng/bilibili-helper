@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.7
+// @version      8.5.8
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -3223,6 +3223,7 @@ function scriptSource(invokeBy) {
           util_debug("window.__playinfo__", initialPlayInfo);
           window.__playinfo__origin = initialPlayInfo;
           let playinfo = void 0;
+          let currentPlayInfoPromise;
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
           }
@@ -3302,6 +3303,7 @@ function scriptSource(invokeBy) {
             return requestCandidate(0);
           }
           function deferNanoCreatePlayer(playInfoPromise) {
+            currentPlayInfoPromise = playInfoPromise;
             const installCreatePlayerWrapper = (nano) => {
               if (!nano) return false;
               if (nano.__balh_create_player_deferred__) return true;
@@ -3329,14 +3331,20 @@ function scriptSource(invokeBy) {
                 config.prefetch.playUrl = void 0;
                 config.requestConfig = {
                   ...config.requestConfig,
-                  reqHttpPlayUrlInfo: () => playInfoPromise.then((value) => {
-                    playinfo = value;
-                    window.__PLAYURL_HYDRATE_DATA__ = value;
-                    return { status: 200, data: value };
-                  }).catch((error) => {
-                    util_warn("replace playinfo by proxy failed", error);
-                    return Promise2.reject(error);
-                  })
+                  reqHttpPlayUrlInfo: () => {
+                    const pendingPlayInfo = currentPlayInfoPromise;
+                    if (!pendingPlayInfo) {
+                      return Promise2.reject(new Error("proxy playurl missing"));
+                    }
+                    return pendingPlayInfo.then((value) => {
+                      cachePlayInfo(value);
+                      window.__PLAYURL_HYDRATE_DATA__ = value;
+                      return { status: 200, data: value };
+                    }).catch((error) => {
+                      util_warn("replace playinfo by proxy failed", error);
+                      return Promise2.reject(error);
+                    });
+                  }
                 };
                 return createPlayer.apply(this, arguments);
               };
@@ -3368,6 +3376,12 @@ function scriptSource(invokeBy) {
             deferNanoCreatePlayer(playInfoPromise);
             return true;
           }
+          function cachePlayInfo(value) {
+            playinfo = value;
+            if (value) {
+              currentPlayInfoPromise = Promise2.resolve(value);
+            }
+          }
           replaceHydrationPlayInfo(initialPlayInfo);
           Object.defineProperty(window, "__playinfo__", {
             configurable: true,
@@ -3386,7 +3400,10 @@ function scriptSource(invokeBy) {
                 }
                 return;
               }
-              playinfo = value;
+              if (replaceHydrationPlayInfo(value)) {
+                return;
+              }
+              cachePlayInfo(value);
             }
           });
         }
