@@ -452,6 +452,7 @@ export function area_limit_for_vue() {
         log("window.__playinfo__", initialPlayInfo)
         window.__playinfo__origin = initialPlayInfo
         let playinfo: any = undefined
+        let currentPlayInfoPromise: Promise<any> | undefined
         function shouldReplaceHydrationPlayInfo(value: any) {
             return (util_page.anime_ep() || util_page.anime_ss())
                 && value?.result?.supplement?.ogv_episode_info
@@ -540,6 +541,7 @@ export function area_limit_for_vue() {
             return requestCandidate(0)
         }
         function deferNanoCreatePlayer(playInfoPromise: Promise<any>) {
+            currentPlayInfoPromise = playInfoPromise
             const installCreatePlayerWrapper = (nano: any): boolean => {
                 if (!nano) return false
                 if (nano.__balh_create_player_deferred__) return true
@@ -567,16 +569,21 @@ export function area_limit_for_vue() {
                     config.prefetch.playUrl = undefined
                     config.requestConfig = {
                         ...config.requestConfig,
-                        reqHttpPlayUrlInfo: () => playInfoPromise
-                            .then(value => {
-                                playinfo = value
+                        reqHttpPlayUrlInfo: () => {
+                            const pendingPlayInfo = currentPlayInfoPromise
+                            if (!pendingPlayInfo) {
+                                return NativePromise.reject(new Error('proxy playurl missing'))
+                            }
+                            return pendingPlayInfo.then(value => {
+                                cachePlayInfo(value)
                                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
                                 return { status: 200, data: value }
                             })
                             .catch(error => {
                                 util_warn('replace playinfo by proxy failed', error)
                                 return NativePromise.reject(error)
-                            }),
+                            })
+                        },
                     }
                     return createPlayer.apply(this, arguments as any)
                 }
@@ -608,6 +615,12 @@ export function area_limit_for_vue() {
             deferNanoCreatePlayer(playInfoPromise)
             return true
         }
+        function cachePlayInfo(value: any) {
+            playinfo = value
+            if (value) {
+                currentPlayInfoPromise = NativePromise.resolve(value)
+            }
+        }
         replaceHydrationPlayInfo(initialPlayInfo)
         // 将__playinfo__置空, 让播放器去重新加载它...
         Object.defineProperty(window, '__playinfo__', {
@@ -629,7 +642,10 @@ export function area_limit_for_vue() {
                     }
                     return
                 }
-                playinfo = value
+                if (replaceHydrationPlayInfo(value)) {
+                    return
+                }
+                cachePlayInfo(value)
             },
         })
     }
