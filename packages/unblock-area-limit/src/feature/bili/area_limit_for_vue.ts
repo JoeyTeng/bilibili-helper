@@ -448,8 +448,9 @@ export function area_limit_for_vue() {
         return
     }
     function replacePlayInfo() {
-        log("window.__playinfo__", window.__playinfo__)
-        window.__playinfo__origin = window.__playinfo__
+        const initialPlayInfo = window.__playinfo__
+        log("window.__playinfo__", initialPlayInfo)
+        window.__playinfo__origin = initialPlayInfo
         let playinfo: any = undefined
         function shouldReplaceHydrationPlayInfo(value: any) {
             return (util_page.anime_ep() || util_page.anime_ss())
@@ -600,6 +601,14 @@ export function area_limit_for_vue() {
                 anyWindow.nano = nanoValue
             }
         }
+        function replaceHydrationPlayInfo(value: any): boolean {
+            if (!shouldReplaceHydrationPlayInfo(value)) return false
+            const playInfoPromise = fetchPlayInfoByProxy(value)
+            if (!playInfoPromise) return false
+            deferNanoCreatePlayer(playInfoPromise)
+            return true
+        }
+        replaceHydrationPlayInfo(initialPlayInfo)
         // 将__playinfo__置空, 让播放器去重新加载它...
         Object.defineProperty(window, '__playinfo__', {
             configurable: true,
@@ -615,11 +624,7 @@ export function area_limit_for_vue() {
                 if (!window.__playinfo__origin && window.document.readyState === 'loading') {
                     log('__playinfo__', 'init in html', value)
                     window.__playinfo__origin = value
-                    if (shouldReplaceHydrationPlayInfo(value)) {
-                        const playInfoPromise = fetchPlayInfoByProxy(value)
-                        if (playInfoPromise) {
-                            deferNanoCreatePlayer(playInfoPromise)
-                        }
+                    if (replaceHydrationPlayInfo(value)) {
                         return
                     }
                     return
