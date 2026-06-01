@@ -1,6 +1,6 @@
 import { BiliBiliApi } from "../../api/bilibili"
 import { access_key_param_if_exist } from "../../api/bilibili-utils"
-import { BiliPlusApi, fixThailandPlayUrlJson, getMobiPlayUrl } from "../../api/biliplus"
+import { BiliPlusApi, fixMobiPlayUrlJson, fixThailandPlayUrlJson, generateMobiPlayUrlParams, getMobiPlayUrl } from "../../api/biliplus"
 import { Async, Promise as NativePromise } from "../../util/async"
 import { BalhDb } from "../../util/balh-db"
 import { Converters } from "../../util/converters"
@@ -754,17 +754,25 @@ export function area_limit_for_vue() {
                 const query = `${candidateParams}${access_key_param_if_exist(true)}`
                 const originUrl = `//api.bilibili.com/pgc/player/web/playurl?${candidateParams}`
                 const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost)
-                const url = candidate.area === 'th' && isBilibiliApiProxy
-                    ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area)
-                    : isBilibiliApiProxy
-                    ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}`
-                    : `${candidate.proxyHost}?${query}`
+                const shouldUseMobiPlayUrl = candidate.area === 'th' || window.__balh_app_only__ === true
+                const url = (() => {
+                    if (shouldUseMobiPlayUrl) {
+                        return isBilibiliApiProxy
+                            ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area)
+                            : `${candidate.proxyHost}?${generateMobiPlayUrlParams(originUrl, candidate.area)}`
+                    }
+                    return isBilibiliApiProxy
+                        ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}`
+                        : `${candidate.proxyHost}?${query}`
+                })()
                 return NativePromise.race([
                     Async.ajax<any>(url),
                     Async.timeout(8000).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
                 ]).then(json => {
-                    const playUrl = candidate.area === 'th' && json?.data?.video_info
+                    const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info
                         ? fixThailandPlayUrlJson(json)
+                        : window.__balh_app_only__ === true && json?.type === 'DASH'
+                        ? fixMobiPlayUrlJson(json)
                         : NativePromise.resolve(json?.result || json?.data)
                     return playUrl.then(playUrl => ({ json, playUrl }))
                 }).then(({ json, playUrl }) => {
