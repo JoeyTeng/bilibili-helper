@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.9
+// @version      8.5.10
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -64,6 +64,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
+    const __BALH_BUILD_VERSION__ = "20260601T114549163Z"
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -3218,6 +3219,56 @@ function scriptSource(invokeBy) {
         if (!(util_page.av() && balh_config.enable_in_av || util_page.new_bangumi())) {
           return;
         }
+        function forceBangumiEpisodeFullNavigation() {
+          if (!(util_page.anime_ep() || util_page.anime_ss())) return;
+          const resolveEpisodeUrl = (url) => {
+            if (!url) return void 0;
+            try {
+              const resolved = new URL(url, window.location.href);
+              if (resolved.origin !== window.location.origin || !resolved.pathname.match(/^\/bangumi\/play\/ep\d+/)) return void 0;
+              if (resolved.pathname === window.location.pathname) return void 0;
+              return resolved;
+            } catch (_) {
+              return void 0;
+            }
+          };
+          const forceNavigation = (url, source, replace = false) => {
+            util_debug("force full navigation for bangumi episode", {
+              source,
+              from: window.location.href,
+              to: url.href,
+              replace
+            });
+            if (replace) {
+              window.location.replace(url.href);
+            } else {
+              window.location.assign(url.href);
+            }
+          };
+          document.addEventListener("click", (event) => {
+            if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            const target2 = event.target;
+            const anchor = target2?.closest?.('a[href*="/bangumi/play/ep"]');
+            if (!anchor?.href || anchor.target) return;
+            const url = resolveEpisodeUrl(anchor.href);
+            if (!url) return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            forceNavigation(url, "click");
+          }, true);
+          const wrapHistory = (method, replace = false) => {
+            return function(data2, unused, url) {
+              const episodeUrl = resolveEpisodeUrl(url);
+              if (episodeUrl) {
+                forceNavigation(episodeUrl, method.name, replace);
+                return;
+              }
+              return method.apply(this, arguments);
+            };
+          };
+          history.pushState = wrapHistory(history.pushState);
+          history.replaceState = wrapHistory(history.replaceState, true);
+        }
         function replacePlayInfo() {
           const initialPlayInfo = window.__playinfo__;
           util_debug("window.__playinfo__", initialPlayInfo);
@@ -3226,6 +3277,9 @@ function scriptSource(invokeBy) {
           let currentPlayInfoPromise;
           let currentPlayInfoEpId;
           let currentPlayInfoRequestId = 0;
+          const proxyPlayInfoCachePrefix = "balh_proxy_playinfo_v1:";
+          const proxyPlayInfoReloadPrefix = "balh_proxy_playinfo_reload_v1:";
+          const proxyPlayInfoCacheTtl = 10 * 60 * 1e3;
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
           }
@@ -3235,6 +3289,119 @@ function scriptSource(invokeBy) {
           }
           function getCurrentEpId() {
             return window.location.pathname.match(/\/bangumi\/play\/ep(\d+)/)?.[1];
+          }
+          function getPlayInfoCacheKey(value) {
+            const epId = getPlayInfoEpId(value);
+            const cid = value?.result?.arc?.cid;
+            if (!epId || !cid) return void 0;
+            return `${epId}:${cid}`;
+          }
+          function getStoredProxyPlayInfo(value) {
+            const key = getPlayInfoCacheKey(value);
+            if (!key) return void 0;
+            try {
+              const raw = sessionStorage.getItem(`${proxyPlayInfoCachePrefix}${key}`);
+              if (!raw) return void 0;
+              const cached = JSON.parse(raw);
+              if (!cached?.value || Date.now() - cached.savedAt > proxyPlayInfoCacheTtl) {
+                sessionStorage.removeItem(`${proxyPlayInfoCachePrefix}${key}`);
+                return void 0;
+              }
+              util_debug("proxy playinfo cache hit", {
+                epId: getPlayInfoEpId(cached.value),
+                videoCount: cached.value?.result?.video_info?.dash?.video?.length
+              });
+              return cached.value;
+            } catch (error) {
+              util_warn("proxy playinfo cache read failed", error);
+              return void 0;
+            }
+          }
+          function storeProxyPlayInfo(value) {
+            const key = getPlayInfoCacheKey(value);
+            if (!key) return;
+            try {
+              sessionStorage.setItem(`${proxyPlayInfoCachePrefix}${key}`, JSON.stringify({
+                savedAt: Date.now(),
+                value
+              }));
+            } catch (error) {
+              util_warn("proxy playinfo cache write failed", error);
+            }
+          }
+          function reloadOnceAfterProxyReady(value, delay = 0) {
+            const key = getPlayInfoCacheKey(value);
+            if (!key) return;
+            const reloadKey = `${proxyPlayInfoReloadPrefix}${key}`;
+            if (sessionStorage.getItem(reloadKey)) return;
+            setTimeout(() => {
+              const video = document.querySelector("video");
+              const hasVideoSource = !!(video?.currentSrc || video?.src);
+              const hasBlockingPanel = !!document.querySelector("#big-block-panel");
+              const hasPlayerError = document.body?.innerText?.includes("错误码：3001");
+              if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return;
+              sessionStorage.setItem(reloadKey, "1");
+              util_debug("reload page to apply cached proxy playinfo", {
+                epId: getPlayInfoEpId(value),
+                hasBlockingPanel,
+                hasPlayerError
+              });
+              window.location.replace(window.location.href);
+            }, delay);
+          }
+          function reloadExistingPlayerWithProxyPlayInfo(value) {
+            if (value?.result?.play_video_type !== "dash") return false;
+            const key = getPlayInfoCacheKey(value);
+            if (!key) return false;
+            const anyWindow = window;
+            if (anyWindow.__balh_proxy_player_reload_key__ === key) return false;
+            anyWindow.__balh_proxy_player_reload_key__ = key;
+            let retries = 0;
+            const tryReload = () => {
+              const player = anyWindow.player;
+              if (!player?.updateRequestConfig || !player?.reload) {
+                if (retries++ < 40) setTimeout(tryReload, 250);
+                return;
+              }
+              const video = document.querySelector("video");
+              const hasVideoSource = !!(video?.currentSrc || video?.src);
+              const hasBlockingPanel = !!document.querySelector("#big-block-panel");
+              const hasPlayerError = document.body?.innerText?.includes("错误码：3001");
+              if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return;
+              util_debug("reload existing player with proxy playinfo", {
+                epId: getPlayInfoEpId(value),
+                hasVideoSource,
+                hasBlockingPanel,
+                hasPlayerError
+              });
+              try {
+                player.updateRequestConfig({
+                  reqHttpPlayUrlInfo: () => Promise2.resolve({ status: 200, data: value })
+                });
+                const result = player.reload();
+                if (result?.catch) {
+                  result.catch((error) => util_warn("reload existing player failed", error));
+                }
+              } catch (error) {
+                util_warn("reload existing player failed", error);
+              }
+            };
+            setTimeout(tryReload, 0);
+            return true;
+          }
+          function shouldApplyProxyPlayInfo(value, requestId) {
+            const currentEpId = getCurrentEpId();
+            const playInfoEpId = getPlayInfoEpId(value);
+            const requestIsStale = requestId !== void 0 && requestId !== currentPlayInfoRequestId;
+            const episodeIsStale = !!currentEpId && !!playInfoEpId && currentEpId !== playInfoEpId;
+            if (!requestIsStale && !episodeIsStale) return true;
+            util_debug("ignore stale proxy playinfo", {
+              currentEpId,
+              playInfoEpId,
+              requestId,
+              currentPlayInfoRequestId
+            });
+            return false;
           }
           function findEpisodeInSeason(season, epId) {
             if (!season) return void 0;
@@ -3286,10 +3453,32 @@ function scriptSource(invokeBy) {
               }
             }
           }
+          function redactProxyHost(proxyHost) {
+            try {
+              const url = new URL(proxyHost);
+              url.username = "";
+              url.password = "";
+              return url.href.replace(/\/$/, "");
+            } catch (_) {
+              return proxyHost.replace(/\/\/[^/@]+@/, "//<redacted>@");
+            }
+          }
+          function describeProxyCandidate(candidate) {
+            return {
+              proxyHost: redactProxyHost(candidate.proxyHost),
+              area: candidate.area
+            };
+          }
           function fetchPlayInfoByProxy(value) {
             const arc = value?.result?.arc;
             const episode = value?.result?.supplement?.ogv_episode_info;
             if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return void 0;
+            util_debug("replace playinfo by proxy start", {
+              epId: String(episode.episode_id),
+              aid: arc.aid,
+              cid: arc.cid,
+              currentEpId: getCurrentEpId()
+            });
             const candidates = [];
             const addCandidate = (proxyHost, area) => {
               if (!proxyHost) return;
@@ -3337,6 +3526,13 @@ function scriptSource(invokeBy) {
                 return playUrl.then((playUrl2) => ({ json, playUrl: playUrl2 }));
               }).then(({ json, playUrl }) => {
                 if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                  util_debug("replace playinfo by proxy success", {
+                    epId: String(episode.episode_id),
+                    proxyHost: redactProxyHost(candidate.proxyHost),
+                    area: candidate.area,
+                    videoCount: playUrl.dash?.video?.length,
+                    audioCount: playUrl.dash?.audio?.length
+                  });
                   value.result.play_video_type = "dash";
                   delete value.result.play_check;
                   value.result.video_info = playUrl;
@@ -3346,7 +3542,7 @@ function scriptSource(invokeBy) {
                 }
                 return Promise2.reject(json);
               }).catch((error) => {
-                util_warn("replace playinfo by proxy candidate failed", candidate, error);
+                util_warn("replace playinfo by proxy candidate failed", describeProxyCandidate(candidate), error);
                 return requestCandidate(index + 1);
               });
             };
@@ -3380,6 +3576,12 @@ function scriptSource(invokeBy) {
               nano.__balh_create_player_deferred__ = true;
               const createPlayer = nano.createPlayer;
               nano.createPlayer = function(config) {
+                util_debug("nano.createPlayer", {
+                  currentEpId: getCurrentEpId(),
+                  prefetchType: config?.prefetch?.playUrl?.result?.play_video_type,
+                  prefetchEpId: getPlayInfoEpId(config?.prefetch?.playUrl),
+                  currentPlayInfoEpId
+                });
                 if (config?.prefetch?.playUrl?.result?.play_video_type !== "none") {
                   return createPlayer.apply(this, arguments);
                 }
@@ -3387,8 +3589,18 @@ function scriptSource(invokeBy) {
                 config.requestConfig = {
                   ...config.requestConfig,
                   reqHttpPlayUrlInfo: () => {
+                    util_debug("reqHttpPlayUrlInfo before sync", {
+                      currentEpId: getCurrentEpId(),
+                      currentPlayInfoEpId,
+                      hasCurrentPlayInfoPromise: !!currentPlayInfoPromise
+                    });
                     syncCurrentPlayInfoWithLocation();
                     const currentEpId = getCurrentEpId();
+                    util_debug("reqHttpPlayUrlInfo after sync", {
+                      currentEpId,
+                      currentPlayInfoEpId,
+                      hasCurrentPlayInfoPromise: !!currentPlayInfoPromise
+                    });
                     if (currentEpId && currentPlayInfoEpId !== currentEpId) {
                       return Promise2.reject(new Error("proxy playurl missing for current episode"));
                     }
@@ -3435,18 +3647,51 @@ function scriptSource(invokeBy) {
           }
           function replaceHydrationPlayInfo(value) {
             if (!shouldReplaceHydrationPlayInfo(value)) return false;
+            const cachedPlayInfo = getStoredProxyPlayInfo(value);
+            if (cachedPlayInfo) {
+              if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true;
+              cachePlayInfo(cachedPlayInfo, false);
+              window.__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo;
+              deferNanoCreatePlayer(Promise2.resolve(cachedPlayInfo), cachedPlayInfo);
+              reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo);
+              return true;
+            }
             const playInfoPromise = fetchPlayInfoByProxy(value);
             if (!playInfoPromise) return false;
+            util_debug("replace hydration playinfo", {
+              epId: getPlayInfoEpId(value),
+              currentEpId: getCurrentEpId()
+            });
+            cachePlayInfo(value, false);
             deferNanoCreatePlayer(playInfoPromise, value);
+            const pendingRequestId = currentPlayInfoRequestId;
+            playInfoPromise.then((value2) => {
+              if (!shouldApplyProxyPlayInfo(value2, pendingRequestId)) return;
+              cachePlayInfo(value2, false);
+              window.__PLAYURL_HYDRATE_DATA__ = value2;
+              storeProxyPlayInfo(value2);
+              const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(value2);
+              reloadOnceAfterProxyReady(value2, playerReloadScheduled ? 3e3 : 0);
+            }).catch((error) => util_warn("replace hydration playinfo failed", error));
             return true;
           }
           function syncCurrentPlayInfoWithLocation() {
             const currentEpId = getCurrentEpId();
             if (!currentEpId || currentPlayInfoEpId === currentEpId) return;
+            util_debug("sync current playinfo with location", {
+              currentEpId,
+              currentPlayInfoEpId
+            });
             const episode = findCurrentEpisode();
             const value = buildPlayInfoFromEpisode(episode);
             if (value) {
               replaceHydrationPlayInfo(value);
+            } else {
+              util_warn("current episode data not found for playinfo sync", {
+                currentEpId,
+                hasNextData: !!window.__NEXT_DATA__,
+                hasInitialState: !!window.__INITIAL_STATE__
+              });
             }
           }
           function cachePlayInfo(value, updateCurrentPromise = true) {
@@ -3480,6 +3725,7 @@ function scriptSource(invokeBy) {
             }
           });
         }
+        forceBangumiEpisodeFullNavigation();
         function processUserStatus(value) {
           if (value) {
             value.area_limit = 0;
@@ -5436,7 +5682,7 @@ function scriptSource(invokeBy) {
           return;
         }
         log = util_debug;
-        log(`[${GM_info.script.name} v${GM_info.script.version} (${invokeBy})] run on: ${window.location.href}`);
+        log(`[${GM_info.script.name} v${GM_info.script.version} build ${__BALH_BUILD_VERSION__} (${invokeBy})] run on: ${window.location.href}`);
         version_remind();
         switch_to_old_player();
         area_limit_for_vue();
