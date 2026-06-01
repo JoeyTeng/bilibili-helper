@@ -3,7 +3,7 @@ import { access_key_param_if_exist } from "../../api/bilibili-utils"
 import { BiliPlusApi, fixMobiPlayUrlJson, fixThailandPlayUrlJson, generateMobiPlayUrlParams, getMobiPlayUrl } from "../../api/biliplus"
 import { Async, Promise as NativePromise } from "../../util/async"
 import { BalhDb } from "../../util/balh-db"
-import { Converters } from "../../util/converters"
+import { Converters, uposMap } from "../../util/converters"
 import { cookieStorage } from "../../util/cookie"
 import { util_init } from "../../util/initiator"
 import { log, util_warn } from "../../util/log"
@@ -15,7 +15,7 @@ import { ifNotNull } from "../../util/utils"
 import { Windows } from "../../util/windows"
 import { balh_config, isClosed } from "../config"
 import { util_page } from "../page"
-import { r } from "../r"
+import { FALSE, r } from "../r"
 import pageTemplate from './bangumi-play-page-template.html'
 import { bilibili_login } from "./bilibili_login"
 
@@ -695,6 +695,16 @@ export function area_limit_for_vue() {
                 }
             }
         }
+        function normalizeProxyPlayUrl(playUrl: any) {
+            if (!playUrl) return playUrl
+            if (playUrl.dash) {
+                Objects.convertKeyToSnakeCase(playUrl.dash)
+            }
+            if (!window.__balh_app_only__ && balh_config.upos_server) {
+                return Converters.replaceUpos(playUrl, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
+            }
+            return playUrl
+        }
         function redactProxyHost(proxyHost: string) {
             try {
                 const url = new URL(proxyHost)
@@ -786,18 +796,19 @@ export function area_limit_for_vue() {
                         : NativePromise.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data)
                     return playUrl.then(playUrl => ({ json, playUrl }))
                 }).then(({ json, playUrl }) => {
-                    if ((json?.code === 0 || playUrl?.code === 0 || (shouldUseMobiPlayUrl && playUrl?.dash)) && playUrl?.dash) {
+                    const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
+                    if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
                         log('replace playinfo by proxy success', {
                             epId: String(episode.episode_id),
                             proxyHost: redactProxyHost(candidate.proxyHost),
                             area: candidate.area,
-                            videoCount: playUrl.dash?.video?.length,
-                            audioCount: playUrl.dash?.audio?.length,
+                            videoCount: normalizedPlayUrl.dash?.video?.length,
+                            audioCount: normalizedPlayUrl.dash?.audio?.length,
                         })
                         value.result.play_video_type = 'dash'
                         delete value.result.play_check
-                        value.result.video_info = playUrl
-                        value.video_info = playUrl
+                        value.result.video_info = normalizedPlayUrl
+                        value.video_info = normalizedPlayUrl
                         removePlayInfoAreaLimit(value)
                         return value
                     }
