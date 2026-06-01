@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.4
+// @version      8.5.5
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -2799,6 +2799,9 @@ function scriptSource(invokeBy) {
             cookieStorage.set("balh_curr_season_id", window?.__INITIAL_STATE__?.mediaInfo?.season_id, "");
           }
           if (util_page.anime_ep() || util_page.anime_ss()) {
+            if (document.getElementById("__next") || document.getElementById("__NEXT_DATA__")) {
+              return;
+            }
             const $app = document.getElementById("app") || document.getElementById("client-app");
             if ((!$app || invalidInitialState) && !window.__NEXT_DATA__) {
               let appOnly = invalidInitialState?.mediaInfo?.rights?.appOnly ?? false;
@@ -3052,6 +3055,7 @@ function scriptSource(invokeBy) {
         });
       }
       function removeEpAreaLimit(ep) {
+        if (!ep) return;
         if (ep.epRights) {
           ep.epRights.area_limit = false;
           ep.epRights.allow_dm = 1;
@@ -3060,10 +3064,27 @@ function scriptSource(invokeBy) {
           ep.rights.area_limit = 0;
           ep.rights.allow_dm = 1;
         }
-        if (ep.badge === "受限" || ep.badge_info.text === "受限") {
+        if (ep.badge === "受限" || ep.badge_info?.text === "受限") {
           ep.badge = "";
           ep.badge_info = { "bg_color": "#FB7299", "bg_color_night": "#BB5B76", "text": "" };
           ep.badge_type = 0;
+        }
+      }
+      function removeSeasonAreaLimit(season) {
+        if (!season) return;
+        if (season.rights) {
+          season.rights.area_limit = 0;
+          season.rights.ban_area_show = 0;
+          season.rights.can_watch = 1;
+        }
+        season.episodes?.forEach(removeEpAreaLimit);
+        season.initEpList?.forEach(removeEpAreaLimit);
+        season.mediaInfo?.episodes?.forEach(removeEpAreaLimit);
+        season.seasonInfo?.mediaInfo?.episodes?.forEach(removeEpAreaLimit);
+        season.sections?.forEach((section) => section?.episodes?.forEach(removeEpAreaLimit));
+        season.section?.forEach((section) => section?.episodes?.forEach(removeEpAreaLimit));
+        if (season.epMap) {
+          Object.keys(season.epMap).forEach((epId) => removeEpAreaLimit(season.epMap[epId]));
         }
       }
       function area_limit_for_vue() {
@@ -3075,6 +3096,144 @@ function scriptSource(invokeBy) {
           util_debug("window.__playinfo__", window.__playinfo__);
           window.__playinfo__origin = window.__playinfo__;
           let playinfo = void 0;
+          function shouldReplaceHydrationPlayInfo(value) {
+            return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
+          }
+          function removePlayInfoAreaLimit(value) {
+            const plugins = value?.result?.plugins;
+            if (!Array.isArray(plugins)) return;
+            for (const plugin of plugins) {
+              if (plugin?.name === "AreaLimitPanel") {
+                plugin.config = { ...plugin.config, is_block: false };
+              }
+            }
+          }
+          function fetchPlayInfoByProxy(value) {
+            const arc = value?.result?.arc;
+            const episode = value?.result?.supplement?.ogv_episode_info;
+            if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return void 0;
+            const candidates = [];
+            const addCandidate = (proxyHost, area) => {
+              if (!proxyHost) return;
+              proxyHost = proxyHost.replace(/\/$/, "");
+              if (candidates.some((it) => it.proxyHost === proxyHost && it.area === area)) return;
+              candidates.push({ proxyHost, area });
+            };
+            if (/(僅|仅)限?港澳/.test(document.title) && balh_config.server_custom_hk) {
+              addCandidate(balh_config.server_custom_hk, "hk");
+            } else if (/(僅|仅)限?(臺|台)(灣|湾)/.test(document.title) && balh_config.server_custom_tw) {
+              addCandidate(balh_config.server_custom_tw, "tw");
+            }
+            addCandidate(balh_config.server_custom, "");
+            addCandidate(balh_config.server_custom_cn, "cn");
+            addCandidate(balh_config.server_custom_th, "th");
+            addCandidate(balh_config.server_custom_hk, "hk");
+            addCandidate(balh_config.server_custom_tw, "tw");
+            const params = new URLSearchParams({
+              avid: String(arc.aid || ""),
+              cid: String(arc.cid),
+              qn: "64",
+              type: "",
+              otype: "json",
+              ep_id: String(episode.episode_id),
+              fourk: "1",
+              fnver: "0",
+              fnval: "4048",
+              session: "",
+              module: "bangumi"
+            });
+            const requestCandidate = (index) => {
+              const candidate = candidates[index];
+              if (!candidate) return Promise2.reject(new Error("proxy playurl failed"));
+              const candidateParams = new URLSearchParams(params);
+              if (candidate.area) candidateParams.set("area", candidate.area);
+              const query = `${candidateParams}${access_key_param_if_exist(true)}`;
+              const originUrl = `//api.bilibili.com/pgc/player/web/playurl?${candidateParams}`;
+              const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost);
+              const url = candidate.area === "th" && isBilibiliApiProxy ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area) : isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
+              return Promise2.race([
+                Async.ajax(url),
+                Async.timeout(8e3).then(() => Promise2.reject(new Error("proxy playurl timeout")))
+              ]).then((json) => {
+                const playUrl = candidate.area === "th" && json?.data?.video_info ? fixThailandPlayUrlJson(json) : Promise2.resolve(json?.result || json?.data);
+                return playUrl.then((playUrl2) => ({ json, playUrl: playUrl2 }));
+              }).then(({ json, playUrl }) => {
+                if ((json?.code === 0 || playUrl?.code === 0) && playUrl?.dash) {
+                  value.result.play_video_type = "dash";
+                  delete value.result.play_check;
+                  value.result.video_info = playUrl;
+                  value.video_info = playUrl;
+                  removePlayInfoAreaLimit(value);
+                  return value;
+                }
+                return Promise2.reject(json);
+              }).catch((error) => {
+                util_warn("replace playinfo by proxy candidate failed", candidate, error);
+                return requestCandidate(index + 1);
+              });
+            };
+            return requestCandidate(0);
+          }
+          function deferNanoCreatePlayer(playInfoPromise) {
+            const installCreatePlayerWrapper = (nano) => {
+              if (!nano) return false;
+              if (nano.__balh_create_player_deferred__) return true;
+              if (!nano.createPlayer) {
+                if (nano.__balh_waiting_create_player__) return true;
+                nano.__balh_waiting_create_player__ = true;
+                let createPlayerValue = nano.createPlayer;
+                Object.defineProperty(nano, "createPlayer", {
+                  configurable: true,
+                  enumerable: true,
+                  get: () => createPlayerValue,
+                  set: (value) => {
+                    createPlayerValue = value;
+                    installCreatePlayerWrapper(nano);
+                  }
+                });
+                return true;
+              }
+              nano.__balh_create_player_deferred__ = true;
+              const createPlayer = nano.createPlayer;
+              nano.createPlayer = function(config) {
+                if (config?.prefetch?.playUrl?.result?.play_video_type !== "none") {
+                  return createPlayer.apply(this, arguments);
+                }
+                config.prefetch.playUrl = void 0;
+                config.requestConfig = {
+                  ...config.requestConfig,
+                  reqHttpPlayUrlInfo: () => playInfoPromise.then((value) => {
+                    playinfo = value;
+                    window.__PLAYURL_HYDRATE_DATA__ = value;
+                    return { status: 200, data: value };
+                  }).catch((error) => {
+                    util_warn("replace playinfo by proxy failed", error);
+                    return Promise2.reject(error);
+                  })
+                };
+                return createPlayer.apply(this, arguments);
+              };
+              return true;
+            };
+            const currentNano = window.nano;
+            if (installCreatePlayerWrapper(currentNano)) return;
+            const anyWindow = window;
+            if (anyWindow.__balh_waiting_nano__) return;
+            anyWindow.__balh_waiting_nano__ = true;
+            let nanoValue = currentNano;
+            Object.defineProperty(window, "nano", {
+              configurable: true,
+              enumerable: true,
+              get: () => nanoValue,
+              set: (value) => {
+                nanoValue = value;
+                installCreatePlayerWrapper(value);
+              }
+            });
+            if (nanoValue) {
+              anyWindow.nano = nanoValue;
+            }
+          }
           Object.defineProperty(window, "__playinfo__", {
             configurable: true,
             enumerable: true,
@@ -3087,6 +3246,13 @@ function scriptSource(invokeBy) {
               if (!window.__playinfo__origin && window.document.readyState === "loading") {
                 util_debug("__playinfo__", "init in html", value);
                 window.__playinfo__origin = value;
+                if (shouldReplaceHydrationPlayInfo(value)) {
+                  const playInfoPromise = fetchPlayInfoByProxy(value);
+                  if (playInfoPromise) {
+                    deferNanoCreatePlayer(playInfoPromise);
+                  }
+                  return;
+                }
                 return;
               }
               playinfo = value;
@@ -3121,16 +3287,22 @@ function scriptSource(invokeBy) {
                 if (!queries) return value;
                 for (const query of queries) {
                   const data2 = query.state.data;
-                  switch (query.queryKey[0]) {
+                  switch (query.queryKey?.[0]) {
                     case "pgc/view/web/season":
                       if (data2.epMap) {
-                        Object.keys(data2.epMap).forEach((epId) => removeEpAreaLimit(data2.epMap[epId]));
-                        data2.mediaInfo.episodes.forEach(removeEpAreaLimit);
-                      } else if (data2.seasonInfo.mediaInfo.episodes.length > 0) {
-                        data2.seasonInfo.mediaInfo.episodes.forEach(removeEpAreaLimit);
-                      } else if (data2.seasonInfo && !data2.seasonInfo.mediaInfo.rights.can_watch) {
+                        removeSeasonAreaLimit(data2);
+                      } else if (data2.seasonInfo?.mediaInfo?.episodes?.length > 0) {
+                        removeSeasonAreaLimit(data2);
+                      } else if (data2.seasonInfo && !data2.seasonInfo.mediaInfo?.rights?.can_watch) {
                         return;
                       }
+                      break;
+                    case "pgc/view/web/simple/season":
+                      removeSeasonAreaLimit(data2);
+                      break;
+                    case "pgc/view/web/ep/list":
+                      data2.episodes?.forEach(removeEpAreaLimit);
+                      data2.sections?.forEach((section) => section?.episodes?.forEach(removeEpAreaLimit));
                       break;
                     case "season/user/status":
                       processUserStatus(data2);
@@ -4453,7 +4625,12 @@ function scriptSource(invokeBy) {
             return season_type != null;
           }
           function isBangumiPage() {
-            const mediaInfo = window.__INITIAL_STATE__?.mediaInfo || window.__NEXT_DATA__?.props.pageProps.dehydratedState?.queries[0]?.state.data.seasonInfo?.mediaInfo;
+            const queries = window.__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries;
+            const seasonData = queries?.find?.((query) => {
+              const key = query?.queryKey?.[0];
+              return key === "pgc/view/web/season" || key === "pgc/view/web/simple/season";
+            })?.state?.data;
+            const mediaInfo = window.__INITIAL_STATE__?.mediaInfo || seasonData?.seasonInfo?.mediaInfo || seasonData?.mediaInfo || seasonData;
             return isBangumi(mediaInfo?.season_type || mediaInfo?.ssType);
           }
           function getSeasonId() {
