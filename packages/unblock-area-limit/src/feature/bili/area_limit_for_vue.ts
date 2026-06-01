@@ -783,7 +783,7 @@ export function area_limit_for_vue() {
                         ? fixThailandPlayUrlJson(json)
                         : window.__balh_app_only__ === true && json?.type === 'DASH'
                         ? fixMobiPlayUrlJson(json)
-                        : NativePromise.resolve(json?.result || json?.data)
+                        : NativePromise.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data)
                     return playUrl.then(playUrl => ({ json, playUrl }))
                 }).then(({ json, playUrl }) => {
                     if ((json?.code === 0 || playUrl?.code === 0 || (shouldUseMobiPlayUrl && playUrl?.dash)) && playUrl?.dash) {
