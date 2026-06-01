@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.6
+// @version      8.5.7
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -3219,8 +3219,9 @@ function scriptSource(invokeBy) {
           return;
         }
         function replacePlayInfo() {
-          util_debug("window.__playinfo__", window.__playinfo__);
-          window.__playinfo__origin = window.__playinfo__;
+          const initialPlayInfo = window.__playinfo__;
+          util_debug("window.__playinfo__", initialPlayInfo);
+          window.__playinfo__origin = initialPlayInfo;
           let playinfo = void 0;
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
@@ -3360,6 +3361,14 @@ function scriptSource(invokeBy) {
               anyWindow.nano = nanoValue;
             }
           }
+          function replaceHydrationPlayInfo(value) {
+            if (!shouldReplaceHydrationPlayInfo(value)) return false;
+            const playInfoPromise = fetchPlayInfoByProxy(value);
+            if (!playInfoPromise) return false;
+            deferNanoCreatePlayer(playInfoPromise);
+            return true;
+          }
+          replaceHydrationPlayInfo(initialPlayInfo);
           Object.defineProperty(window, "__playinfo__", {
             configurable: true,
             enumerable: true,
@@ -3372,11 +3381,7 @@ function scriptSource(invokeBy) {
               if (!window.__playinfo__origin && window.document.readyState === "loading") {
                 util_debug("__playinfo__", "init in html", value);
                 window.__playinfo__origin = value;
-                if (shouldReplaceHydrationPlayInfo(value)) {
-                  const playInfoPromise = fetchPlayInfoByProxy(value);
-                  if (playInfoPromise) {
-                    deferNanoCreatePlayer(playInfoPromise);
-                  }
+                if (replaceHydrationPlayInfo(value)) {
                   return;
                 }
                 return;
