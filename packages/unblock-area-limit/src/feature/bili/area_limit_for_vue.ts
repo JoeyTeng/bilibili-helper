@@ -709,7 +709,7 @@ export function area_limit_for_vue() {
         function fetchPlayInfoByProxy(value: any) {
             const arc = value?.result?.arc
             const episode = value?.result?.supplement?.ogv_episode_info
-            if (!arc?.cid || !episode?.episode_id || !balh_config.server_custom || !localStorage.access_key) return undefined
+            if (!arc?.cid || !episode?.episode_id) return undefined
             log('replace playinfo by proxy start', {
                 epId: String(episode.episode_id),
                 aid: arc.aid,
@@ -733,6 +733,7 @@ export function area_limit_for_vue() {
             addCandidate(balh_config.server_custom_th, 'th')
             addCandidate(balh_config.server_custom_hk, 'hk')
             addCandidate(balh_config.server_custom_tw, 'tw')
+            if (!candidates.length) return undefined
             const params = new URLSearchParams({
                 avid: String(arc.aid || ''),
                 cid: String(arc.cid),
@@ -755,6 +756,10 @@ export function area_limit_for_vue() {
                 const originUrl = `//api.bilibili.com/pgc/player/web/playurl?${candidateParams}`
                 const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost)
                 const shouldUseMobiPlayUrl = candidate.area === 'th' || window.__balh_app_only__ === true
+                if (shouldUseMobiPlayUrl && !localStorage.access_key) {
+                    util_warn('skip mobi proxy candidate without access_key', describeProxyCandidate(candidate))
+                    return requestCandidate(index + 1)
+                }
                 const url = (() => {
                     if (shouldUseMobiPlayUrl) {
                         return isBilibiliApiProxy
