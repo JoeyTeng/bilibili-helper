@@ -27,7 +27,7 @@ const userscriptPath = userscriptOption ? path.resolve(rootDir, userscriptOption
 const tampermonkeyExtensionPath = tampermonkeyExtensionOption ? path.resolve(rootDir, tampermonkeyExtensionOption) : undefined
 const tampermonkeyInstallPath = tampermonkeyInstallOption ? path.resolve(rootDir, tampermonkeyInstallOption) : undefined
 const accessKeyFile = accessKeyFileOption ? path.resolve(rootDir, accessKeyFileOption) : undefined
-const proxyServer = proxyServerOption || ((launch || userscriptPath || tampermonkeyInstallPath) ? 'https://atri.ink' : undefined)
+const proxyServer = proxyServerOption || ((launch || userscriptPath || tampermonkeyInstallPath || tampermonkeyInstallUrlOption) ? 'https://atri.ink' : undefined)
 const tag = readOption('--tag') || new Date().toISOString().replace(/[-:.]/g, '')
 const logPath = path.join(outDir, `${tag}.log`)
 
@@ -47,7 +47,7 @@ Options:
   --tampermonkey-install-url <url>
                           Install a userscript URL through Tampermonkey before testing.
   --access-key-file      Read Bilibili access_key from a local file and set localStorage.
-  --proxy-server <url>   Set BALH custom proxy cookies. Defaults to https://atri.ink with --launch/--userscript.
+  --proxy-server <url>   Set BALH custom proxy cookies. Defaults to https://atri.ink with --launch/--userscript/Tampermonkey install.
   --start-url <url>      Initial playable episode URL.
   --blocked-url <url>    Episode URL expected to fail because of account entitlement.
   --return-url <url>     URL to click back to after the blocked episode.

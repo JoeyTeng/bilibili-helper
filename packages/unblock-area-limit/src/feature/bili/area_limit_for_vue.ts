@@ -595,15 +595,35 @@ export function area_limit_for_vue() {
                     return '首选'
             }
         }
-        function getBangumiAreaHintText() {
-            const metaText = Array.from(document.querySelectorAll<HTMLMetaElement>('meta[property="og:title"], meta[name="description"], meta[property="og:description"]'))
-                .map(meta => meta.content)
+        function getBangumiAreaHintText(value?: any) {
+            const initialState = (window as any).__INITIAL_STATE__ || {}
+            const seasonInfo = value?.result?.supplement?.ogv_season_info || {}
+            const episodeInfo = value?.result?.supplement?.ogv_episode_info || {}
+            const fields = [
+                document.title,
+                seasonInfo.title,
+                seasonInfo.season_title,
+                seasonInfo.origin_name,
+                seasonInfo.show_title,
+                episodeInfo.title,
+                episodeInfo.long_title,
+                initialState.h1Title,
+                initialState.mediaInfo?.title,
+                initialState.mediaInfo?.originName,
+                initialState.mediaInfo?.origin_name,
+                initialState.mediaInfo?.seasonTitle,
+                initialState.mediaInfo?.season_title,
+                initialState.epInfo?.titleFormat,
+                initialState.epInfo?.longTitle,
+                initialState.epInfo?.long_title,
+            ]
+            return fields
+                .filter((item): item is string | number => typeof item === 'string' || typeof item === 'number')
+                .map(item => String(item))
                 .join('\n')
-            const pageText = document.body?.textContent || document.documentElement?.textContent || ''
-            return `${document.title}\n${metaText}\n${pageText.slice(0, 500000)}`
         }
-        function getHintedProxyArea(): ProxyArea | undefined {
-            const hintText = getBangumiAreaHintText()
+        function getHintedProxyArea(value?: any): ProxyArea | undefined {
+            const hintText = getBangumiAreaHintText(value)
             if (/(僅|仅)限?港澳(臺|台)?/.test(hintText)) return 'hk'
             if (/(僅|仅)限?(臺|台)(灣|湾)/.test(hintText)) return 'tw'
             return undefined
@@ -866,7 +886,7 @@ export function area_limit_for_vue() {
                 if (candidates.some(it => it.proxyHost === proxyHost && it.area === area)) return
                 candidates.push({ proxyHost, area, label })
             }
-            const hintedArea = getHintedProxyArea()
+            const hintedArea = getHintedProxyArea(value)
             if (hintedArea) {
                 addCandidate(getProxyHostForArea(hintedArea), hintedArea, `页面提示${getProxyAreaLabel(hintedArea)}`)
             }
