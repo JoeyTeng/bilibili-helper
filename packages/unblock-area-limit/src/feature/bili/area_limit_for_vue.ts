@@ -615,6 +615,28 @@ export function area_limit_for_vue() {
             if (error?.status != null) return `HTTP ${error.status}`
             return Objects.stringify(error)
         }
+        function getProxyErrorPriority(error: any) {
+            const message = describeProxyError(error)
+            if (error?.code === -10403 || /(大会员|大會員|会员专享|會員專享|付费|付費|承包|权限|權限)/.test(message)) return 300
+            if (error?.code === 403 || error?.code === -40301 || /(地区限制|地區限制|区域限制|區域限制)/.test(message)) return 200
+            if (error instanceof Error) return 100
+            if (error?.status != null) return 80
+            if (error?.code != null) return 60
+            return 0
+        }
+        function choosePreferredProxyError(current: any, next: any) {
+            if (!current) return next
+            return getProxyErrorPriority(next) > getProxyErrorPriority(current) ? next : current
+        }
+        function isEntitlementProxyError(error: any) {
+            return getProxyErrorPriority(error) >= 300
+        }
+        function describeProxyErrorForUser(error: any) {
+            if (isEntitlementProxyError(error)) {
+                return '大会员专享限制：当前账号没有该集播放权限。脚本只解除地区限制，不能绕过大会员或付费限制。'
+            }
+            return describeProxyError(error)
+        }
         function hidePlayerStatusWhenVideoReady() {
             let retries = 0
             const wait = () => {
@@ -933,7 +955,7 @@ export function area_limit_for_vue() {
                     }
                     return NativePromise.reject(json)
                 }).catch(error => {
-                    lastCandidateError = error
+                    lastCandidateError = choosePreferredProxyError(lastCandidateError, error)
                     ui.playerStatus(`正在尝试下一个解析服务器`, {
                         detail: `${candidate.label}失败：${describeProxyError(error)}`,
                     })
@@ -942,8 +964,8 @@ export function area_limit_for_vue() {
                 })
             }
             return requestCandidate(0).catch(error => {
-                ui.playerStatus('解析播放地址失败', {
-                    detail: describeProxyError(error),
+                ui.playerStatus(isEntitlementProxyError(error) ? '当前账号无该集播放权限' : '解析播放地址失败', {
+                    detail: describeProxyErrorForUser(error),
                     state: 'error',
                 })
                 return NativePromise.reject(error)

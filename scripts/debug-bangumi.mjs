@@ -20,6 +20,7 @@ const outDir = path.resolve(rootDir, readOption('--out-dir') || '.codex-tmp/play
 const userscriptOption = readOption('--userscript')
 const tampermonkeyExtensionOption = readOption('--tampermonkey-extension')
 const tampermonkeyInstallOption = readOption('--tampermonkey-install')
+const tampermonkeyInstallUrlOption = readOption('--tampermonkey-install-url')
 const accessKeyFileOption = readOption('--access-key-file')
 const proxyServerOption = readOption('--proxy-server')
 const userscriptPath = userscriptOption ? path.resolve(rootDir, userscriptOption) : undefined
@@ -43,6 +44,8 @@ Options:
                           Load a Tampermonkey extension directory in --launch mode.
   --tampermonkey-install <path>
                           Serve and install a userscript through Tampermonkey before testing.
+  --tampermonkey-install-url <url>
+                          Install a userscript URL through Tampermonkey before testing.
   --access-key-file      Read Bilibili access_key from a local file and set localStorage.
   --proxy-server <url>   Set BALH custom proxy cookies. Defaults to https://atri.ink with --launch/--userscript.
   --start-url <url>      Initial playable episode URL.
@@ -155,7 +158,16 @@ async function installTampermonkeyScript(context, installUrl) {
     const pagesBefore = new Set(context.pages())
     const page = await context.newPage()
     record(`install userscript ${installUrl}`)
-    await page.goto(installUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    const downloadPromise = page.waitForEvent('download', { timeout: 60000 }).catch(() => undefined)
+    try {
+        await page.goto(installUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    } catch (error) {
+        if (!String(error).includes('Download is starting')) throw error
+        const download = await downloadPromise
+        record(`Tampermonkey did not intercept userscript URL; browser downloaded ${download?.suggestedFilename() || installUrl}`)
+        await page.close().catch(() => {})
+        return false
+    }
     await page.waitForTimeout(5000)
 
     const pages = context.pages()
@@ -339,10 +351,14 @@ async function main() {
         }
         recordContextState(context, 'after setup')
 
-        if (tampermonkeyInstallPath) {
-            const served = await serveUserscript(tampermonkeyInstallPath)
-            userscriptServer = served.server
-            const installed = await installTampermonkeyScript(context, served.url)
+        if (tampermonkeyInstallPath || tampermonkeyInstallUrlOption) {
+            let installUrl = tampermonkeyInstallUrlOption
+            if (tampermonkeyInstallPath) {
+                const served = await serveUserscript(tampermonkeyInstallPath)
+                userscriptServer = served.server
+                installUrl = served.url
+            }
+            const installed = await installTampermonkeyScript(context, installUrl)
             record(`tampermonkey install result=${installed}`)
             recordContextState(context, 'after tampermonkey install')
         }
