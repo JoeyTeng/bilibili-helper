@@ -657,9 +657,15 @@ export function area_limit_for_vue() {
             }
             return describeProxyError(error)
         }
-        function hidePlayerStatusWhenVideoReady() {
+        function hidePlayerStatusWhenVideoReady(epId: string | undefined, requestId: number) {
             let retries = 0
+            const isStillCurrent = () => {
+                const currentEpId = getCurrentEpId()
+                return requestId === currentPlayInfoRequestId
+                    && (!epId || !currentEpId || epId === currentEpId)
+            }
             const wait = () => {
+                if (!isStillCurrent()) return
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 if ((video?.currentSrc || video?.src) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
                     ui.hidePlayerStatus(500)
@@ -970,7 +976,7 @@ export function area_limit_for_vue() {
                             detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
                             state: 'success',
                         })
-                        hidePlayerStatusWhenVideoReady()
+                        hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), currentPlayInfoRequestId)
                         return value
                     }
                     return NativePromise.reject(json)
@@ -1102,7 +1108,7 @@ export function area_limit_for_vue() {
                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
                 deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo)
                 reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
-                hidePlayerStatusWhenVideoReady()
+                hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), currentPlayInfoRequestId)
                 return true
             }
             const playInfoPromise = fetchPlayInfoByProxy(value)
