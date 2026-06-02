@@ -20,13 +20,23 @@ export function injectXhr({ transformRequest, transformResponse }) {
                 // debugger
             }
             let container = {} // 用来替换responseText等变量
+            const setContainerResponse = (response: any) => {
+                container.__has_replacement = true
+                container.response = response
+                if (typeof response === 'string') {
+                    container.responseText = response
+                } else if (response instanceof ArrayBuffer || ArrayBuffer.isView(response) || response instanceof Blob) {
+                    delete container.responseText
+                } else {
+                    container.responseText = JSON.stringify(response)
+                }
+            }
             const dispatchResultTransformer = p => {
                 let event = {} // 伪装的event
                 return p
                     .then(r => {
                         container.readyState = 4
-                        container.response = r
-                        container.responseText = typeof r === 'string' ? r : JSON.stringify(r)
+                        setContainerResponse(r)
                         container.__onreadystatechange(event) // 直接调用会不会存在this指向错误的问题? => 目前没看到, 先这样(;¬_¬)
                     })
                     .catch(e => {
@@ -70,8 +80,7 @@ export function injectXhr({ transformRequest, transformResponse }) {
                                         response.compose(dispatchResultTransformerCreator())
                                     } else {
                                         // 同步转换
-                                        container.response = response
-                                        container.responseText = typeof response === 'string' ? response : JSON.stringify(response)
+                                        setContainerResponse(response)
                                     }
                                 } else {
                                     // 不转换
@@ -83,7 +92,7 @@ export function injectXhr({ transformRequest, transformResponse }) {
                                 }
                             }
                             // 这里的this是原始的xhr, 在container.responseText设置了值时需要替换成代理对象
-                            cb.apply(container.responseText ? receiver : this, arguments)
+                            cb.apply(container.__has_replacement ? receiver : this, arguments)
                         }
                     }
                     target[prop] = value

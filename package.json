@@ -20,7 +20,8 @@
     "dev:balh": "node scripts/build.mjs --watch",
     "serve:userscript": "node scripts/serve-userscript.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm run build"
+    "check": "pnpm run typecheck && pnpm run test:subtitle && pnpm run build",
+    "test:subtitle": "node scripts/test-subtitle-web-view.mjs"
   },
   "repository": {
     "type": "git",
