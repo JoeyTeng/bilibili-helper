@@ -657,15 +657,19 @@ export function area_limit_for_vue() {
             }
             return describeProxyError(error)
         }
+        function isCurrentPlayInfoRequest(epId: string | undefined, requestId: number) {
+            const currentEpId = getCurrentEpId()
+            return requestId === currentPlayInfoRequestId
+                && (!epId || !currentEpId || epId === currentEpId)
+        }
+        function playerStatusForRequest(epId: string | undefined, requestId: number, message: string, options?: Parameters<typeof ui.playerStatus>[1]) {
+            if (!isCurrentPlayInfoRequest(epId, requestId)) return
+            ui.playerStatus(message, options)
+        }
         function hidePlayerStatusWhenVideoReady(epId: string | undefined, requestId: number) {
             let retries = 0
-            const isStillCurrent = () => {
-                const currentEpId = getCurrentEpId()
-                return requestId === currentPlayInfoRequestId
-                    && (!epId || !currentEpId || epId === currentEpId)
-            }
             const wait = () => {
-                if (!isStillCurrent()) return
+                if (!isCurrentPlayInfoRequest(epId, requestId)) return
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 if ((video?.currentSrc || video?.src) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
                     ui.hidePlayerStatus(500)
@@ -871,16 +875,18 @@ export function area_limit_for_vue() {
                 area: candidate.area,
             }
         }
-        function fetchPlayInfoByProxy(value: any) {
+        function fetchPlayInfoByProxy(value: any, requestId: number) {
             const arc = value?.result?.arc
             const episode = value?.result?.supplement?.ogv_episode_info
             if (!arc?.cid || !episode?.episode_id) return undefined
+            const epId = String(episode.episode_id)
             const startedAt = Date.now()
             log('replace playinfo by proxy start', {
-                epId: String(episode.episode_id),
+                epId,
                 aid: arc.aid,
                 cid: arc.cid,
                 currentEpId: getCurrentEpId(),
+                requestId,
             })
             const candidates: ProxyCandidate[] = []
             const addCandidate = (proxyHost: string | undefined, area: ProxyArea, label = getProxyAreaLabel(area)) => {
@@ -903,7 +909,7 @@ export function area_limit_for_vue() {
             addCandidate(balh_config.server_custom_hk, 'hk')
             addCandidate(balh_config.server_custom_tw, 'tw')
             if (!candidates.length) return undefined
-            ui.playerStatus('解除B站区域限制正在运行', {
+            playerStatusForRequest(epId, requestId, '解除B站区域限制正在运行', {
                 detail: '检测到受限番剧，正在解析播放地址',
             })
             const params = new URLSearchParams({
@@ -933,7 +939,7 @@ export function area_limit_for_vue() {
                     util_warn('skip mobi proxy candidate without access_key', describeProxyCandidate(candidate))
                     return requestCandidate(index + 1)
                 }
-                ui.playerStatus(`正在尝试${candidate.label}解析服务器`, {
+                playerStatusForRequest(epId, requestId, `正在尝试${candidate.label}解析服务器`, {
                     detail: `${index + 1}/${candidates.length} ${redactProxyHost(candidate.proxyHost)}`,
                 })
                 const url = (() => {
@@ -960,7 +966,7 @@ export function area_limit_for_vue() {
                     const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
                     if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
                         log('replace playinfo by proxy success', {
-                            epId: String(episode.episode_id),
+                            epId,
                             proxyHost: redactProxyHost(candidate.proxyHost),
                             area: candidate.area,
                             videoCount: normalizedPlayUrl.dash?.video?.length,
@@ -972,17 +978,17 @@ export function area_limit_for_vue() {
                         value.video_info = normalizedPlayUrl
                         removePlayInfoAreaLimit(value)
                         storeBangumiArea(value, candidate.area)
-                        ui.playerStatus('解析成功，正在启动播放器', {
+                        playerStatusForRequest(epId, requestId, '解析成功，正在启动播放器', {
                             detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
                             state: 'success',
                         })
-                        hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), currentPlayInfoRequestId)
+                        hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId)
                         return value
                     }
                     return NativePromise.reject(json)
                 }).catch(error => {
                     lastCandidateError = choosePreferredProxyError(lastCandidateError, error)
-                    ui.playerStatus(`正在尝试下一个解析服务器`, {
+                    playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
                         detail: `${candidate.label}失败：${describeProxyError(error)}`,
                     })
                     util_warn('replace playinfo by proxy candidate failed', describeProxyCandidate(candidate), error)
@@ -990,20 +996,38 @@ export function area_limit_for_vue() {
                 })
             }
             return requestCandidate(0).catch(error => {
-                ui.playerStatus(isEntitlementProxyError(error) ? '当前账号无该集播放权限' : '解析播放地址失败', {
+                playerStatusForRequest(epId, requestId, isEntitlementProxyError(error) ? '当前账号无该集播放权限' : '解析播放地址失败', {
                     detail: describeProxyErrorForUser(error),
                     state: 'error',
                 })
                 return NativePromise.reject(error)
             })
         }
-        function setCurrentPlayInfoPromise(playInfoPromise: Promise<any>, epId: string | undefined) {
-            currentPlayInfoPromise = playInfoPromise
+        function beginCurrentPlayInfoRequest(epId: string | undefined) {
+            currentPlayInfoPromise = undefined
             currentPlayInfoEpId = epId
             currentPlayInfoRequestId += 1
+            return currentPlayInfoRequestId
         }
-        function deferNanoCreatePlayer(playInfoPromise: Promise<any>, value: any) {
-            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value))
+        function setCurrentPlayInfoPromise(playInfoPromise: Promise<any>, epId: string | undefined, requestId?: number) {
+            if (requestId !== undefined && requestId !== currentPlayInfoRequestId) {
+                log('ignore stale current playinfo promise', {
+                    epId,
+                    requestId,
+                    currentPlayInfoRequestId,
+                })
+                return requestId
+            }
+            currentPlayInfoPromise = playInfoPromise
+            currentPlayInfoEpId = epId
+            if (requestId === undefined) {
+                currentPlayInfoRequestId += 1
+                requestId = currentPlayInfoRequestId
+            }
+            return requestId
+        }
+        function deferNanoCreatePlayer(playInfoPromise: Promise<any>, value: any, requestId?: number) {
+            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value), requestId)
             const installCreatePlayerWrapper = (nano: any): boolean => {
                 if (!nano) return false
                 if (nano.__balh_create_player_deferred__) return true
@@ -1097,6 +1121,7 @@ export function area_limit_for_vue() {
         }
         function replaceHydrationPlayInfo(value: any): boolean {
             if (!shouldReplaceHydrationPlayInfo(value)) return false
+            if (!value?.result?.arc?.cid || !value?.result?.supplement?.ogv_episode_info?.episode_id) return false
             const cachedPlayInfo = getStoredProxyPlayInfo(value)
             if (cachedPlayInfo) {
                 if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true
@@ -1107,19 +1132,21 @@ export function area_limit_for_vue() {
                 cachePlayInfo(cachedPlayInfo, false)
                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
                 deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo)
-                reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
+                const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
+                reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3000 : 0)
                 hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), currentPlayInfoRequestId)
                 return true
             }
-            const playInfoPromise = fetchPlayInfoByProxy(value)
+            const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(value))
+            const playInfoPromise = fetchPlayInfoByProxy(value, requestId)
             if (!playInfoPromise) return false
             log('replace hydration playinfo', {
                 epId: getPlayInfoEpId(value),
                 currentEpId: getCurrentEpId(),
             })
             cachePlayInfo(value, false)
-            deferNanoCreatePlayer(playInfoPromise, value)
-            const pendingRequestId = currentPlayInfoRequestId
+            deferNanoCreatePlayer(playInfoPromise, value, requestId)
+            const pendingRequestId = requestId
             playInfoPromise.then(value => {
                 if (!shouldApplyProxyPlayInfo(value, pendingRequestId)) return
                 cachePlayInfo(value, false)
