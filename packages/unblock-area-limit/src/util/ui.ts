@@ -15,6 +15,7 @@ export namespace ui {
 
     let playerStatusRetryTimer: number | undefined
     let playerStatusHideTimer: number | undefined
+    let pendingPlayerStatus: { message: string, options: PlayerStatusOptions } | undefined
 
     function ensurePlayerStatusStyle() {
         if (document.getElementById('balh-player-status-style')) return
@@ -101,6 +102,7 @@ body.balh-player-status-active .bpx-player-toast-wrap {
 
     export function playerStatus(message: string, options: PlayerStatusOptions = {}) {
         ensurePlayerStatusStyle()
+        pendingPlayerStatus = { message, options: { ...options } }
         if (playerStatusHideTimer !== undefined) {
             clearTimeout(playerStatusHideTimer)
             playerStatusHideTimer = undefined
@@ -111,11 +113,18 @@ body.balh-player-status-active .bpx-player-toast-wrap {
             if (playerStatusRetryTimer === undefined) {
                 playerStatusRetryTimer = window.setTimeout(() => {
                     playerStatusRetryTimer = undefined
-                    playerStatus(message, options)
+                    if (pendingPlayerStatus) {
+                        playerStatus(pendingPlayerStatus.message, pendingPlayerStatus.options)
+                    }
                 }, 100)
             }
             return
         }
+        if (playerStatusRetryTimer !== undefined) {
+            clearTimeout(playerStatusRetryTimer)
+            playerStatusRetryTimer = undefined
+        }
+        pendingPlayerStatus = undefined
 
         let status = document.getElementById('balh-player-status')
         if (!status) {
@@ -149,6 +158,11 @@ body.balh-player-status-active .bpx-player-toast-wrap {
     }
 
     export function hidePlayerStatus(delay = 0) {
+        pendingPlayerStatus = undefined
+        if (playerStatusRetryTimer !== undefined) {
+            clearTimeout(playerStatusRetryTimer)
+            playerStatusRetryTimer = undefined
+        }
         if (playerStatusHideTimer !== undefined) {
             clearTimeout(playerStatusHideTimer)
         }

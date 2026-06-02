@@ -8,4 +8,3 @@ Last updated: 2026-06-02
   - User report: the page's multi-language subtitle feature is sometimes unavailable.
   - Status: recorded only; no investigation has started.
   - Likely starting points: `packages/unblock-area-limit/src/feature/bili/area_limit_xhr_.ts` subtitle handling, `/x/player/v2` responses, and `/bfs/subtitle/` response rewriting.
-
