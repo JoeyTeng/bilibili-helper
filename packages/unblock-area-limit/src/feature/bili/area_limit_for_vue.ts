@@ -1011,6 +1011,10 @@ export function area_limit_for_vue() {
                 })
             }
             return requestCandidate(0).catch(error => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                    hidePlayerStatusForRequest(requestId)
+                    return NativePromise.reject(error)
+                }
                 playerStatusForRequest(epId, requestId, isEntitlementProxyError(error) ? '当前账号无该集播放权限' : '解析播放地址失败', {
                     detail: describeProxyErrorForUser(error),
                     state: 'error',
