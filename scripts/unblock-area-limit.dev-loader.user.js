@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制.dev.local.loader
 // @namespace    https://github.com/JoeyTeng
-// @version      0.1.1
+// @version      0.1.2
 // @description  Loads the local built BALH userscript from the dev server.
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -28,7 +28,10 @@
 // ==/UserScript==
 
 (() => {
-    const defaultScriptUrl = 'http://127.0.0.1:48711/unblock-area-limit.user.js'
+    const servedScriptUrl = '__BALH_DEV_SCRIPT_URL__'
+    const defaultScriptUrl = servedScriptUrl.startsWith('__BALH_')
+        ? 'http://127.0.0.1:48711/unblock-area-limit.user.js'
+        : servedScriptUrl
     const scriptUrl = localStorage.balh_dev_loader_url || defaultScriptUrl
     const url = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}balh_loader_ts=${Date.now()}`
     const startedAt = Date.now()

@@ -23,6 +23,10 @@ function readOption(name) {
     return value
 }
 
+function escapeJsSingleQuotedString(value) {
+    return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+}
+
 async function serveFile(response, filePath, contentType) {
     try {
         const body = await readFile(filePath)
@@ -40,13 +44,32 @@ async function serveFile(response, filePath, contentType) {
     }
 }
 
+async function serveLoader(request, response) {
+    const hostHeader = request.headers.host || `${host}:${port}`
+    const scriptUrl = `http://${hostHeader}/unblock-area-limit.user.js`
+    try {
+        const body = await readFile(loaderPath, 'utf8')
+        response.writeHead(200, {
+            'access-control-allow-origin': '*',
+            'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'content-type': 'application/javascript; charset=utf-8',
+        })
+        response.end(body.replace('__BALH_DEV_SCRIPT_URL__', escapeJsSingleQuotedString(scriptUrl)))
+    } catch (error) {
+        response.writeHead(500, {
+            'content-type': 'text/plain; charset=utf-8',
+        })
+        response.end(String(error?.stack || error))
+    }
+}
+
 const server = http.createServer((request, response) => {
     if (request.url?.startsWith('/unblock-area-limit.user.js')) {
         serveFile(response, userscriptPath, 'application/javascript; charset=utf-8')
         return
     }
     if (request.url?.startsWith('/unblock-area-limit.dev-loader.user.js')) {
-        serveFile(response, loaderPath, 'application/javascript; charset=utf-8')
+        serveLoader(request, response)
         return
     }
     response.writeHead(200, {
