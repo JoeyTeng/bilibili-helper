@@ -18,6 +18,7 @@
     "debug:bangumi": "node scripts/debug-bangumi.mjs",
     "dev": "node scripts/build.mjs --watch",
     "dev:balh": "node scripts/build.mjs --watch",
+    "serve:userscript": "node scripts/serve-userscript.mjs",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm run build"
   },

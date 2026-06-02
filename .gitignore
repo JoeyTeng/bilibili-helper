@@ -3,6 +3,7 @@
 .codex-tmp/
 .pnpm-store/
 /dist/
+auth.txt
 /test.js
 /test/
 *.min.js

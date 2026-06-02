@@ -510,9 +510,13 @@ export function area_limit_for_vue() {
         let currentPlayInfoPromise: Promise<any> | undefined
         let currentPlayInfoEpId: string | undefined
         let currentPlayInfoRequestId = 0
+        let playerStatusRequestId: number | undefined
         const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v1:'
         const proxyPlayInfoReloadPrefix = 'balh_proxy_playinfo_reload_v1:'
         const proxyPlayInfoCacheTtl = 10 * 60 * 1000
+        const bangumiAreaCacheKey = 'balh_bangumi_area_cache'
+        type ProxyArea = '' | 'cn' | 'th' | 'hk' | 'tw'
+        type ProxyCandidate = { proxyHost: string, area: ProxyArea, label: string }
         function shouldReplaceHydrationPlayInfo(value: any) {
             return (util_page.anime_ep() || util_page.anime_ss())
                 && value?.result?.supplement?.ogv_episode_info
@@ -531,6 +535,190 @@ export function area_limit_for_vue() {
             const cid = value?.result?.arc?.cid
             if (!epId || !cid) return undefined
             return `${epId}:${cid}`
+        }
+        function getPlayInfoSeasonId(value: any) {
+            const seasonId = value?.result?.supplement?.ogv_season_info?.season_id
+                ?? value?.result?.season_id
+                ?? util_page.ssId
+            return seasonId == null ? undefined : String(seasonId)
+        }
+        function readBangumiAreaCache() {
+            try {
+                return JSON.parse(localStorage.getItem(bangumiAreaCacheKey) || '{}')
+            } catch (error) {
+                util_warn('bangumi area cache read failed', error)
+                return {}
+            }
+        }
+        function getCachedBangumiArea(value: any): ProxyArea | undefined {
+            const seasonId = getPlayInfoSeasonId(value)
+            if (!seasonId) return undefined
+            const area = readBangumiAreaCache()[seasonId]
+            return area === 'cn' || area === 'th' || area === 'hk' || area === 'tw' ? area : undefined
+        }
+        function storeBangumiArea(value: any, area: ProxyArea) {
+            if (!area) return
+            const seasonId = getPlayInfoSeasonId(value)
+            if (!seasonId) return
+            try {
+                const cache = readBangumiAreaCache()
+                cache[seasonId] = area
+                localStorage.setItem(bangumiAreaCacheKey, JSON.stringify(cache))
+            } catch (error) {
+                util_warn('bangumi area cache write failed', error)
+            }
+        }
+        function getProxyHostForArea(area: ProxyArea) {
+            switch (area) {
+                case 'cn':
+                    return balh_config.server_custom_cn
+                case 'th':
+                    return balh_config.server_custom_th
+                case 'hk':
+                    return balh_config.server_custom_hk
+                case 'tw':
+                    return balh_config.server_custom_tw
+                default:
+                    return balh_config.server_custom
+            }
+        }
+        function getProxyAreaLabel(area: ProxyArea) {
+            switch (area) {
+                case 'cn':
+                    return '大陆'
+                case 'th':
+                    return '泰国'
+                case 'hk':
+                    return '香港'
+                case 'tw':
+                    return '台湾'
+                default:
+                    return '首选'
+            }
+        }
+        function getBangumiAreaHintText(value?: any) {
+            const initialState = (window as any).__INITIAL_STATE__ || {}
+            const seasonInfo = value?.result?.supplement?.ogv_season_info || {}
+            const episodeInfo = value?.result?.supplement?.ogv_episode_info || {}
+            const fields = [
+                document.title,
+                seasonInfo.title,
+                seasonInfo.season_title,
+                seasonInfo.origin_name,
+                seasonInfo.show_title,
+                episodeInfo.title,
+                episodeInfo.long_title,
+                initialState.h1Title,
+                initialState.mediaInfo?.title,
+                initialState.mediaInfo?.originName,
+                initialState.mediaInfo?.origin_name,
+                initialState.mediaInfo?.seasonTitle,
+                initialState.mediaInfo?.season_title,
+                initialState.epInfo?.titleFormat,
+                initialState.epInfo?.longTitle,
+                initialState.epInfo?.long_title,
+            ]
+            return fields
+                .filter((item): item is string | number => typeof item === 'string' || typeof item === 'number')
+                .map(item => String(item))
+                .join('\n')
+        }
+        function getHintedProxyArea(value?: any): ProxyArea | undefined {
+            const hintText = getBangumiAreaHintText(value)
+            if (/(僅|仅)限?港澳(臺|台)?/.test(hintText)) return 'hk'
+            if (/(僅|仅)限?(臺|台)(灣|湾)/.test(hintText)) return 'tw'
+            return undefined
+        }
+        function describeProxyError(error: any) {
+            if (error instanceof Error) return error.message
+            if (error?.message) return error.message
+            if (error?.code != null) return `${error.code}${error.message ? ` ${error.message}` : ''}`
+            if (error?.status != null) return `HTTP ${error.status}`
+            return Objects.stringify(error)
+        }
+        function getProxyErrorPriority(error: any) {
+            const message = describeProxyError(error)
+            if (error?.code === -10403 || /(大会员|大會員|会员专享|會員專享|付费|付費|承包|权限|權限)/.test(message)) return 300
+            if (error?.code === 403 || error?.code === -40301 || /(地区限制|地區限制|区域限制|區域限制)/.test(message)) return 200
+            if (error instanceof Error) return 100
+            if (error?.status != null) return 80
+            if (error?.code != null) return 60
+            return 0
+        }
+        function choosePreferredProxyError(current: any, next: any) {
+            if (!current) return next
+            return getProxyErrorPriority(next) > getProxyErrorPriority(current) ? next : current
+        }
+        function isEntitlementProxyError(error: any) {
+            return getProxyErrorPriority(error) >= 300
+        }
+        function describeProxyErrorForUser(error: any) {
+            if (isEntitlementProxyError(error)) {
+                return '大会员专享限制：当前账号没有该集播放权限。脚本只解除地区限制，不能绕过大会员或付费限制。'
+            }
+            return describeProxyError(error)
+        }
+        function isCurrentPlayInfoRequest(epId: string | undefined, requestId: number) {
+            const currentEpId = getCurrentEpId()
+            return requestId === currentPlayInfoRequestId
+                && (!epId || !currentEpId || epId === currentEpId)
+        }
+        function hidePlayerStatusForRequest(requestId: number, delay = 0) {
+            if (playerStatusRequestId !== requestId) return
+            playerStatusRequestId = undefined
+            ui.hidePlayerStatus(delay)
+        }
+        function clearPlayerStatusForNewRequest() {
+            if (playerStatusRequestId === undefined) return
+            playerStatusRequestId = undefined
+            ui.hidePlayerStatus(0)
+        }
+        function playerStatusForRequest(epId: string | undefined, requestId: number, message: string, options?: Parameters<typeof ui.playerStatus>[1]) {
+            if (!isCurrentPlayInfoRequest(epId, requestId)) return
+            playerStatusRequestId = requestId
+            ui.playerStatus(message, options)
+        }
+        function isElementActive(element: Element | null) {
+            if (!(element instanceof HTMLElement)) return false
+            const style = window.getComputedStyle(element)
+            const rect = element.getBoundingClientRect()
+            const hiddenByPlayerStatus = ui.isPlayerStatusHiddenElement(element)
+            return style.display !== 'none'
+                && (hiddenByPlayerStatus || (style.visibility !== 'hidden' && style.visibility !== 'collapse'))
+                && rect.width > 0
+                && rect.height > 0
+        }
+        function hasActiveBlockingPanel() {
+            return isElementActive(document.querySelector('#big-block-panel'))
+                || Array.from(document.querySelectorAll('.bilibili-player-video-panel-text')).some(isElementActive)
+        }
+        function hasPlayerErrorText() {
+            return document.body?.innerText?.includes('错误码：3001')
+        }
+        function hidePlayerStatusWhenVideoReady(epId: string | undefined, requestId: number) {
+            let retries = 0
+            const wait = () => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                    hidePlayerStatusForRequest(requestId)
+                    return
+                }
+                const video = document.querySelector('video') as HTMLVideoElement | null
+                const hasVideoSource = !!(video?.currentSrc || video?.src)
+                const hasUsableVideo = hasVideoSource
+                    && video.readyState >= HTMLMediaElement.HAVE_METADATA
+                    && !hasActiveBlockingPanel()
+                    && !hasPlayerErrorText()
+                if (hasUsableVideo) {
+                    hidePlayerStatusForRequest(requestId, 500)
+                    return
+                }
+                if (retries++ < 60) {
+                    setTimeout(wait, 500)
+                } else {
+                    hidePlayerStatusForRequest(requestId)
+                }
+            }
+            setTimeout(wait, 500)
         }
         function getStoredProxyPlayInfo(value: any) {
             const key = getPlayInfoCacheKey(value)
@@ -573,8 +761,8 @@ export function area_limit_for_vue() {
             setTimeout(() => {
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 const hasVideoSource = !!(video?.currentSrc || video?.src)
-                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
-                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                const hasBlockingPanel = hasActiveBlockingPanel()
+                const hasPlayerError = hasPlayerErrorText()
                 if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
                 sessionStorage.setItem(reloadKey, '1')
                 log('reload page to apply cached proxy playinfo', {
@@ -601,8 +789,8 @@ export function area_limit_for_vue() {
                 }
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 const hasVideoSource = !!(video?.currentSrc || video?.src)
-                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
-                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                const hasBlockingPanel = hasActiveBlockingPanel()
+                const hasPlayerError = hasPlayerErrorText()
                 if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
                 log('reload existing player with proxy playinfo', {
                     epId: getPlayInfoEpId(value),
@@ -669,6 +857,7 @@ export function area_limit_for_vue() {
         function buildPlayInfoFromEpisode(episode: any) {
             const epId = episode?.ep_id ?? episode?.episode_id ?? episode?.id
             if (!episode?.cid || !epId) return undefined
+            const seasonId = episode?.season_id ?? episode?.seasonId ?? episode?.ss_id ?? util_page.ssId
             return {
                 result: {
                     play_video_type: 'none',
@@ -680,7 +869,9 @@ export function area_limit_for_vue() {
                         ogv_episode_info: {
                             episode_id: epId,
                         },
-                        ogv_season_info: {},
+                        ogv_season_info: {
+                            season_id: seasonId,
+                        },
                     },
                     plugins: [],
                 },
@@ -721,27 +912,33 @@ export function area_limit_for_vue() {
                 area: candidate.area,
             }
         }
-        function fetchPlayInfoByProxy(value: any) {
+        function fetchPlayInfoByProxy(value: any, requestId: number) {
             const arc = value?.result?.arc
             const episode = value?.result?.supplement?.ogv_episode_info
             if (!arc?.cid || !episode?.episode_id) return undefined
+            const epId = String(episode.episode_id)
+            const startedAt = Date.now()
             log('replace playinfo by proxy start', {
-                epId: String(episode.episode_id),
+                epId,
                 aid: arc.aid,
                 cid: arc.cid,
                 currentEpId: getCurrentEpId(),
+                requestId,
             })
-            const candidates: { proxyHost: string, area: string }[] = []
-            const addCandidate = (proxyHost: string | undefined, area: string) => {
+            const candidates: ProxyCandidate[] = []
+            const addCandidate = (proxyHost: string | undefined, area: ProxyArea, label = getProxyAreaLabel(area)) => {
                 if (!proxyHost) return
                 proxyHost = proxyHost.replace(/\/$/, '')
                 if (candidates.some(it => it.proxyHost === proxyHost && it.area === area)) return
-                candidates.push({ proxyHost, area })
+                candidates.push({ proxyHost, area, label })
             }
-            if (/(僅|仅)限?港澳/.test(document.title) && balh_config.server_custom_hk) {
-                addCandidate(balh_config.server_custom_hk, 'hk')
-            } else if (/(僅|仅)限?(臺|台)(灣|湾)/.test(document.title) && balh_config.server_custom_tw) {
-                addCandidate(balh_config.server_custom_tw, 'tw')
+            const hintedArea = getHintedProxyArea(value)
+            if (hintedArea) {
+                addCandidate(getProxyHostForArea(hintedArea), hintedArea, `页面提示${getProxyAreaLabel(hintedArea)}`)
+            }
+            const cachedArea = getCachedBangumiArea(value)
+            if (cachedArea) {
+                addCandidate(getProxyHostForArea(cachedArea), cachedArea, `缓存${getProxyAreaLabel(cachedArea)}`)
             }
             addCandidate(balh_config.server_custom, '')
             addCandidate(balh_config.server_custom_cn, 'cn')
@@ -749,6 +946,9 @@ export function area_limit_for_vue() {
             addCandidate(balh_config.server_custom_hk, 'hk')
             addCandidate(balh_config.server_custom_tw, 'tw')
             if (!candidates.length) return undefined
+            playerStatusForRequest(epId, requestId, '解除B站区域限制正在运行', {
+                detail: '检测到受限番剧，正在解析播放地址',
+            })
             const params = new URLSearchParams({
                 avid: String(arc.aid || ''),
                 cid: String(arc.cid),
@@ -762,9 +962,10 @@ export function area_limit_for_vue() {
                 session: '',
                 module: 'bangumi',
             })
+            let lastCandidateError: any
             const requestCandidate = (index: number): Promise<any> => {
                 const candidate = candidates[index]
-                if (!candidate) return NativePromise.reject(new Error('proxy playurl failed'))
+                if (!candidate) return NativePromise.reject(lastCandidateError || new Error('proxy playurl failed'))
                 const candidateParams = new URLSearchParams(params)
                 if (candidate.area) candidateParams.set('area', candidate.area)
                 const query = `${candidateParams}${access_key_param_if_exist(true)}`
@@ -775,6 +976,9 @@ export function area_limit_for_vue() {
                     util_warn('skip mobi proxy candidate without access_key', describeProxyCandidate(candidate))
                     return requestCandidate(index + 1)
                 }
+                playerStatusForRequest(epId, requestId, `正在尝试${candidate.label}解析服务器`, {
+                    detail: `${index + 1}/${candidates.length} ${redactProxyHost(candidate.proxyHost)}`,
+                })
                 const url = (() => {
                     if (shouldUseMobiPlayUrl) {
                         return isBilibiliApiProxy
@@ -786,7 +990,7 @@ export function area_limit_for_vue() {
                         : `${candidate.proxyHost}?${query}`
                 })()
                 return NativePromise.race([
-                    Async.ajax<any>(url),
+                    Async.ajaxByXhr<any>(url),
                     Async.timeout(8000).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
                 ]).then(json => {
                     const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info
@@ -799,7 +1003,7 @@ export function area_limit_for_vue() {
                     const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
                     if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
                         log('replace playinfo by proxy success', {
-                            epId: String(episode.episode_id),
+                            epId,
                             proxyHost: redactProxyHost(candidate.proxyHost),
                             area: candidate.area,
                             videoCount: normalizedPlayUrl.dash?.video?.length,
@@ -810,23 +1014,63 @@ export function area_limit_for_vue() {
                         value.result.video_info = normalizedPlayUrl
                         value.video_info = normalizedPlayUrl
                         removePlayInfoAreaLimit(value)
+                        storeBangumiArea(value, candidate.area)
+                        playerStatusForRequest(epId, requestId, '解析成功，正在启动播放器', {
+                            detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
+                            state: 'success',
+                        })
+                        hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId)
                         return value
                     }
                     return NativePromise.reject(json)
                 }).catch(error => {
+                    lastCandidateError = choosePreferredProxyError(lastCandidateError, error)
+                    playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
+                        detail: `${candidate.label}失败：${describeProxyError(error)}`,
+                    })
                     util_warn('replace playinfo by proxy candidate failed', describeProxyCandidate(candidate), error)
                     return requestCandidate(index + 1)
                 })
             }
-            return requestCandidate(0)
+            return requestCandidate(0).catch(error => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                    hidePlayerStatusForRequest(requestId)
+                    return NativePromise.reject(error)
+                }
+                playerStatusForRequest(epId, requestId, isEntitlementProxyError(error) ? '当前账号无该集播放权限' : '解析播放地址失败', {
+                    detail: describeProxyErrorForUser(error),
+                    state: 'error',
+                })
+                return NativePromise.reject(error)
+            })
         }
-        function setCurrentPlayInfoPromise(playInfoPromise: Promise<any>, epId: string | undefined) {
-            currentPlayInfoPromise = playInfoPromise
+        function beginCurrentPlayInfoRequest(epId: string | undefined) {
+            clearPlayerStatusForNewRequest()
+            currentPlayInfoPromise = undefined
             currentPlayInfoEpId = epId
             currentPlayInfoRequestId += 1
+            return currentPlayInfoRequestId
         }
-        function deferNanoCreatePlayer(playInfoPromise: Promise<any>, value: any) {
-            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value))
+        function setCurrentPlayInfoPromise(playInfoPromise: Promise<any>, epId: string | undefined, requestId?: number) {
+            if (requestId !== undefined && requestId !== currentPlayInfoRequestId) {
+                log('ignore stale current playinfo promise', {
+                    epId,
+                    requestId,
+                    currentPlayInfoRequestId,
+                })
+                return requestId
+            }
+            currentPlayInfoPromise = playInfoPromise
+            currentPlayInfoEpId = epId
+            if (requestId === undefined) {
+                clearPlayerStatusForNewRequest()
+                currentPlayInfoRequestId += 1
+                requestId = currentPlayInfoRequestId
+            }
+            return requestId
+        }
+        function deferNanoCreatePlayer(playInfoPromise: Promise<any>, value: any, requestId?: number) {
+            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value), requestId)
             const installCreatePlayerWrapper = (nano: any): boolean => {
                 if (!nano) return false
                 if (nano.__balh_create_player_deferred__) return true
@@ -920,24 +1164,33 @@ export function area_limit_for_vue() {
         }
         function replaceHydrationPlayInfo(value: any): boolean {
             if (!shouldReplaceHydrationPlayInfo(value)) return false
+            if (!value?.result?.arc?.cid || !value?.result?.supplement?.ogv_episode_info?.episode_id) return false
             const cachedPlayInfo = getStoredProxyPlayInfo(value)
             if (cachedPlayInfo) {
                 if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true
+                const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(cachedPlayInfo))
+                playerStatusForRequest(getPlayInfoEpId(cachedPlayInfo), requestId, '读取缓存播放地址，正在启动播放器', {
+                    detail: `ep${getPlayInfoEpId(cachedPlayInfo)}`,
+                    state: 'success',
+                })
                 cachePlayInfo(cachedPlayInfo, false)
                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
-                deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo)
-                reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
+                deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo, requestId)
+                const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
+                reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3000 : 0)
+                hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), requestId)
                 return true
             }
-            const playInfoPromise = fetchPlayInfoByProxy(value)
+            const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(value))
+            const playInfoPromise = fetchPlayInfoByProxy(value, requestId)
             if (!playInfoPromise) return false
             log('replace hydration playinfo', {
                 epId: getPlayInfoEpId(value),
                 currentEpId: getCurrentEpId(),
             })
             cachePlayInfo(value, false)
-            deferNanoCreatePlayer(playInfoPromise, value)
-            const pendingRequestId = currentPlayInfoRequestId
+            deferNanoCreatePlayer(playInfoPromise, value, requestId)
+            const pendingRequestId = requestId
             playInfoPromise.then(value => {
                 if (!shouldApplyProxyPlayInfo(value, pendingRequestId)) return
                 cachePlayInfo(value, false)

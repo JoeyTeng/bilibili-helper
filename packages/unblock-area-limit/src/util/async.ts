@@ -154,6 +154,10 @@ namespace Async {
             })
     }
 
+    export function ajaxByXhr<T>(url: string): Promise<T> {
+        return requestByXhr<T>(url)
+    }
+
     export function jsonp(url: string) {
         return new Promise<void>((resolve, reject) => {
             document.head.appendChild(_('script', {
