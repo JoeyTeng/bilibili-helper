@@ -10,6 +10,13 @@ const port = Number(readOption('--port') || process.env.BALH_DEV_SERVER_PORT || 
 const host = readOption('--host') || process.env.BALH_DEV_SERVER_HOST || '127.0.0.1'
 const userscriptPath = path.join(rootDir, 'dist/unblock-area-limit.user.js')
 const loaderPath = path.join(rootDir, 'scripts/unblock-area-limit.dev-loader.user.js')
+const devServerHeaders = {
+    'access-control-allow-headers': 'Content-Type',
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'access-control-allow-origin': '*',
+    'access-control-allow-private-network': 'true',
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+}
 
 function readOption(name) {
     const inline = args.find((arg) => arg.startsWith(`${name}=`))
@@ -31,13 +38,13 @@ async function serveFile(response, filePath, contentType) {
     try {
         const body = await readFile(filePath)
         response.writeHead(200, {
-            'access-control-allow-origin': '*',
-            'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+            ...devServerHeaders,
             'content-type': contentType,
         })
         response.end(body)
     } catch (error) {
         response.writeHead(500, {
+            ...devServerHeaders,
             'content-type': 'text/plain; charset=utf-8',
         })
         response.end(String(error?.stack || error))
@@ -50,13 +57,13 @@ async function serveLoader(request, response) {
     try {
         const body = await readFile(loaderPath, 'utf8')
         response.writeHead(200, {
-            'access-control-allow-origin': '*',
-            'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+            ...devServerHeaders,
             'content-type': 'application/javascript; charset=utf-8',
         })
         response.end(body.replace('__BALH_DEV_SCRIPT_URL__', escapeJsSingleQuotedString(scriptUrl)))
     } catch (error) {
         response.writeHead(500, {
+            ...devServerHeaders,
             'content-type': 'text/plain; charset=utf-8',
         })
         response.end(String(error?.stack || error))
@@ -64,6 +71,11 @@ async function serveLoader(request, response) {
 }
 
 const server = http.createServer((request, response) => {
+    if (request.method === 'OPTIONS') {
+        response.writeHead(204, devServerHeaders)
+        response.end()
+        return
+    }
     if (request.url?.startsWith('/unblock-area-limit.user.js')) {
         serveFile(response, userscriptPath, 'application/javascript; charset=utf-8')
         return
@@ -73,7 +85,7 @@ const server = http.createServer((request, response) => {
         return
     }
     response.writeHead(200, {
-        'cache-control': 'no-store',
+        ...devServerHeaders,
         'content-type': 'text/html; charset=utf-8',
     })
     response.end(`<!doctype html>

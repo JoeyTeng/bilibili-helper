@@ -678,6 +678,20 @@ export function area_limit_for_vue() {
             playerStatusRequestId = requestId
             ui.playerStatus(message, options)
         }
+        function isElementActive(element: Element | null) {
+            if (!(element instanceof HTMLElement)) return false
+            const rect = element.getBoundingClientRect()
+            return window.getComputedStyle(element).display !== 'none'
+                && rect.width > 0
+                && rect.height > 0
+        }
+        function hasActiveBlockingPanel() {
+            return isElementActive(document.querySelector('#big-block-panel'))
+                || Array.from(document.querySelectorAll('.bilibili-player-video-panel-text')).some(isElementActive)
+        }
+        function hasPlayerErrorText() {
+            return document.body?.innerText?.includes('错误码：3001')
+        }
         function hidePlayerStatusWhenVideoReady(epId: string | undefined, requestId: number) {
             let retries = 0
             const wait = () => {
@@ -686,7 +700,12 @@ export function area_limit_for_vue() {
                     return
                 }
                 const video = document.querySelector('video') as HTMLVideoElement | null
-                if ((video?.currentSrc || video?.src) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+                const hasVideoSource = !!(video?.currentSrc || video?.src)
+                const hasUsableVideo = hasVideoSource
+                    && video.readyState >= HTMLMediaElement.HAVE_METADATA
+                    && !hasActiveBlockingPanel()
+                    && !hasPlayerErrorText()
+                if (hasUsableVideo) {
                     hidePlayerStatusForRequest(requestId, 500)
                     return
                 }
@@ -739,8 +758,8 @@ export function area_limit_for_vue() {
             setTimeout(() => {
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 const hasVideoSource = !!(video?.currentSrc || video?.src)
-                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
-                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                const hasBlockingPanel = hasActiveBlockingPanel()
+                const hasPlayerError = hasPlayerErrorText()
                 if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
                 sessionStorage.setItem(reloadKey, '1')
                 log('reload page to apply cached proxy playinfo', {
@@ -767,8 +786,8 @@ export function area_limit_for_vue() {
                 }
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 const hasVideoSource = !!(video?.currentSrc || video?.src)
-                const hasBlockingPanel = !!document.querySelector('#big-block-panel')
-                const hasPlayerError = document.body?.innerText?.includes('错误码：3001')
+                const hasBlockingPanel = hasActiveBlockingPanel()
+                const hasPlayerError = hasPlayerErrorText()
                 if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return
                 log('reload existing player with proxy playinfo', {
                     epId: getPlayInfoEpId(value),
