@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.5.12
+// @version      8.6.0
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260601T204410564Z";
+    const __BALH_BUILD_VERSION__ = "20260602T221704831Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -617,6 +617,10 @@ function scriptSource(invokeBy) {
           });
         }
         Async2.ajax = ajax;
+        function ajaxByXhr(url) {
+          return requestByXhr(url);
+        }
+        Async2.ajaxByXhr = ajaxByXhr;
         function jsonp(url) {
           return new Promise2((resolve, reject) => {
             document.head.appendChild(createElement("script", {
@@ -638,6 +642,175 @@ function scriptSource(invokeBy) {
       // packages/unblock-area-limit/src/util/ui.ts
       var ui;
       ((ui2) => {
+        let playerStatusRetryTimer;
+        let playerStatusHideTimer;
+        let pendingPlayerStatus;
+        const playerStatusHiddenClass = "balh-player-status-hidden";
+        const playerStatusNativePanelSelector = [
+          "#big-block-panel",
+          ".bilibili-player-video-panel-text",
+          ".bpx-player-toast-wrap"
+        ].join(",");
+        function ensurePlayerStatusStyle() {
+          if (document.getElementById("balh-player-status-style")) return;
+          document.head.appendChild(createElement("style", { id: "balh-player-status-style" }, [createElement("text", `
+    #balh-player-status {
+        position: fixed;
+        z-index: 2147483000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        color: #fff;
+        background: rgba(12, 18, 28, .92);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #balh-player-status .balh-player-status-box {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        max-width: min(520px, calc(100% - 48px));
+        padding: 14px 18px;
+        border: 1px solid rgba(255, 255, 255, .16);
+        background: rgba(18, 26, 38, .78);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, .28);
+    }
+    #balh-player-status .balh-player-status-spinner {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+        border: 2px solid rgba(255, 255, 255, .28);
+        border-top-color: #00aeec;
+        border-radius: 50%;
+        animation: balh-player-status-spin .8s linear infinite;
+    }
+    #balh-player-status[data-state="success"] .balh-player-status-spinner {
+        border-color: #30d158;
+        animation: none;
+    }
+    #balh-player-status[data-state="error"] .balh-player-status-spinner {
+        border-color: #ff6b6b;
+        animation: none;
+    }
+    #balh-player-status .balh-player-status-title {
+        font-weight: 600;
+    }
+    #balh-player-status .balh-player-status-detail {
+        margin-top: 2px;
+        color: rgba(255, 255, 255, .72);
+        font-size: 12px;
+    }
+    .${playerStatusHiddenClass} {
+        visibility: hidden !important;
+    }
+    @keyframes balh-player-status-spin {
+        to { transform: rotate(360deg); }
+    }`)]));
+        }
+        function findPlayerStatusTarget() {
+          const candidates = [
+            "#bilibili-player",
+            ".bpx-player-container",
+            ".bilibili-player",
+            "#player_module",
+            ".player-module",
+            ".player-wrapper"
+          ].map((selector) => document.querySelector(selector)).filter((element) => !!element);
+          return candidates.find((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width >= 200 && rect.height >= 100;
+          }) || candidates[0];
+        }
+        function positionPlayerStatus(status, target2) {
+          const rect = target2.getBoundingClientRect();
+          status.style.left = `${Math.max(0, rect.left)}px`;
+          status.style.top = `${Math.max(0, rect.top)}px`;
+          status.style.width = `${Math.max(0, rect.width)}px`;
+          status.style.height = `${Math.max(0, rect.height)}px`;
+        }
+        function setNativePlayerStatusPanelsHidden(hidden) {
+          document.querySelectorAll(playerStatusNativePanelSelector).forEach((element) => {
+            if (element instanceof HTMLElement) {
+              element.classList.toggle(playerStatusHiddenClass, hidden);
+            }
+          });
+        }
+        function isPlayerStatusHiddenElement(element) {
+          return element instanceof HTMLElement && element.classList.contains(playerStatusHiddenClass);
+        }
+        ui2.isPlayerStatusHiddenElement = isPlayerStatusHiddenElement;
+        function playerStatus(message, options = {}) {
+          ensurePlayerStatusStyle();
+          pendingPlayerStatus = { message, options: { ...options } };
+          if (playerStatusHideTimer !== void 0) {
+            clearTimeout(playerStatusHideTimer);
+            playerStatusHideTimer = void 0;
+          }
+          const target2 = findPlayerStatusTarget();
+          if (!target2) {
+            if (playerStatusRetryTimer === void 0) {
+              playerStatusRetryTimer = window.setTimeout(() => {
+                playerStatusRetryTimer = void 0;
+                if (pendingPlayerStatus) {
+                  playerStatus(pendingPlayerStatus.message, pendingPlayerStatus.options);
+                }
+              }, 100);
+            }
+            return;
+          }
+          if (playerStatusRetryTimer !== void 0) {
+            clearTimeout(playerStatusRetryTimer);
+            playerStatusRetryTimer = void 0;
+          }
+          pendingPlayerStatus = void 0;
+          let status = document.getElementById("balh-player-status");
+          if (!status) {
+            status = createElement("div", { id: "balh-player-status" }, [
+              createElement("div", { className: "balh-player-status-box" }, [
+                createElement("div", { className: "balh-player-status-spinner" }),
+                createElement("div", { className: "balh-player-status-copy" }, [
+                  createElement("div", { className: "balh-player-status-title" }),
+                  createElement("div", { className: "balh-player-status-detail" })
+                ])
+              ])
+            ]);
+          }
+          if (status.parentElement !== document.body) {
+            document.body.appendChild(status);
+          }
+          positionPlayerStatus(status, target2);
+          status.dataset.state = options.state || "loading";
+          const title = status.querySelector(".balh-player-status-title");
+          const detail = status.querySelector(".balh-player-status-detail");
+          if (title) title.textContent = message;
+          if (detail) {
+            detail.textContent = options.detail || "";
+            detail.style.display = options.detail ? "" : "none";
+          }
+          setNativePlayerStatusPanelsHidden(true);
+          document.body?.classList.add("balh-player-status-active");
+          if (options.timeout != null) {
+            hidePlayerStatus(options.timeout);
+          }
+        }
+        ui2.playerStatus = playerStatus;
+        function hidePlayerStatus(delay = 0) {
+          pendingPlayerStatus = void 0;
+          if (playerStatusRetryTimer !== void 0) {
+            clearTimeout(playerStatusRetryTimer);
+            playerStatusRetryTimer = void 0;
+          }
+          if (playerStatusHideTimer !== void 0) {
+            clearTimeout(playerStatusHideTimer);
+          }
+          playerStatusHideTimer = window.setTimeout(() => {
+            document.getElementById("balh-player-status")?.remove();
+            setNativePlayerStatusPanelsHidden(false);
+            document.body?.classList.remove("balh-player-status-active");
+            playerStatusHideTimer = void 0;
+          }, delay);
+        }
+        ui2.hidePlayerStatus = hidePlayerStatus;
         ui2.alert = function(message, resolve, reject) {
           setTimeout(() => {
             if (resolve) {
@@ -3345,9 +3518,11 @@ function scriptSource(invokeBy) {
           let currentPlayInfoPromise;
           let currentPlayInfoEpId;
           let currentPlayInfoRequestId = 0;
+          let playerStatusRequestId;
           const proxyPlayInfoCachePrefix = "balh_proxy_playinfo_v1:";
           const proxyPlayInfoReloadPrefix = "balh_proxy_playinfo_reload_v1:";
           const proxyPlayInfoCacheTtl = 10 * 60 * 1e3;
+          const bangumiAreaCacheKey = "balh_bangumi_area_cache";
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
           }
@@ -3363,6 +3538,177 @@ function scriptSource(invokeBy) {
             const cid = value?.result?.arc?.cid;
             if (!epId || !cid) return void 0;
             return `${epId}:${cid}`;
+          }
+          function getPlayInfoSeasonId(value) {
+            const seasonId = value?.result?.supplement?.ogv_season_info?.season_id ?? value?.result?.season_id ?? util_page.ssId;
+            return seasonId == null ? void 0 : String(seasonId);
+          }
+          function readBangumiAreaCache() {
+            try {
+              return JSON.parse(localStorage.getItem(bangumiAreaCacheKey) || "{}");
+            } catch (error) {
+              util_warn("bangumi area cache read failed", error);
+              return {};
+            }
+          }
+          function getCachedBangumiArea(value) {
+            const seasonId = getPlayInfoSeasonId(value);
+            if (!seasonId) return void 0;
+            const area = readBangumiAreaCache()[seasonId];
+            return area === "cn" || area === "th" || area === "hk" || area === "tw" ? area : void 0;
+          }
+          function storeBangumiArea(value, area) {
+            if (!area) return;
+            const seasonId = getPlayInfoSeasonId(value);
+            if (!seasonId) return;
+            try {
+              const cache = readBangumiAreaCache();
+              cache[seasonId] = area;
+              localStorage.setItem(bangumiAreaCacheKey, JSON.stringify(cache));
+            } catch (error) {
+              util_warn("bangumi area cache write failed", error);
+            }
+          }
+          function getProxyHostForArea(area) {
+            switch (area) {
+              case "cn":
+                return balh_config.server_custom_cn;
+              case "th":
+                return balh_config.server_custom_th;
+              case "hk":
+                return balh_config.server_custom_hk;
+              case "tw":
+                return balh_config.server_custom_tw;
+              default:
+                return balh_config.server_custom;
+            }
+          }
+          function getProxyAreaLabel(area) {
+            switch (area) {
+              case "cn":
+                return "大陆";
+              case "th":
+                return "泰国";
+              case "hk":
+                return "香港";
+              case "tw":
+                return "台湾";
+              default:
+                return "首选";
+            }
+          }
+          function getBangumiAreaHintText(value) {
+            const initialState = window.__INITIAL_STATE__ || {};
+            const seasonInfo = value?.result?.supplement?.ogv_season_info || {};
+            const episodeInfo = value?.result?.supplement?.ogv_episode_info || {};
+            const fields = [
+              document.title,
+              seasonInfo.title,
+              seasonInfo.season_title,
+              seasonInfo.origin_name,
+              seasonInfo.show_title,
+              episodeInfo.title,
+              episodeInfo.long_title,
+              initialState.h1Title,
+              initialState.mediaInfo?.title,
+              initialState.mediaInfo?.originName,
+              initialState.mediaInfo?.origin_name,
+              initialState.mediaInfo?.seasonTitle,
+              initialState.mediaInfo?.season_title,
+              initialState.epInfo?.titleFormat,
+              initialState.epInfo?.longTitle,
+              initialState.epInfo?.long_title
+            ];
+            return fields.filter((item) => typeof item === "string" || typeof item === "number").map((item) => String(item)).join("\n");
+          }
+          function getHintedProxyArea(value) {
+            const hintText = getBangumiAreaHintText(value);
+            if (/(僅|仅)限?港澳(臺|台)?/.test(hintText)) return "hk";
+            if (/(僅|仅)限?(臺|台)(灣|湾)/.test(hintText)) return "tw";
+            return void 0;
+          }
+          function describeProxyError(error) {
+            if (error instanceof Error) return error.message;
+            if (error?.message) return error.message;
+            if (error?.code != null) return `${error.code}${error.message ? ` ${error.message}` : ""}`;
+            if (error?.status != null) return `HTTP ${error.status}`;
+            return Objects.stringify(error);
+          }
+          function getProxyErrorPriority(error) {
+            const message = describeProxyError(error);
+            if (error?.code === -10403 || /(大会员|大會員|会员专享|會員專享|付费|付費|承包|权限|權限)/.test(message)) return 300;
+            if (error?.code === 403 || error?.code === -40301 || /(地区限制|地區限制|区域限制|區域限制)/.test(message)) return 200;
+            if (error instanceof Error) return 100;
+            if (error?.status != null) return 80;
+            if (error?.code != null) return 60;
+            return 0;
+          }
+          function choosePreferredProxyError(current, next) {
+            if (!current) return next;
+            return getProxyErrorPriority(next) > getProxyErrorPriority(current) ? next : current;
+          }
+          function isEntitlementProxyError(error) {
+            return getProxyErrorPriority(error) >= 300;
+          }
+          function describeProxyErrorForUser(error) {
+            if (isEntitlementProxyError(error)) {
+              return "大会员专享限制：当前账号没有该集播放权限。脚本只解除地区限制，不能绕过大会员或付费限制。";
+            }
+            return describeProxyError(error);
+          }
+          function isCurrentPlayInfoRequest(epId, requestId) {
+            const currentEpId = getCurrentEpId();
+            return requestId === currentPlayInfoRequestId && (!epId || !currentEpId || epId === currentEpId);
+          }
+          function hidePlayerStatusForRequest(requestId, delay = 0) {
+            if (playerStatusRequestId !== requestId) return;
+            playerStatusRequestId = void 0;
+            ui.hidePlayerStatus(delay);
+          }
+          function clearPlayerStatusForNewRequest() {
+            if (playerStatusRequestId === void 0) return;
+            playerStatusRequestId = void 0;
+            ui.hidePlayerStatus(0);
+          }
+          function playerStatusForRequest(epId, requestId, message, options) {
+            if (!isCurrentPlayInfoRequest(epId, requestId)) return;
+            playerStatusRequestId = requestId;
+            ui.playerStatus(message, options);
+          }
+          function isElementActive(element) {
+            if (!(element instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            const hiddenByPlayerStatus = ui.isPlayerStatusHiddenElement(element);
+            return style.display !== "none" && (hiddenByPlayerStatus || style.visibility !== "hidden" && style.visibility !== "collapse") && rect.width > 0 && rect.height > 0;
+          }
+          function hasActiveBlockingPanel() {
+            return isElementActive(document.querySelector("#big-block-panel")) || Array.from(document.querySelectorAll(".bilibili-player-video-panel-text")).some(isElementActive);
+          }
+          function hasPlayerErrorText() {
+            return document.body?.innerText?.includes("错误码：3001");
+          }
+          function hidePlayerStatusWhenVideoReady(epId, requestId) {
+            let retries = 0;
+            const wait = () => {
+              if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                hidePlayerStatusForRequest(requestId);
+                return;
+              }
+              const video = document.querySelector("video");
+              const hasVideoSource = !!(video?.currentSrc || video?.src);
+              const hasUsableVideo = hasVideoSource && video.readyState >= HTMLMediaElement.HAVE_METADATA && !hasActiveBlockingPanel() && !hasPlayerErrorText();
+              if (hasUsableVideo) {
+                hidePlayerStatusForRequest(requestId, 500);
+                return;
+              }
+              if (retries++ < 60) {
+                setTimeout(wait, 500);
+              } else {
+                hidePlayerStatusForRequest(requestId);
+              }
+            };
+            setTimeout(wait, 500);
           }
           function getStoredProxyPlayInfo(value) {
             const key = getPlayInfoCacheKey(value);
@@ -3405,8 +3751,8 @@ function scriptSource(invokeBy) {
             setTimeout(() => {
               const video = document.querySelector("video");
               const hasVideoSource = !!(video?.currentSrc || video?.src);
-              const hasBlockingPanel = !!document.querySelector("#big-block-panel");
-              const hasPlayerError = document.body?.innerText?.includes("错误码：3001");
+              const hasBlockingPanel = hasActiveBlockingPanel();
+              const hasPlayerError = hasPlayerErrorText();
               if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return;
               sessionStorage.setItem(reloadKey, "1");
               util_debug("reload page to apply cached proxy playinfo", {
@@ -3433,8 +3779,8 @@ function scriptSource(invokeBy) {
               }
               const video = document.querySelector("video");
               const hasVideoSource = !!(video?.currentSrc || video?.src);
-              const hasBlockingPanel = !!document.querySelector("#big-block-panel");
-              const hasPlayerError = document.body?.innerText?.includes("错误码：3001");
+              const hasBlockingPanel = hasActiveBlockingPanel();
+              const hasPlayerError = hasPlayerErrorText();
               if (hasVideoSource && !hasBlockingPanel && !hasPlayerError) return;
               util_debug("reload existing player with proxy playinfo", {
                 epId: getPlayInfoEpId(value),
@@ -3495,6 +3841,7 @@ function scriptSource(invokeBy) {
           function buildPlayInfoFromEpisode(episode) {
             const epId = episode?.ep_id ?? episode?.episode_id ?? episode?.id;
             if (!episode?.cid || !epId) return void 0;
+            const seasonId = episode?.season_id ?? episode?.seasonId ?? episode?.ss_id ?? util_page.ssId;
             return {
               result: {
                 play_video_type: "none",
@@ -3506,7 +3853,9 @@ function scriptSource(invokeBy) {
                   ogv_episode_info: {
                     episode_id: epId
                   },
-                  ogv_season_info: {}
+                  ogv_season_info: {
+                    season_id: seasonId
+                  }
                 },
                 plugins: []
               }
@@ -3547,27 +3896,33 @@ function scriptSource(invokeBy) {
               area: candidate.area
             };
           }
-          function fetchPlayInfoByProxy(value) {
+          function fetchPlayInfoByProxy(value, requestId) {
             const arc = value?.result?.arc;
             const episode = value?.result?.supplement?.ogv_episode_info;
             if (!arc?.cid || !episode?.episode_id) return void 0;
+            const epId = String(episode.episode_id);
+            const startedAt = Date.now();
             util_debug("replace playinfo by proxy start", {
-              epId: String(episode.episode_id),
+              epId,
               aid: arc.aid,
               cid: arc.cid,
-              currentEpId: getCurrentEpId()
+              currentEpId: getCurrentEpId(),
+              requestId
             });
             const candidates = [];
-            const addCandidate = (proxyHost, area) => {
+            const addCandidate = (proxyHost, area, label = getProxyAreaLabel(area)) => {
               if (!proxyHost) return;
               proxyHost = proxyHost.replace(/\/$/, "");
               if (candidates.some((it) => it.proxyHost === proxyHost && it.area === area)) return;
-              candidates.push({ proxyHost, area });
+              candidates.push({ proxyHost, area, label });
             };
-            if (/(僅|仅)限?港澳/.test(document.title) && balh_config.server_custom_hk) {
-              addCandidate(balh_config.server_custom_hk, "hk");
-            } else if (/(僅|仅)限?(臺|台)(灣|湾)/.test(document.title) && balh_config.server_custom_tw) {
-              addCandidate(balh_config.server_custom_tw, "tw");
+            const hintedArea = getHintedProxyArea(value);
+            if (hintedArea) {
+              addCandidate(getProxyHostForArea(hintedArea), hintedArea, `页面提示${getProxyAreaLabel(hintedArea)}`);
+            }
+            const cachedArea = getCachedBangumiArea(value);
+            if (cachedArea) {
+              addCandidate(getProxyHostForArea(cachedArea), cachedArea, `缓存${getProxyAreaLabel(cachedArea)}`);
             }
             addCandidate(balh_config.server_custom, "");
             addCandidate(balh_config.server_custom_cn, "cn");
@@ -3575,6 +3930,9 @@ function scriptSource(invokeBy) {
             addCandidate(balh_config.server_custom_hk, "hk");
             addCandidate(balh_config.server_custom_tw, "tw");
             if (!candidates.length) return void 0;
+            playerStatusForRequest(epId, requestId, "解除B站区域限制正在运行", {
+              detail: "检测到受限番剧，正在解析播放地址"
+            });
             const params = new URLSearchParams({
               avid: String(arc.aid || ""),
               cid: String(arc.cid),
@@ -3588,9 +3946,10 @@ function scriptSource(invokeBy) {
               session: "",
               module: "bangumi"
             });
+            let lastCandidateError;
             const requestCandidate = (index) => {
               const candidate = candidates[index];
-              if (!candidate) return Promise2.reject(new Error("proxy playurl failed"));
+              if (!candidate) return Promise2.reject(lastCandidateError || new Error("proxy playurl failed"));
               const candidateParams = new URLSearchParams(params);
               if (candidate.area) candidateParams.set("area", candidate.area);
               const query = `${candidateParams}${access_key_param_if_exist(true)}`;
@@ -3601,6 +3960,9 @@ function scriptSource(invokeBy) {
                 util_warn("skip mobi proxy candidate without access_key", describeProxyCandidate(candidate));
                 return requestCandidate(index + 1);
               }
+              playerStatusForRequest(epId, requestId, `正在尝试${candidate.label}解析服务器`, {
+                detail: `${index + 1}/${candidates.length} ${redactProxyHost(candidate.proxyHost)}`
+              });
               const url = (() => {
                 if (shouldUseMobiPlayUrl) {
                   return isBilibiliApiProxy ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area) : `${candidate.proxyHost}?${generateMobiPlayUrlParams(originUrl, candidate.area)}`;
@@ -3608,7 +3970,7 @@ function scriptSource(invokeBy) {
                 return isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
               })();
               return Promise2.race([
-                Async.ajax(url),
+                Async.ajaxByXhr(url),
                 Async.timeout(8e3).then(() => Promise2.reject(new Error("proxy playurl timeout")))
               ]).then((json) => {
                 const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info ? fixThailandPlayUrlJson(json) : window.__balh_app_only__ === true && json?.type === "DASH" ? fixMobiPlayUrlJson(json) : Promise2.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data);
@@ -3617,7 +3979,7 @@ function scriptSource(invokeBy) {
                 const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl);
                 if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || shouldUseMobiPlayUrl && normalizedPlayUrl?.dash) && normalizedPlayUrl?.dash) {
                   util_debug("replace playinfo by proxy success", {
-                    epId: String(episode.episode_id),
+                    epId,
                     proxyHost: redactProxyHost(candidate.proxyHost),
                     area: candidate.area,
                     videoCount: normalizedPlayUrl.dash?.video?.length,
@@ -3628,23 +3990,63 @@ function scriptSource(invokeBy) {
                   value.result.video_info = normalizedPlayUrl;
                   value.video_info = normalizedPlayUrl;
                   removePlayInfoAreaLimit(value);
+                  storeBangumiArea(value, candidate.area);
+                  playerStatusForRequest(epId, requestId, "解析成功，正在启动播放器", {
+                    detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
+                    state: "success"
+                  });
+                  hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId);
                   return value;
                 }
                 return Promise2.reject(json);
               }).catch((error) => {
+                lastCandidateError = choosePreferredProxyError(lastCandidateError, error);
+                playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
+                  detail: `${candidate.label}失败：${describeProxyError(error)}`
+                });
                 util_warn("replace playinfo by proxy candidate failed", describeProxyCandidate(candidate), error);
                 return requestCandidate(index + 1);
               });
             };
-            return requestCandidate(0);
+            return requestCandidate(0).catch((error) => {
+              if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                hidePlayerStatusForRequest(requestId);
+                return Promise2.reject(error);
+              }
+              playerStatusForRequest(epId, requestId, isEntitlementProxyError(error) ? "当前账号无该集播放权限" : "解析播放地址失败", {
+                detail: describeProxyErrorForUser(error),
+                state: "error"
+              });
+              return Promise2.reject(error);
+            });
           }
-          function setCurrentPlayInfoPromise(playInfoPromise, epId) {
-            currentPlayInfoPromise = playInfoPromise;
+          function beginCurrentPlayInfoRequest(epId) {
+            clearPlayerStatusForNewRequest();
+            currentPlayInfoPromise = void 0;
             currentPlayInfoEpId = epId;
             currentPlayInfoRequestId += 1;
+            return currentPlayInfoRequestId;
           }
-          function deferNanoCreatePlayer(playInfoPromise, value) {
-            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value));
+          function setCurrentPlayInfoPromise(playInfoPromise, epId, requestId) {
+            if (requestId !== void 0 && requestId !== currentPlayInfoRequestId) {
+              util_debug("ignore stale current playinfo promise", {
+                epId,
+                requestId,
+                currentPlayInfoRequestId
+              });
+              return requestId;
+            }
+            currentPlayInfoPromise = playInfoPromise;
+            currentPlayInfoEpId = epId;
+            if (requestId === void 0) {
+              clearPlayerStatusForNewRequest();
+              currentPlayInfoRequestId += 1;
+              requestId = currentPlayInfoRequestId;
+            }
+            return requestId;
+          }
+          function deferNanoCreatePlayer(playInfoPromise, value, requestId) {
+            setCurrentPlayInfoPromise(playInfoPromise, getPlayInfoEpId(value), requestId);
             const installCreatePlayerWrapper = (nano) => {
               if (!nano) return false;
               if (nano.__balh_create_player_deferred__) return true;
@@ -3737,24 +4139,33 @@ function scriptSource(invokeBy) {
           }
           function replaceHydrationPlayInfo(value) {
             if (!shouldReplaceHydrationPlayInfo(value)) return false;
+            if (!value?.result?.arc?.cid || !value?.result?.supplement?.ogv_episode_info?.episode_id) return false;
             const cachedPlayInfo = getStoredProxyPlayInfo(value);
             if (cachedPlayInfo) {
               if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true;
+              const requestId2 = beginCurrentPlayInfoRequest(getPlayInfoEpId(cachedPlayInfo));
+              playerStatusForRequest(getPlayInfoEpId(cachedPlayInfo), requestId2, "读取缓存播放地址，正在启动播放器", {
+                detail: `ep${getPlayInfoEpId(cachedPlayInfo)}`,
+                state: "success"
+              });
               cachePlayInfo(cachedPlayInfo, false);
               window.__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo;
-              deferNanoCreatePlayer(Promise2.resolve(cachedPlayInfo), cachedPlayInfo);
-              reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo);
+              deferNanoCreatePlayer(Promise2.resolve(cachedPlayInfo), cachedPlayInfo, requestId2);
+              const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo);
+              reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3e3 : 0);
+              hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), requestId2);
               return true;
             }
-            const playInfoPromise = fetchPlayInfoByProxy(value);
+            const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(value));
+            const playInfoPromise = fetchPlayInfoByProxy(value, requestId);
             if (!playInfoPromise) return false;
             util_debug("replace hydration playinfo", {
               epId: getPlayInfoEpId(value),
               currentEpId: getCurrentEpId()
             });
             cachePlayInfo(value, false);
-            deferNanoCreatePlayer(playInfoPromise, value);
-            const pendingRequestId = currentPlayInfoRequestId;
+            deferNanoCreatePlayer(playInfoPromise, value, requestId);
+            const pendingRequestId = requestId;
             playInfoPromise.then((value2) => {
               if (!shouldApplyProxyPlayInfo(value2, pendingRequestId)) return;
               cachePlayInfo(value2, false);
