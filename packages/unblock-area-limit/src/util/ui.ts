@@ -16,6 +16,12 @@ export namespace ui {
     let playerStatusRetryTimer: number | undefined
     let playerStatusHideTimer: number | undefined
     let pendingPlayerStatus: { message: string, options: PlayerStatusOptions } | undefined
+    const playerStatusHiddenClass = 'balh-player-status-hidden'
+    const playerStatusNativePanelSelector = [
+        '#big-block-panel',
+        '.bilibili-player-video-panel-text',
+        '.bpx-player-toast-wrap',
+    ].join(',')
 
     function ensurePlayerStatusStyle() {
         if (document.getElementById('balh-player-status-style')) return
@@ -66,9 +72,7 @@ export namespace ui {
     color: rgba(255, 255, 255, .72);
     font-size: 12px;
 }
-body.balh-player-status-active #big-block-panel,
-body.balh-player-status-active .bilibili-player-video-panel-text,
-body.balh-player-status-active .bpx-player-toast-wrap {
+.${playerStatusHiddenClass} {
     visibility: hidden !important;
 }
 @keyframes balh-player-status-spin {
@@ -98,6 +102,18 @@ body.balh-player-status-active .bpx-player-toast-wrap {
         status.style.top = `${Math.max(0, rect.top)}px`
         status.style.width = `${Math.max(0, rect.width)}px`
         status.style.height = `${Math.max(0, rect.height)}px`
+    }
+
+    function setNativePlayerStatusPanelsHidden(hidden: boolean) {
+        document.querySelectorAll(playerStatusNativePanelSelector).forEach(element => {
+            if (element instanceof HTMLElement) {
+                element.classList.toggle(playerStatusHiddenClass, hidden)
+            }
+        })
+    }
+
+    export function isPlayerStatusHiddenElement(element: Element | null) {
+        return element instanceof HTMLElement && element.classList.contains(playerStatusHiddenClass)
     }
 
     export function playerStatus(message: string, options: PlayerStatusOptions = {}) {
@@ -150,6 +166,7 @@ body.balh-player-status-active .bpx-player-toast-wrap {
             detail.textContent = options.detail || ''
             detail.style.display = options.detail ? '' : 'none'
         }
+        setNativePlayerStatusPanelsHidden(true)
         document.body?.classList.add('balh-player-status-active')
 
         if (options.timeout != null) {
@@ -168,6 +185,7 @@ body.balh-player-status-active .bpx-player-toast-wrap {
         }
         playerStatusHideTimer = window.setTimeout(() => {
             document.getElementById('balh-player-status')?.remove()
+            setNativePlayerStatusPanelsHidden(false)
             document.body?.classList.remove('balh-player-status-active')
             playerStatusHideTimer = undefined
         }, delay)

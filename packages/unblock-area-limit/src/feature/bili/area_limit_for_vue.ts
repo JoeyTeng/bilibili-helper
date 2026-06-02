@@ -682,9 +682,9 @@ export function area_limit_for_vue() {
             if (!(element instanceof HTMLElement)) return false
             const style = window.getComputedStyle(element)
             const rect = element.getBoundingClientRect()
+            const hiddenByPlayerStatus = ui.isPlayerStatusHiddenElement(element)
             return style.display !== 'none'
-                && style.visibility !== 'hidden'
-                && style.visibility !== 'collapse'
+                && (hiddenByPlayerStatus || (style.visibility !== 'hidden' && style.visibility !== 'collapse'))
                 && rect.width > 0
                 && rect.height > 0
         }
