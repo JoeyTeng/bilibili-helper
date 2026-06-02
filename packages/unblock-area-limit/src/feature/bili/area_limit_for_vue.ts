@@ -680,8 +680,11 @@ export function area_limit_for_vue() {
         }
         function isElementActive(element: Element | null) {
             if (!(element instanceof HTMLElement)) return false
+            const style = window.getComputedStyle(element)
             const rect = element.getBoundingClientRect()
-            return window.getComputedStyle(element).display !== 'none'
+            return style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && style.visibility !== 'collapse'
                 && rect.width > 0
                 && rect.height > 0
         }
