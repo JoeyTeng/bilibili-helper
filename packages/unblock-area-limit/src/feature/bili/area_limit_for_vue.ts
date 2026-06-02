@@ -510,6 +510,7 @@ export function area_limit_for_vue() {
         let currentPlayInfoPromise: Promise<any> | undefined
         let currentPlayInfoEpId: string | undefined
         let currentPlayInfoRequestId = 0
+        let playerStatusRequestId: number | undefined
         const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v1:'
         const proxyPlayInfoReloadPrefix = 'balh_proxy_playinfo_reload_v1:'
         const proxyPlayInfoCacheTtl = 10 * 60 * 1000
@@ -662,23 +663,37 @@ export function area_limit_for_vue() {
             return requestId === currentPlayInfoRequestId
                 && (!epId || !currentEpId || epId === currentEpId)
         }
+        function hidePlayerStatusForRequest(requestId: number, delay = 0) {
+            if (playerStatusRequestId !== requestId) return
+            playerStatusRequestId = undefined
+            ui.hidePlayerStatus(delay)
+        }
+        function clearPlayerStatusForNewRequest() {
+            if (playerStatusRequestId === undefined) return
+            playerStatusRequestId = undefined
+            ui.hidePlayerStatus(0)
+        }
         function playerStatusForRequest(epId: string | undefined, requestId: number, message: string, options?: Parameters<typeof ui.playerStatus>[1]) {
             if (!isCurrentPlayInfoRequest(epId, requestId)) return
+            playerStatusRequestId = requestId
             ui.playerStatus(message, options)
         }
         function hidePlayerStatusWhenVideoReady(epId: string | undefined, requestId: number) {
             let retries = 0
             const wait = () => {
-                if (!isCurrentPlayInfoRequest(epId, requestId)) return
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                    hidePlayerStatusForRequest(requestId)
+                    return
+                }
                 const video = document.querySelector('video') as HTMLVideoElement | null
                 if ((video?.currentSrc || video?.src) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-                    ui.hidePlayerStatus(500)
+                    hidePlayerStatusForRequest(requestId, 500)
                     return
                 }
                 if (retries++ < 60) {
                     setTimeout(wait, 500)
                 } else {
-                    ui.hidePlayerStatus(0)
+                    hidePlayerStatusForRequest(requestId)
                 }
             }
             setTimeout(wait, 500)
@@ -1004,6 +1019,7 @@ export function area_limit_for_vue() {
             })
         }
         function beginCurrentPlayInfoRequest(epId: string | undefined) {
+            clearPlayerStatusForNewRequest()
             currentPlayInfoPromise = undefined
             currentPlayInfoEpId = epId
             currentPlayInfoRequestId += 1
@@ -1021,6 +1037,7 @@ export function area_limit_for_vue() {
             currentPlayInfoPromise = playInfoPromise
             currentPlayInfoEpId = epId
             if (requestId === undefined) {
+                clearPlayerStatusForNewRequest()
                 currentPlayInfoRequestId += 1
                 requestId = currentPlayInfoRequestId
             }
@@ -1125,16 +1142,17 @@ export function area_limit_for_vue() {
             const cachedPlayInfo = getStoredProxyPlayInfo(value)
             if (cachedPlayInfo) {
                 if (!shouldApplyProxyPlayInfo(cachedPlayInfo)) return true
-                ui.playerStatus('读取缓存播放地址，正在启动播放器', {
+                const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(cachedPlayInfo))
+                playerStatusForRequest(getPlayInfoEpId(cachedPlayInfo), requestId, '读取缓存播放地址，正在启动播放器', {
                     detail: `ep${getPlayInfoEpId(cachedPlayInfo)}`,
                     state: 'success',
                 })
                 cachePlayInfo(cachedPlayInfo, false)
                 ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
-                deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo)
+                deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo, requestId)
                 const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
                 reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3000 : 0)
-                hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), currentPlayInfoRequestId)
+                hidePlayerStatusWhenVideoReady(getPlayInfoEpId(cachedPlayInfo), requestId)
                 return true
             }
             const requestId = beginCurrentPlayInfoRequest(getPlayInfoEpId(value))
