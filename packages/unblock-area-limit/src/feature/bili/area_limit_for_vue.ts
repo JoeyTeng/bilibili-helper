@@ -876,9 +876,6 @@ export function area_limit_for_vue() {
                 cid: arc.cid,
                 currentEpId: getCurrentEpId(),
             })
-            ui.playerStatus('解除B站区域限制正在运行', {
-                detail: '检测到受限番剧，正在解析播放地址',
-            })
             const candidates: ProxyCandidate[] = []
             const addCandidate = (proxyHost: string | undefined, area: ProxyArea, label = getProxyAreaLabel(area)) => {
                 if (!proxyHost) return
@@ -900,6 +897,9 @@ export function area_limit_for_vue() {
             addCandidate(balh_config.server_custom_hk, 'hk')
             addCandidate(balh_config.server_custom_tw, 'tw')
             if (!candidates.length) return undefined
+            ui.playerStatus('解除B站区域限制正在运行', {
+                detail: '检测到受限番剧，正在解析播放地址',
+            })
             const params = new URLSearchParams({
                 avid: String(arc.aid || ''),
                 cid: String(arc.cid),
