@@ -5,6 +5,160 @@ import { Objects } from "./objects"
 import { _ } from "./react"
 
 export namespace ui {
+    type PlayerStatusState = 'loading' | 'success' | 'error'
+
+    interface PlayerStatusOptions {
+        detail?: string
+        state?: PlayerStatusState
+        timeout?: number
+    }
+
+    let playerStatusRetryTimer: number | undefined
+    let playerStatusHideTimer: number | undefined
+
+    function ensurePlayerStatusStyle() {
+        if (document.getElementById('balh-player-status-style')) return
+        document.head.appendChild(_('style', { id: 'balh-player-status-style' }, [_('text', `
+#balh-player-status {
+    position: fixed;
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    color: #fff;
+    background: rgba(12, 18, 28, .92);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+#balh-player-status .balh-player-status-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(520px, calc(100% - 48px));
+    padding: 14px 18px;
+    border: 1px solid rgba(255, 255, 255, .16);
+    background: rgba(18, 26, 38, .78);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, .28);
+}
+#balh-player-status .balh-player-status-spinner {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    border: 2px solid rgba(255, 255, 255, .28);
+    border-top-color: #00aeec;
+    border-radius: 50%;
+    animation: balh-player-status-spin .8s linear infinite;
+}
+#balh-player-status[data-state="success"] .balh-player-status-spinner {
+    border-color: #30d158;
+    animation: none;
+}
+#balh-player-status[data-state="error"] .balh-player-status-spinner {
+    border-color: #ff6b6b;
+    animation: none;
+}
+#balh-player-status .balh-player-status-title {
+    font-weight: 600;
+}
+#balh-player-status .balh-player-status-detail {
+    margin-top: 2px;
+    color: rgba(255, 255, 255, .72);
+    font-size: 12px;
+}
+body.balh-player-status-active #big-block-panel,
+body.balh-player-status-active .bilibili-player-video-panel-text,
+body.balh-player-status-active .bpx-player-toast-wrap {
+    visibility: hidden !important;
+}
+@keyframes balh-player-status-spin {
+    to { transform: rotate(360deg); }
+}`)]))
+    }
+
+    function findPlayerStatusTarget() {
+        const candidates = [
+            '#bilibili-player',
+            '.bpx-player-container',
+            '.bilibili-player',
+            '#player_module',
+            '.player-module',
+            '.player-wrapper',
+        ].map(selector => document.querySelector(selector) as HTMLElement | null)
+            .filter((element): element is HTMLElement => !!element)
+        return candidates.find(element => {
+            const rect = element.getBoundingClientRect()
+            return rect.width >= 200 && rect.height >= 100
+        }) || candidates[0]
+    }
+
+    function positionPlayerStatus(status: HTMLElement, target: HTMLElement) {
+        const rect = target.getBoundingClientRect()
+        status.style.left = `${Math.max(0, rect.left)}px`
+        status.style.top = `${Math.max(0, rect.top)}px`
+        status.style.width = `${Math.max(0, rect.width)}px`
+        status.style.height = `${Math.max(0, rect.height)}px`
+    }
+
+    export function playerStatus(message: string, options: PlayerStatusOptions = {}) {
+        ensurePlayerStatusStyle()
+        if (playerStatusHideTimer !== undefined) {
+            clearTimeout(playerStatusHideTimer)
+            playerStatusHideTimer = undefined
+        }
+
+        const target = findPlayerStatusTarget() as HTMLElement | null
+        if (!target) {
+            if (playerStatusRetryTimer === undefined) {
+                playerStatusRetryTimer = window.setTimeout(() => {
+                    playerStatusRetryTimer = undefined
+                    playerStatus(message, options)
+                }, 100)
+            }
+            return
+        }
+
+        let status = document.getElementById('balh-player-status')
+        if (!status) {
+            status = _('div', { id: 'balh-player-status' }, [
+                _('div', { className: 'balh-player-status-box' }, [
+                    _('div', { className: 'balh-player-status-spinner' }),
+                    _('div', { className: 'balh-player-status-copy' }, [
+                        _('div', { className: 'balh-player-status-title' }),
+                        _('div', { className: 'balh-player-status-detail' }),
+                    ]),
+                ]),
+            ])
+        }
+        if (status.parentElement !== document.body) {
+            document.body.appendChild(status)
+        }
+        positionPlayerStatus(status, target)
+        status.dataset.state = options.state || 'loading'
+        const title = status.querySelector('.balh-player-status-title')
+        const detail = status.querySelector('.balh-player-status-detail') as HTMLElement | null
+        if (title) title.textContent = message
+        if (detail) {
+            detail.textContent = options.detail || ''
+            detail.style.display = options.detail ? '' : 'none'
+        }
+        document.body?.classList.add('balh-player-status-active')
+
+        if (options.timeout != null) {
+            hidePlayerStatus(options.timeout)
+        }
+    }
+
+    export function hidePlayerStatus(delay = 0) {
+        if (playerStatusHideTimer !== undefined) {
+            clearTimeout(playerStatusHideTimer)
+        }
+        playerStatusHideTimer = window.setTimeout(() => {
+            document.getElementById('balh-player-status')?.remove()
+            document.body?.classList.remove('balh-player-status-active')
+            playerStatusHideTimer = undefined
+        }, delay)
+    }
+
     export const alert = function (message: string, resolve?: Function, reject?: Function) {
         setTimeout(() => {
             if (resolve) {

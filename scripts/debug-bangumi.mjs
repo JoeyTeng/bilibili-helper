@@ -271,6 +271,7 @@ async function samplePlayer(page, label) {
                 playInfoType: anyWindow.__playinfo__?.result?.play_video_type,
                 playInfoEpId: anyWindow.__playinfo__?.result?.supplement?.ogv_episode_info?.episode_id,
                 playInfoVideoCount: anyWindow.__playinfo__?.result?.video_info?.dash?.video?.length,
+                balhPlayerStatus: document.querySelector('#balh-player-status')?.textContent,
             }])
     }).catch((error) => ({ error: String(error) }))
     record(`${label} player sample ${JSON.stringify(sample)}`)
