@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.6.0
+// @version      8.7.0
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260602T221704831Z";
+    const __BALH_BUILD_VERSION__ = "20260603T062958491Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -1535,12 +1535,22 @@ function scriptSource(invokeBy) {
               firstCreateXHR = false;
             }
             let container = {};
+            const setContainerResponse = (response) => {
+              container.__has_replacement = true;
+              container.response = response;
+              if (typeof response === "string") {
+                container.responseText = response;
+              } else if (response instanceof ArrayBuffer || ArrayBuffer.isView(response) || response instanceof Blob) {
+                delete container.responseText;
+              } else {
+                container.responseText = JSON.stringify(response);
+              }
+            };
             const dispatchResultTransformer = (p) => {
               let event = {};
               return p.then((r2) => {
                 container.readyState = 4;
-                container.response = r2;
-                container.responseText = typeof r2 === "string" ? r2 : JSON.stringify(r2);
+                setContainerResponse(r2);
                 container.__onreadystatechange(event);
               }).catch((e) => {
                 container.__block_response = false;
@@ -1578,8 +1588,7 @@ function scriptSource(invokeBy) {
                         if (typeof response === "object" && response instanceof Promise) {
                           response.compose(dispatchResultTransformerCreator());
                         } else {
-                          container.response = response;
-                          container.responseText = typeof response === "string" ? response : JSON.stringify(response);
+                          setContainerResponse(response);
                         }
                       } else {
                       }
@@ -1588,7 +1597,7 @@ function scriptSource(invokeBy) {
                         return;
                       }
                     }
-                    cb.apply(container.responseText ? receiver : this, arguments);
+                    cb.apply(container.__has_replacement ? receiver : this, arguments);
                   };
                 }
                 target3[prop] = value;
@@ -5168,7 +5177,223 @@ function scriptSource(invokeBy) {
       });
       var Converter = ConverterBuilder(Locale);
 
+      // packages/unblock-area-limit/src/feature/bili/subtitle_web_view.ts
+      var decoder = new TextDecoder();
+      var encoder = new TextEncoder();
+      function rewriteSubtitleWebViewResponse(response, options) {
+        if (!options.generateSub) return null;
+        const bytes = responseToBytes(response);
+        if (!bytes) return null;
+        try {
+          const topFields = decodeMessage(bytes);
+          const dataField = topFields.find((field) => field.fieldNumber === 1 && field.wireType === 2 && field.bytes);
+          if (!dataField?.bytes) return null;
+          const dataFields = decodeMessage(dataField.bytes);
+          const subtitles = dataFields.filter((field) => field.fieldNumber === 3 && field.wireType === 2 && field.bytes).map((field) => parseSubtitleItem(field.bytes)).filter((item) => Boolean(item));
+          const generated = createGeneratedSubtitle(subtitles);
+          if (!generated) return null;
+          dataFields.push({
+            fieldNumber: 3,
+            wireType: 2,
+            bytes: encodeMessage(generated.fields)
+          });
+          dataField.bytes = encodeMessage(dataFields);
+          const output = encodeMessage(topFields);
+          return output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength);
+        } catch (error) {
+          return null;
+        }
+      }
+      function responseToBytes(response) {
+        if (response instanceof ArrayBuffer) {
+          return new Uint8Array(response);
+        }
+        if (ArrayBuffer.isView(response)) {
+          return new Uint8Array(response.buffer, response.byteOffset, response.byteLength);
+        }
+        return null;
+      }
+      function createGeneratedSubtitle(subtitles) {
+        const lans = subtitles.map((item) => item.lan);
+        const genHans = lans.includes("zh-Hant") && !lans.includes("zh-Hans");
+        const genHant = lans.includes("zh-Hans") && !lans.includes("zh-Hant");
+        if (!genHans && !genHant) return null;
+        const origin = genHans ? "zh-Hant" : "zh-Hans";
+        const target2 = genHans ? "zh-Hans" : "zh-Hant";
+        const targetDoc = genHans ? "中文（简体）生成" : "中文（繁体）生成";
+        const from = origin === "zh-Hant" ? "tw" : "cn";
+        const to = target2 === "zh-Hans" ? "cn" : "tw";
+        const source = subtitles.find((item) => item.lan === origin && item.subtitleUrl);
+        if (!source?.subtitleUrl) return null;
+        const nextId = subtitles.reduce((max, item) => {
+          if (item.id != null && item.id > max) return item.id;
+          return max;
+        }, 0n) + 1n;
+        const fields = cloneFields(source.fields);
+        setVarintField(fields, 1, nextId);
+        setTextField(fields, 2, nextId.toString());
+        setTextField(fields, 3, target2);
+        setTextField(fields, 4, targetDoc);
+        setTextField(fields, 5, appendTranslateParams(source.subtitleUrl, from, to));
+        return {
+          fields,
+          id: nextId,
+          lan: target2,
+          lanDoc: targetDoc,
+          subtitleUrl: getTextField(fields, 5)
+        };
+      }
+      function parseSubtitleItem(bytes) {
+        const fields = decodeMessage(bytes);
+        const lan = getTextField(fields, 3);
+        const subtitleUrl = getTextField(fields, 5);
+        if (!lan || !subtitleUrl) return null;
+        return {
+          fields,
+          id: fields.find((field) => field.fieldNumber === 1 && field.wireType === 0)?.value,
+          lan,
+          lanDoc: getTextField(fields, 4),
+          subtitleUrl
+        };
+      }
+      function appendTranslateParams(rawUrl, from, to) {
+        const protocolRelative = rawUrl.startsWith("//");
+        const url = new URL(rawUrl, "https://www.bilibili.com");
+        url.searchParams.set("translate", "1");
+        url.searchParams.set("from", from);
+        url.searchParams.set("to", to);
+        if (!protocolRelative) return url.href;
+        return `//${url.host}${url.pathname}${url.search}${url.hash}`;
+      }
+      function getTextField(fields, fieldNumber) {
+        const field = fields.find((item) => item.fieldNumber === fieldNumber && item.wireType === 2 && item.bytes);
+        return field?.bytes ? decoder.decode(field.bytes) : void 0;
+      }
+      function setTextField(fields, fieldNumber, value) {
+        setBytesField(fields, fieldNumber, encoder.encode(value));
+      }
+      function setBytesField(fields, fieldNumber, bytes) {
+        const field = fields.find((item) => item.fieldNumber === fieldNumber && item.wireType === 2);
+        if (field) {
+          field.bytes = bytes;
+        } else {
+          fields.push({ fieldNumber, wireType: 2, bytes });
+        }
+      }
+      function setVarintField(fields, fieldNumber, value) {
+        const field = fields.find((item) => item.fieldNumber === fieldNumber && item.wireType === 0);
+        if (field) {
+          field.value = value;
+        } else {
+          fields.push({ fieldNumber, wireType: 0, value });
+        }
+      }
+      function cloneFields(fields) {
+        return fields.map((field) => ({
+          fieldNumber: field.fieldNumber,
+          wireType: field.wireType,
+          value: field.value,
+          bytes: field.bytes ? new Uint8Array(field.bytes) : void 0
+        }));
+      }
+      function decodeMessage(bytes) {
+        const fields = [];
+        let offset = 0;
+        while (offset < bytes.length) {
+          const key = readVarint(bytes, offset);
+          offset = key.offset;
+          const fieldNumber = Number(key.value >> 3n);
+          const wireType = Number(key.value & 7n);
+          if (fieldNumber <= 0) throw new Error(`Invalid protobuf field number: ${fieldNumber}`);
+          if (wireType === 0) {
+            const value = readVarint(bytes, offset);
+            offset = value.offset;
+            fields.push({ fieldNumber, wireType, value: value.value });
+          } else if (wireType === 1) {
+            const end = offset + 8;
+            assertAvailable(bytes, end);
+            fields.push({ fieldNumber, wireType, bytes: bytes.slice(offset, end) });
+            offset = end;
+          } else if (wireType === 2) {
+            const length = readVarint(bytes, offset);
+            offset = length.offset;
+            const end = offset + Number(length.value);
+            assertAvailable(bytes, end);
+            fields.push({ fieldNumber, wireType, bytes: bytes.slice(offset, end) });
+            offset = end;
+          } else if (wireType === 5) {
+            const end = offset + 4;
+            assertAvailable(bytes, end);
+            fields.push({ fieldNumber, wireType, bytes: bytes.slice(offset, end) });
+            offset = end;
+          } else {
+            throw new Error(`Unsupported protobuf wire type: ${wireType}`);
+          }
+        }
+        return fields;
+      }
+      function encodeMessage(fields) {
+        const parts = [];
+        for (const field of fields) {
+          parts.push(writeVarint(BigInt(field.fieldNumber << 3 | field.wireType)));
+          if (field.wireType === 0) {
+            parts.push(writeVarint(field.value ?? 0n));
+          } else if (field.wireType === 1 || field.wireType === 5) {
+            if (!field.bytes) throw new Error(`Missing fixed bytes for field ${field.fieldNumber}`);
+            parts.push(field.bytes);
+          } else if (field.wireType === 2) {
+            const bytes = field.bytes ?? new Uint8Array();
+            parts.push(writeVarint(BigInt(bytes.byteLength)));
+            parts.push(bytes);
+          } else {
+            throw new Error(`Unsupported protobuf wire type: ${field.wireType}`);
+          }
+        }
+        return concat(parts);
+      }
+      function readVarint(bytes, start) {
+        let value = 0n;
+        let shift = 0n;
+        let offset = start;
+        while (offset < bytes.length) {
+          const byte = bytes[offset++];
+          value |= BigInt(byte & 127) << shift;
+          if ((byte & 128) === 0) return { value, offset };
+          shift += 7n;
+          if (shift > 63n) throw new Error(`Varint too long at ${start}`);
+        }
+        throw new Error(`Unterminated varint at ${start}`);
+      }
+      function writeVarint(value) {
+        const bytes = [];
+        let rest = value;
+        while (rest >= 0x80n) {
+          bytes.push(Number(rest & 0x7fn | 0x80n));
+          rest >>= 7n;
+        }
+        bytes.push(Number(rest));
+        return new Uint8Array(bytes);
+      }
+      function concat(parts) {
+        const length = parts.reduce((total, part) => total + part.byteLength, 0);
+        const output = new Uint8Array(length);
+        let offset = 0;
+        for (const part of parts) {
+          output.set(part, offset);
+          offset += part.byteLength;
+        }
+        return output;
+      }
+      function assertAvailable(bytes, end) {
+        if (end > bytes.length) {
+          throw new Error(`Truncated protobuf message: need ${end}, have ${bytes.length}`);
+        }
+      }
+
       // packages/unblock-area-limit/src/feature/bili/area_limit_xhr_.ts
+      function isSubtitleBodyUrl(url) {
+        return url.match(RegExps.urlPath("/bfs/subtitle/")) || url.match(RegExps.url("subtitle.bilibili.com/"));
+      }
       var area_limit_xhr = /* @__PURE__ */ (() => {
         return function() {
           if (isClosed()) return;
@@ -5246,6 +5471,12 @@ function scriptSource(invokeBy) {
                       return xml.documentElement.innerHTML;
                     }
                   }
+                } else if (url.match(RegExps.url("api.bilibili.com/x/v2/subtitle/web/view"))) {
+                  const response2 = rewriteSubtitleWebViewResponse(xhr.response, { generateSub: balh_config.generate_sub });
+                  if (response2) {
+                    util_debug("/x/v2/subtitle/web/view", "generated subtitle");
+                    return response2;
+                  }
                 } else if (url.match(RegExps.url("api.bilibili.com/x/player/v2"))) {
                   let json = JSON.parse(xhr.responseText);
                   if (balh_config.generate_sub && json.code == 0 && json.data.subtitle?.subtitles?.length) {
@@ -5320,8 +5551,8 @@ function scriptSource(invokeBy) {
                     }
                   }
                   return json;
-                } else if (url.match(RegExps.urlPath("/bfs/subtitle/"))) {
-                  util_debug("/bfs/subtitle", url);
+                } else if (isSubtitleBodyUrl(url)) {
+                  util_debug("/subtitle", url);
                   const parsedUrl = new URL(url);
                   const translate = parsedUrl.searchParams.get("translate") == "1";
                   if (!translate) {
