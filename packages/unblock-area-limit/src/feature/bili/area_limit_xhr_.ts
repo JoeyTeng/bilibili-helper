@@ -20,7 +20,12 @@ import { injectFetch, injectFetch4Mobile } from '../../feature/bili/area_limit_f
 import space_account_info_map from '../../feature/bili/space_account_info_map'
 import * as OpenCC from 'opencc-js'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
+import { rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
+
+function isSubtitleBodyUrl(url: string) {
+    return url.match(RegExps.urlPath('/bfs/subtitle/')) || url.match(RegExps.url('subtitle.bilibili.com/'))
+}
 
 export const area_limit_xhr = (() => {
     return function () {
@@ -106,6 +111,12 @@ export const area_limit_xhr = (() => {
                                 return xml.documentElement.innerHTML
                             }
                         }
+                    } else if (url.match(RegExps.url('api.bilibili.com/x/v2/subtitle/web/view'))) {
+                        const response = rewriteSubtitleWebViewResponse(xhr.response, { generateSub: balh_config.generate_sub })
+                        if (response) {
+                            log('/x/v2/subtitle/web/view', 'generated subtitle')
+                            return response
+                        }
                     } else if (url.match(RegExps.url('api.bilibili.com/x/player/v2'))) {
                         // 上一个接口的新版本
                         let json = JSON.parse(xhr.responseText);
@@ -185,8 +196,8 @@ export const area_limit_xhr = (() => {
                             }
                         }
                         return json
-                    } else if (url.match(RegExps.urlPath('/bfs/subtitle/'))) {
-                        log('/bfs/subtitle', url);
+                    } else if (isSubtitleBodyUrl(url)) {
+                        log('/subtitle', url);
                         const parsedUrl = new URL(url);
                         const translate = parsedUrl.searchParams.get('translate') == '1';
                         if (!translate) {

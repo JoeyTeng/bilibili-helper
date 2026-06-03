@@ -23,6 +23,9 @@ const tampermonkeyInstallOption = readOption('--tampermonkey-install')
 const tampermonkeyInstallUrlOption = readOption('--tampermonkey-install-url')
 const accessKeyFileOption = readOption('--access-key-file')
 const proxyServerOption = readOption('--proxy-server')
+const generateSub = args.includes('--generate-sub')
+const probeSubtitleMenu = args.includes('--probe-subtitle-menu')
+const waitAfterStartMs = Number(readOption('--wait-after-start-ms') || 0)
 const userscriptPath = userscriptOption ? path.resolve(rootDir, userscriptOption) : undefined
 const tampermonkeyExtensionPath = tampermonkeyExtensionOption ? path.resolve(rootDir, tampermonkeyExtensionOption) : undefined
 const tampermonkeyInstallPath = tampermonkeyInstallOption ? path.resolve(rootDir, tampermonkeyInstallOption) : undefined
@@ -48,6 +51,9 @@ Options:
                           Install a userscript URL through Tampermonkey before testing.
   --access-key-file      Read Bilibili access_key from a local file and set localStorage.
   --proxy-server <url>   Set BALH custom proxy cookies. Defaults to https://atri.ink with --launch/--userscript/Tampermonkey install.
+  --generate-sub         Enable BALH generated simplified/traditional subtitles.
+  --probe-subtitle-menu  Open the player subtitle menu and click a generated subtitle if present.
+  --wait-after-start-ms  Wait after the first playable episode before switching.
   --start-url <url>      Initial playable episode URL.
   --blocked-url <url>    Episode URL expected to fail because of account entitlement.
   --return-url <url>     URL to click back to after the blocked episode.
@@ -116,6 +122,8 @@ function normalizeAccessKey(text) {
 function interestingUrl(url) {
     return url.includes('/pgc/player/web/playurl')
         || url.includes('/x/player/')
+        || url.includes('/x/v2/subtitle/web/view')
+        || url.includes('subtitle.bilibili.com')
         || url.includes('.m4s')
         || url.includes('bilivideo.com')
         || url.includes('atri.ink')
@@ -203,9 +211,10 @@ async function installTampermonkeyScript(context, installUrl) {
     return false
 }
 
-function createPageInitScript({ userscript, accessKey, proxyServer }) {
+function createPageInitScript({ userscript, accessKey, proxyServer, generateSub }) {
     const biliHostGuard = `(location.hostname === 'bilibili.com' || location.hostname.endsWith('.bilibili.com'))`
-    const cookieLines = proxyServer ? [
+    const cookiePairs = [
+        ...(proxyServer ? [
         ['balh_server_inner', '__custom__'],
         ['balh_server_custom', proxyServer],
         ['balh_server_custom_hk', proxyServer],
@@ -213,10 +222,12 @@ function createPageInitScript({ userscript, accessKey, proxyServer }) {
         ['balh_server_custom_cn', proxyServer],
         ['balh_server_custom_th', proxyServer],
         ['balh_is_closed', ''],
-    ].map(([key, value]) => {
+        ] : []),
+        ...(generateSub ? [['balh_generate_sub', 'Y']] : []),
+    ]
+    const cookieLines = cookiePairs.map(([key, value]) => {
         return `document.cookie = ${JSON.stringify(`${key}=${value}; domain=.bilibili.com; path=/; max-age=94608000`)}`
     }).join('\n')
-        : ''
 
     const setup = `
         if (${biliHostGuard}) {
@@ -289,6 +300,34 @@ async function samplePlayer(page, label) {
     record(`${label} player sample ${JSON.stringify(sample)}`)
 }
 
+async function probeGeneratedSubtitle(page) {
+    try {
+        await page.mouse.move(720, 500)
+        await page.waitForTimeout(300)
+        const subtitleTrigger = page.getByText('多语言字幕').last()
+        await subtitleTrigger.click({ timeout: 5000, force: true })
+        await page.waitForTimeout(800)
+
+        const menuText = await page.evaluate(() => {
+            const text = document.body?.innerText || ''
+            const index = text.indexOf('多语言字幕')
+            return index >= 0 ? text.slice(index, index + 500) : text.slice(0, 500)
+        })
+        record(`subtitle menu text ${JSON.stringify(menuText)}`)
+
+        const generatedOption = page.getByText(/生成/).first()
+        const count = await generatedOption.count()
+        record(`subtitle generated option count ${count}`)
+        if (count > 0) {
+            await generatedOption.click({ timeout: 5000, force: true })
+            record('clicked generated subtitle option')
+            await page.waitForTimeout(2000)
+        }
+    } catch (error) {
+        record(`subtitle menu probe failed ${error.stack || error.message || error}`)
+    }
+}
+
 async function waitForVideoReady(page, label, timeout = 45000) {
     try {
         await page.waitForFunction(() => {
@@ -343,11 +382,11 @@ async function main() {
         const userscript = userscriptPath && existsSync(userscriptPath)
             ? await readFile(userscriptPath, 'utf8')
             : undefined
-        if (userscript || accessKey || proxyServer) {
+        if (userscript || accessKey || proxyServer || generateSub) {
             await context.addInitScript({
-                content: createPageInitScript({ userscript, accessKey, proxyServer }),
+                content: createPageInitScript({ userscript, accessKey, proxyServer, generateSub }),
             })
-            record(`installed init script userscript=${Boolean(userscript)} access_key=${Boolean(accessKey)} proxy=${proxyServer || 'unchanged'}`)
+            record(`installed init script userscript=${Boolean(userscript)} access_key=${Boolean(accessKey)} proxy=${proxyServer || 'unchanged'} generate_sub=${generateSub}`)
         }
         recordContextState(context, 'after setup')
 
@@ -387,6 +426,15 @@ async function main() {
         recordContextState(context, 'after goto')
         await waitForVideoReady(page, 'after start')
         await samplePlayer(page, 'after start')
+        if (waitAfterStartMs > 0) {
+            record(`wait after start ${waitAfterStartMs}ms`)
+            await page.waitForTimeout(waitAfterStartMs)
+            await samplePlayer(page, 'after start wait')
+        }
+        if (probeSubtitleMenu) {
+            await probeGeneratedSubtitle(page)
+            await samplePlayer(page, 'after subtitle probe')
+        }
 
         await clickEpisode(page, blockedUrl)
         await page.waitForTimeout(15000)
