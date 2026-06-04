@@ -1,6 +1,12 @@
 # Project TODO
 
-Last updated: 2026-06-02
+Last updated: 2026-06-04
+
+## Backlog
+
+- [ ] Design an in-script log collection and one-click bug report flow.
+  - Goal: help users export the BALH runtime log, current page URL, script version/build id, selected proxy settings, recent player/playurl errors, and redacted network diagnostics without exposing cookies or access keys.
+  - Keep the first version local-only: copy/download a sanitized report payload that users can paste into an issue.
 
 ## Completed
 
