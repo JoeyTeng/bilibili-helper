@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.7.1
+// @version      8.7.2
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260604T105527492Z";
+    const __BALH_BUILD_VERSION__ = "20260604T231035335Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -503,7 +503,7 @@ function scriptSource(invokeBy) {
 
       // packages/unblock-area-limit/src/util/async.ts
       var Promise2 = window.Promise;
-      var fetch = window.fetch;
+      var fetch2 = window.fetch;
       Promise2.prototype.compose = function(transformer) {
         return transformer ? transformer(this) : this;
       };
@@ -547,7 +547,7 @@ function scriptSource(invokeBy) {
         }
         Async2.wrapper = wrapper;
         function requestByFetch(url) {
-          return fetch(url).then((it) => it.json());
+          return fetch2(url).then((it) => it.json());
         }
         function requestByXhr(url) {
           return new Promise2((resolve, reject) => {
@@ -3531,7 +3531,10 @@ function scriptSource(invokeBy) {
           const proxyPlayInfoCachePrefix = "balh_proxy_playinfo_v1:";
           const proxyPlayInfoReloadPrefix = "balh_proxy_playinfo_reload_v1:";
           const proxyPlayInfoCacheTtl = 10 * 60 * 1e3;
-          const bangumiAreaCacheKey = "balh_bangumi_area_cache";
+          const proxyPlayUrlRequestTimeout2 = 8e3;
+          const transientProxyRetryDelays2 = [500, 1200];
+          const entitlementProxyRetryDelays2 = [700, 1600];
+          const bangumiAreaCacheKey2 = "balh_bangumi_area_cache";
           function shouldReplaceHydrationPlayInfo(value) {
             return (util_page.anime_ep() || util_page.anime_ss()) && value?.result?.supplement?.ogv_episode_info && value?.result?.supplement?.ogv_season_info && value?.result?.play_video_type === "none";
           }
@@ -3552,33 +3555,33 @@ function scriptSource(invokeBy) {
             const seasonId = value?.result?.supplement?.ogv_season_info?.season_id ?? value?.result?.season_id ?? util_page.ssId;
             return seasonId == null ? void 0 : String(seasonId);
           }
-          function readBangumiAreaCache() {
+          function readBangumiAreaCache2() {
             try {
-              return JSON.parse(localStorage.getItem(bangumiAreaCacheKey) || "{}");
+              return JSON.parse(localStorage.getItem(bangumiAreaCacheKey2) || "{}");
             } catch (error) {
               util_warn("bangumi area cache read failed", error);
               return {};
             }
           }
-          function getCachedBangumiArea(value) {
+          function getCachedBangumiArea2(value) {
             const seasonId = getPlayInfoSeasonId(value);
             if (!seasonId) return void 0;
-            const area = readBangumiAreaCache()[seasonId];
+            const area = readBangumiAreaCache2()[seasonId];
             return area === "cn" || area === "th" || area === "hk" || area === "tw" ? area : void 0;
           }
-          function storeBangumiArea(value, area) {
+          function storeBangumiArea2(value, area) {
             if (!area) return;
             const seasonId = getPlayInfoSeasonId(value);
             if (!seasonId) return;
             try {
-              const cache = readBangumiAreaCache();
+              const cache = readBangumiAreaCache2();
               cache[seasonId] = area;
-              localStorage.setItem(bangumiAreaCacheKey, JSON.stringify(cache));
+              localStorage.setItem(bangumiAreaCacheKey2, JSON.stringify(cache));
             } catch (error) {
               util_warn("bangumi area cache write failed", error);
             }
           }
-          function getProxyHostForArea(area) {
+          function getProxyHostForArea2(area) {
             switch (area) {
               case "cn":
                 return balh_config.server_custom_cn;
@@ -3592,7 +3595,7 @@ function scriptSource(invokeBy) {
                 return balh_config.server_custom;
             }
           }
-          function getProxyAreaLabel(area) {
+          function getProxyAreaLabel2(area) {
             switch (area) {
               case "cn":
                 return "大陆";
@@ -3606,7 +3609,7 @@ function scriptSource(invokeBy) {
                 return "首选";
             }
           }
-          function getBangumiAreaHintText(value) {
+          function getBangumiAreaHintText2(value) {
             const initialState = window.__INITIAL_STATE__ || {};
             const seasonInfo = value?.result?.supplement?.ogv_season_info || {};
             const episodeInfo = value?.result?.supplement?.ogv_episode_info || {};
@@ -3630,21 +3633,21 @@ function scriptSource(invokeBy) {
             ];
             return fields.filter((item) => typeof item === "string" || typeof item === "number").map((item) => String(item)).join("\n");
           }
-          function getHintedProxyArea(value) {
-            const hintText = getBangumiAreaHintText(value);
+          function getHintedProxyArea2(value) {
+            const hintText = getBangumiAreaHintText2(value);
             if (/(僅|仅)限?港澳(臺|台)?/.test(hintText)) return "hk";
             if (/(僅|仅)限?(臺|台)(灣|湾)/.test(hintText)) return "tw";
             return void 0;
           }
-          function describeProxyError(error) {
+          function describeProxyError2(error) {
             if (error instanceof Error) return error.message;
             if (error?.message) return error.message;
             if (error?.code != null) return `${error.code}${error.message ? ` ${error.message}` : ""}`;
             if (error?.status != null) return `HTTP ${error.status}`;
             return Objects.stringify(error);
           }
-          function getProxyErrorPriority(error) {
-            const message = describeProxyError(error);
+          function getProxyErrorPriority2(error) {
+            const message = describeProxyError2(error);
             if (error?.code === -10403 || /(大会员|大會員|会员专享|會員專享|付费|付費|承包|权限|權限)/.test(message)) return 300;
             if (error?.code === 403 || error?.code === -40301 || /(地区限制|地區限制|区域限制|區域限制)/.test(message)) return 200;
             if (error instanceof Error) return 100;
@@ -3652,18 +3655,18 @@ function scriptSource(invokeBy) {
             if (error?.code != null) return 60;
             return 0;
           }
-          function choosePreferredProxyError(current, next) {
+          function choosePreferredProxyError2(current, next) {
             if (!current) return next;
-            return getProxyErrorPriority(next) > getProxyErrorPriority(current) ? next : current;
+            return getProxyErrorPriority2(next) > getProxyErrorPriority2(current) ? next : current;
           }
-          function isEntitlementProxyError(error) {
-            return getProxyErrorPriority(error) >= 300;
+          function isEntitlementProxyError2(error) {
+            return getProxyErrorPriority2(error) >= 300;
           }
           function describeProxyErrorForUser(error) {
-            if (isEntitlementProxyError(error)) {
+            if (isEntitlementProxyError2(error)) {
               return "大会员专享限制：当前账号没有该集播放权限。脚本只解除地区限制，不能绕过大会员或付费限制。";
             }
-            return describeProxyError(error);
+            return describeProxyError2(error);
           }
           function isCurrentPlayInfoRequest(epId, requestId) {
             const currentEpId = getCurrentEpId();
@@ -3879,17 +3882,98 @@ function scriptSource(invokeBy) {
               }
             }
           }
-          function normalizeProxyPlayUrl(playUrl) {
+          function normalizeProxyPlayUrl2(playUrl) {
             if (!playUrl) return playUrl;
             if (playUrl.dash) {
               Objects.convertKeyToSnakeCase(playUrl.dash);
             }
+            let normalized = playUrl;
             if (!window.__balh_app_only__ && balh_config.upos_server) {
-              return Converters.replaceUpos(playUrl, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
+              normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
             }
-            return playUrl;
+            preferNonAkamaiDashUrls2(normalized?.dash);
+            return normalized;
           }
-          function redactProxyHost(proxyHost) {
+          function preferNonAkamaiDashUrls2(dash) {
+            if (!dash) return;
+            const streams = [
+              ...Array.isArray(dash.video) ? dash.video : [],
+              ...Array.isArray(dash.audio) ? dash.audio : [],
+              ...Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []
+            ];
+            if (dash.flac?.audio) streams.push(dash.flac.audio);
+            for (const stream of streams) {
+              preferNonAkamaiStreamUrls2(stream);
+            }
+          }
+          function preferNonAkamaiStreamUrls2(stream) {
+            if (!stream || typeof stream !== "object") return;
+            const baseUrl = stream.base_url ?? stream.baseUrl;
+            const backupUrls = [
+              ...Array.isArray(stream.backup_url) ? stream.backup_url : [],
+              ...Array.isArray(stream.backupUrl) ? stream.backupUrl : []
+            ];
+            const urls = uniqueStrings2([baseUrl, ...backupUrls]);
+            if (urls.length < 2) return;
+            const nonAkamaiUrls = urls.filter((url) => !isAkamaiUrl2(url));
+            if (!nonAkamaiUrls.length) return;
+            const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl2)];
+            const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls;
+            stream.base_url = nextBaseUrl;
+            stream.baseUrl = nextBaseUrl;
+            stream.backup_url = nextBackupUrls;
+            stream.backupUrl = nextBackupUrls;
+          }
+          function uniqueStrings2(items) {
+            const seen = /* @__PURE__ */ new Set();
+            return items.filter((item) => {
+              if (typeof item !== "string" || !item) return false;
+              if (seen.has(item)) return false;
+              seen.add(item);
+              return true;
+            });
+          }
+          function isAkamaiUrl2(url) {
+            return /(^|\/\/)[^/]*akamaized\.net\//.test(url);
+          }
+          function isTransientProxyError2(error) {
+            const message = describeProxyError2(error);
+            return error instanceof Error || error?.status === 0 || error?.status >= 500 || error?.code >= 500 || error?.code === -500 || error?.code === -502 || error?.code === -412 || /(timeout|解析服务器错误|解析伺服器錯誤|server error|network|failed to fetch)/i.test(message);
+          }
+          function getProxyRetryDelay2(error, retryIndex) {
+            const delays = isEntitlementProxyError2(error) && hasAccessKey2() ? entitlementProxyRetryDelays2 : isTransientProxyError2(error) ? transientProxyRetryDelays2 : [];
+            return delays[retryIndex];
+          }
+          function hasAccessKey2() {
+            try {
+              return !!localStorage.access_key;
+            } catch (_) {
+              return false;
+            }
+          }
+          function requestProxyJson2(url) {
+            return Promise2.race([
+              Async.ajaxByXhr(url),
+              Async.timeout(proxyPlayUrlRequestTimeout2).then(() => Promise2.reject(new Error("proxy playurl timeout")))
+            ]);
+          }
+          function requestProxyCandidateWithRetry2(candidate, epId, requestId, request, retryIndex = 0, preferredError) {
+            return request().catch((error) => {
+              const nextPreferredError = choosePreferredProxyError2(preferredError, error);
+              const delay = getProxyRetryDelay2(error, retryIndex);
+              if (delay === void 0) return Promise2.reject(nextPreferredError);
+              playerStatusForRequest(epId, requestId, `正在重试${candidate.label}解析服务器`, {
+                detail: `${describeProxyError2(error)}，${delay}ms 后重试`
+              });
+              util_warn("replace playinfo by proxy candidate retry", describeProxyCandidate2(candidate), {
+                attempt: retryIndex + 1,
+                delay,
+                error: describeProxyError2(error)
+              });
+              return Async.timeout(delay).then(() => requestProxyCandidateWithRetry2(candidate, epId, requestId, request, retryIndex + 1, nextPreferredError));
+            });
+          }
+          function redactProxyHost2(proxyHost) {
             try {
               const url = new URL(proxyHost);
               url.username = "";
@@ -3899,9 +3983,9 @@ function scriptSource(invokeBy) {
               return proxyHost.replace(/\/\/[^/@]+@/, "//<redacted>@");
             }
           }
-          function describeProxyCandidate(candidate) {
+          function describeProxyCandidate2(candidate) {
             return {
-              proxyHost: redactProxyHost(candidate.proxyHost),
+              proxyHost: redactProxyHost2(candidate.proxyHost),
               area: candidate.area
             };
           }
@@ -3919,19 +4003,19 @@ function scriptSource(invokeBy) {
               requestId
             });
             const candidates = [];
-            const addCandidate = (proxyHost, area, label = getProxyAreaLabel(area)) => {
+            const addCandidate = (proxyHost, area, label = getProxyAreaLabel2(area)) => {
               if (!proxyHost) return;
               proxyHost = proxyHost.replace(/\/$/, "");
               if (candidates.some((it) => it.proxyHost === proxyHost && it.area === area)) return;
               candidates.push({ proxyHost, area, label });
             };
-            const hintedArea = getHintedProxyArea(value);
+            const hintedArea = getHintedProxyArea2(value);
             if (hintedArea) {
-              addCandidate(getProxyHostForArea(hintedArea), hintedArea, `页面提示${getProxyAreaLabel(hintedArea)}`);
+              addCandidate(getProxyHostForArea2(hintedArea), hintedArea, `页面提示${getProxyAreaLabel2(hintedArea)}`);
             }
-            const cachedArea = getCachedBangumiArea(value);
+            const cachedArea = getCachedBangumiArea2(value);
             if (cachedArea) {
-              addCandidate(getProxyHostForArea(cachedArea), cachedArea, `缓存${getProxyAreaLabel(cachedArea)}`);
+              addCandidate(getProxyHostForArea2(cachedArea), cachedArea, `缓存${getProxyAreaLabel2(cachedArea)}`);
             }
             addCandidate(balh_config.server_custom, "");
             addCandidate(balh_config.server_custom_cn, "cn");
@@ -3966,11 +4050,11 @@ function scriptSource(invokeBy) {
               const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost);
               const shouldUseMobiPlayUrl = candidate.area === "th" || window.__balh_app_only__ === true;
               if (shouldUseMobiPlayUrl && !localStorage.access_key) {
-                util_warn("skip mobi proxy candidate without access_key", describeProxyCandidate(candidate));
+                util_warn("skip mobi proxy candidate without access_key", describeProxyCandidate2(candidate));
                 return requestCandidate(index + 1);
               }
               playerStatusForRequest(epId, requestId, `正在尝试${candidate.label}解析服务器`, {
-                detail: `${index + 1}/${candidates.length} ${redactProxyHost(candidate.proxyHost)}`
+                detail: `${index + 1}/${candidates.length} ${redactProxyHost2(candidate.proxyHost)}`
               });
               const url = (() => {
                 if (shouldUseMobiPlayUrl) {
@@ -3978,18 +4062,15 @@ function scriptSource(invokeBy) {
                 }
                 return isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
               })();
-              return Promise2.race([
-                Async.ajaxByXhr(url),
-                Async.timeout(8e3).then(() => Promise2.reject(new Error("proxy playurl timeout")))
-              ]).then((json) => {
+              return requestProxyCandidateWithRetry2(candidate, epId, requestId, () => requestProxyJson2(url).then((json) => {
                 const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info ? fixThailandPlayUrlJson(json) : window.__balh_app_only__ === true && json?.type === "DASH" ? fixMobiPlayUrlJson(json) : Promise2.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data);
                 return playUrl.then((playUrl2) => ({ json, playUrl: playUrl2 }));
               }).then(({ json, playUrl }) => {
-                const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl);
+                const normalizedPlayUrl = normalizeProxyPlayUrl2(playUrl);
                 if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || shouldUseMobiPlayUrl && normalizedPlayUrl?.dash) && normalizedPlayUrl?.dash) {
                   util_debug("replace playinfo by proxy success", {
                     epId,
-                    proxyHost: redactProxyHost(candidate.proxyHost),
+                    proxyHost: redactProxyHost2(candidate.proxyHost),
                     area: candidate.area,
                     videoCount: normalizedPlayUrl.dash?.video?.length,
                     audioCount: normalizedPlayUrl.dash?.audio?.length
@@ -3999,7 +4080,7 @@ function scriptSource(invokeBy) {
                   value.result.video_info = normalizedPlayUrl;
                   value.video_info = normalizedPlayUrl;
                   removePlayInfoAreaLimit(value);
-                  storeBangumiArea(value, candidate.area);
+                  storeBangumiArea2(value, candidate.area);
                   playerStatusForRequest(epId, requestId, "解析成功，正在启动播放器", {
                     detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
                     state: "success"
@@ -4008,12 +4089,12 @@ function scriptSource(invokeBy) {
                   return value;
                 }
                 return Promise2.reject(json);
-              }).catch((error) => {
-                lastCandidateError = choosePreferredProxyError(lastCandidateError, error);
+              })).catch((error) => {
+                lastCandidateError = choosePreferredProxyError2(lastCandidateError, error);
                 playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
-                  detail: `${candidate.label}失败：${describeProxyError(error)}`
+                  detail: `${candidate.label}失败：${describeProxyError2(error)}`
                 });
-                util_warn("replace playinfo by proxy candidate failed", describeProxyCandidate(candidate), error);
+                util_warn("replace playinfo by proxy candidate failed", describeProxyCandidate2(candidate), error);
                 return requestCandidate(index + 1);
               });
             };
@@ -4022,7 +4103,7 @@ function scriptSource(invokeBy) {
                 hidePlayerStatusForRequest(requestId);
                 return Promise2.reject(error);
               }
-              playerStatusForRequest(epId, requestId, isEntitlementProxyError(error) ? "当前账号无该集播放权限" : "解析播放地址失败", {
+              playerStatusForRequest(epId, requestId, isEntitlementProxyError2(error) ? "当前账号无该集播放权限" : "解析播放地址失败", {
                 detail: describeProxyErrorForUser(error),
                 state: "error"
               });
@@ -5133,6 +5214,33 @@ function scriptSource(invokeBy) {
       function isSubtitleBodyUrl(url) {
         return url.match(RegExps.urlPath("/bfs/subtitle/")) || url.match(RegExps.url("subtitle.bilibili.com/"));
       }
+      function rewriteSubtitleMetadataUrl(url, ids) {
+        const parsedUrl = new URL(url, "https://www.bilibili.com");
+        if (parsedUrl.hostname !== "api.bilibili.com") return null;
+        const isSubtitleView = parsedUrl.pathname === "/x/v2/subtitle/web/view";
+        const isDmView = parsedUrl.pathname === "/x/v2/dm/web/view";
+        if (!isSubtitleView && !isDmView) return null;
+        const params = parsedUrl.searchParams;
+        const needsIds = !isValidParam(params.get("oid")) || !isValidParam(params.get("pid"));
+        const needsDuration = !isValidParam(params.get("duration")) && isValidParam(ids.durationMs) && (isDmView || needsIds);
+        const needsSubtitleFlag = isDmView && params.get("without_subtitle") === "true";
+        if (!needsIds && !needsDuration && !needsSubtitleFlag) return null;
+        if (needsIds && (!isValidParam(ids.aid) || !isValidParam(ids.cid))) return null;
+        if (!params.get("type")) {
+          params.set("type", "1");
+        }
+        if (needsIds) {
+          params.set("oid", String(ids.cid));
+          params.set("pid", String(ids.aid));
+        }
+        if (needsDuration && isValidParam(ids.durationMs)) {
+          params.set("duration", String(ids.durationMs));
+        }
+        if (needsSubtitleFlag) {
+          params.set("without_subtitle", "false");
+        }
+        return parsedUrl.href;
+      }
       function rewriteSubtitleBodyJson(json, url) {
         const parsedUrl = new URL(url, document.location.href);
         const translate = parsedUrl.searchParams.get("translate") === "1";
@@ -5150,6 +5258,11 @@ function scriptSource(invokeBy) {
           value.content = result;
         });
         return json;
+      }
+      function isValidParam(value) {
+        if (value == null) return false;
+        const text = String(value);
+        return text !== "" && text !== "0" && text !== "null" && text !== "undefined" && text !== "NaN";
       }
       function responseToBytes(response) {
         if (response instanceof ArrayBuffer) {
@@ -5347,12 +5460,19 @@ function scriptSource(invokeBy) {
       var space_account_info_map_default = typedData;
 
       // packages/unblock-area-limit/src/feature/bili/area_limit_fetch.ts
+      var proxyPlayUrlRequestTimeout = 8e3;
+      var transientProxyRetryDelays = [500, 1200];
+      var entitlementProxyRetryDelays = [700, 1600];
       function injectFetch() {
         const originFetch = window.fetch;
         window.fetch = async function(input, init) {
-          const originResponse = await originFetch(input, init);
-          const url = getFetchUrl(input);
+          const request = rewriteSubtitleMetadataFetchInput(input, init);
+          const originResponse = await originFetch(request.input, request.init);
+          const url = request.url;
           if (url) {
+            if (isPgcPlayUrlUrl(url)) {
+              return handlePgcPlayUrlFetch(url, originResponse);
+            }
             if (url.match(RegExps.url("api.bilibili.com/x/space/wbi/acc/info?"))) {
               const json = await originResponse.json();
               if (json.code === -404) {
@@ -5393,6 +5513,406 @@ function scriptSource(invokeBy) {
             }
           }
           return originResponse;
+        };
+      }
+      function rewriteSubtitleMetadataFetchInput(input, init) {
+        const url = getFetchUrl(input);
+        if (!url) return { input, init, url };
+        const rewrittenUrl = rewriteSubtitleMetadataUrl(url, getCurrentSubtitleMetadataIds());
+        if (!rewrittenUrl) return { input, init, url };
+        util_debug("subtitle metadata request fixed", {
+          path: new URL(rewrittenUrl).pathname,
+          from: redactSubtitleMetadataUrl(url),
+          to: redactSubtitleMetadataUrl(rewrittenUrl)
+        });
+        if (typeof input === "string") return { input: rewrittenUrl, init, url: rewrittenUrl };
+        if (input instanceof URL) return { input: new URL(rewrittenUrl), init, url: rewrittenUrl };
+        if (input instanceof Request) return { input: new Request(rewrittenUrl, input), init, url: rewrittenUrl };
+        return { input, init, url };
+      }
+      function getCurrentSubtitleMetadataIds() {
+        const anyWindow = window;
+        const playInfo = anyWindow.__PLAYURL_HYDRATE_DATA__ || anyWindow.__playinfo__;
+        const result = playInfo?.result || {};
+        const videoInfo = result.video_info || {};
+        const arc = result.arc || {};
+        const episode = result.supplement?.ogv_episode_info || {};
+        const initialState = anyWindow.__INITIAL_STATE__ || {};
+        const initialEp = initialState.epInfo || {};
+        const video = document.querySelector("video");
+        return {
+          aid: firstValidParam(arc.aid, episode.aid, initialEp.aid, initialState.aid),
+          cid: firstValidParam(arc.cid, episode.cid, initialEp.cid, initialState.cid),
+          durationMs: firstDurationMs(
+            milliseconds(videoInfo.timelength),
+            milliseconds(result.timelength),
+            milliseconds(episode.duration),
+            milliseconds(initialEp.duration),
+            secondsToMilliseconds(arc.duration),
+            secondsToMilliseconds(video?.duration)
+          )
+        };
+      }
+      function firstValidParam(...values) {
+        return values.find(isValidMetadataParam);
+      }
+      function isValidMetadataParam(value) {
+        if (value == null) return false;
+        const text = String(value);
+        return text !== "" && text !== "0" && text !== "null" && text !== "undefined" && text !== "NaN";
+      }
+      function firstDurationMs(...values) {
+        return values.find((value) => value && value > 0);
+      }
+      function milliseconds(value) {
+        const duration = Number(value);
+        if (!Number.isFinite(duration) || duration <= 0) return void 0;
+        return Math.round(duration);
+      }
+      function secondsToMilliseconds(value) {
+        const duration = Number(value);
+        if (!Number.isFinite(duration) || duration <= 0) return void 0;
+        return Math.round(duration * 1e3);
+      }
+      function redactSubtitleMetadataUrl(url) {
+        const parsedUrl = new URL(url, document.location.href);
+        return `${parsedUrl.origin}${parsedUrl.pathname}?${parsedUrl.searchParams}`;
+      }
+      function isPgcPlayUrlUrl(url) {
+        return (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) || url.match(RegExps.url("api.bilibili.com/pgc/player/web/v2/playurl"))) && !new URL(url, document.location.href).searchParams.get("balh_ajax");
+      }
+      async function handlePgcPlayUrlFetch(url, originResponse) {
+        let originJson;
+        try {
+          originJson = await originResponse.clone().json();
+        } catch (error) {
+          util_warn("fetch pgc playurl parse failed", error);
+          return originResponse;
+        }
+        const reqUrl = new URL(url, document.location.href);
+        const isV1 = reqUrl.pathname === "/pgc/player/web/playurl";
+        const originPlayUrl = getPlayUrlPayload(originJson, isV1);
+        if (!balh_config.blocked_vip && !originJson?.code && !isAreaLimitForPlayUrl(originPlayUrl)) {
+          return originResponse;
+        }
+        try {
+          const proxiedPlayUrl = await fetchPgcPlayUrlByProxy(reqUrl);
+          const result = isV1 ? { code: 0, result: proxiedPlayUrl, message: "0" } : { code: 0, message: "success", result: { video_info: proxiedPlayUrl } };
+          util_debug("fetch pgc playurl replaced by proxy", {
+            path: reqUrl.pathname,
+            videoCount: proxiedPlayUrl?.dash?.video?.length,
+            audioCount: proxiedPlayUrl?.dash?.audio?.length
+          });
+          return jsonResponse(result, originResponse);
+        } catch (error) {
+          util_warn("fetch pgc playurl proxy failed", error);
+          if (isEntitlementProxyError(error)) {
+            return jsonResponse(proxyErrorResponse(error), originResponse);
+          }
+          return jsonResponse(originJson, originResponse);
+        }
+      }
+      function getPlayUrlPayload(json, isV1) {
+        return isV1 ? json?.result?.video_info ?? json?.result : json?.result?.video_info;
+      }
+      function isAreaLimitForPlayUrl(playUrl) {
+        if (!playUrl) return true;
+        return playUrl.errorcid && playUrl.errorcid === "8986943" || playUrl.durl && playUrl.durl.length === 1 && playUrl.durl[0].length === 15126 && playUrl.durl[0].size === 124627 || !playUrl.video_info && !playUrl.dash && !playUrl.durl;
+      }
+      function fetchPgcPlayUrlByProxy(reqUrl) {
+        const candidates = getProxyCandidates();
+        if (!candidates.length) return Promise2.reject(new Error("proxy playurl server not configured"));
+        const originUrl = toPgcPlayUrl(reqUrl);
+        let lastError;
+        const requestCandidate = (index) => {
+          const candidate = candidates[index];
+          if (!candidate) return Promise2.reject(lastError || new Error("proxy playurl failed"));
+          const useMobi = candidate.area === "th" || window.__balh_app_only__ === true;
+          if (useMobi && !localStorage.access_key) {
+            util_warn("skip fetch mobi proxy candidate without access_key", describeProxyCandidate(candidate));
+            return requestCandidate(index + 1);
+          }
+          const requestUrl = buildProxyPlayUrl(originUrl, candidate, useMobi);
+          return requestProxyCandidateWithRetry(candidate, () => requestProxyJson(requestUrl).then((json) => normalizeProxyResponse(json, useMobi)).then(({ json, playUrl }) => {
+            if (playUrl?.dash || playUrl?.durl) {
+              if (candidate.area) storeBangumiArea(candidate.area);
+              util_debug("fetch pgc playurl proxy success", {
+                proxyHost: redactProxyHost(candidate.proxyHost),
+                area: candidate.area,
+                videoCount: playUrl?.dash?.video?.length,
+                audioCount: playUrl?.dash?.audio?.length
+              });
+              return playUrl;
+            }
+            return Promise2.reject(json || playUrl);
+          })).catch((error) => {
+            lastError = choosePreferredProxyError(lastError, error);
+            util_warn("fetch pgc playurl proxy candidate failed", describeProxyCandidate(candidate), error);
+            return requestCandidate(index + 1);
+          });
+        };
+        return requestCandidate(0);
+      }
+      function requestProxyJson(url) {
+        return Promise2.race([
+          Async.ajaxByXhr(url),
+          Async.timeout(proxyPlayUrlRequestTimeout).then(() => Promise2.reject(new Error("proxy playurl timeout")))
+        ]);
+      }
+      function requestProxyCandidateWithRetry(candidate, request, retryIndex = 0, preferredError) {
+        return request().catch((error) => {
+          const nextPreferredError = choosePreferredProxyError(preferredError, error);
+          const delay = getProxyRetryDelay(error, retryIndex);
+          if (delay === void 0) return Promise2.reject(nextPreferredError);
+          util_warn("fetch pgc playurl proxy candidate retry", describeProxyCandidate(candidate), {
+            attempt: retryIndex + 1,
+            delay,
+            error: describeProxyError(error)
+          });
+          return Async.timeout(delay).then(() => requestProxyCandidateWithRetry(candidate, request, retryIndex + 1, nextPreferredError));
+        });
+      }
+      function toPgcPlayUrl(reqUrl) {
+        const params = new URLSearchParams(reqUrl.search);
+        if (isBangumiPage() && !params.has("module")) {
+          params.set("module", "bangumi");
+        }
+        return `//api.bilibili.com/pgc/player/web/playurl?${params}`;
+      }
+      function getProxyCandidates() {
+        const candidates = [];
+        const addCandidate = (proxyHost, area, label = getProxyAreaLabel(area)) => {
+          if (!proxyHost) return;
+          proxyHost = proxyHost.replace(/\/$/, "");
+          if (candidates.some((it) => it.proxyHost === proxyHost && it.area === area)) return;
+          candidates.push({ proxyHost, area, label });
+        };
+        const hintedArea = getHintedProxyArea();
+        if (hintedArea) addCandidate(getProxyHostForArea(hintedArea), hintedArea, `页面提示${getProxyAreaLabel(hintedArea)}`);
+        const cachedArea = getCachedBangumiArea();
+        if (cachedArea) addCandidate(getProxyHostForArea(cachedArea), cachedArea, `缓存${getProxyAreaLabel(cachedArea)}`);
+        addCandidate(balh_config.server_custom, "");
+        addCandidate(balh_config.server_custom_cn, "cn");
+        addCandidate(balh_config.server_custom_th, "th");
+        addCandidate(balh_config.server_custom_hk, "hk");
+        addCandidate(balh_config.server_custom_tw, "tw");
+        return candidates;
+      }
+      function getProxyHostForArea(area) {
+        switch (area) {
+          case "cn":
+            return balh_config.server_custom_cn;
+          case "th":
+            return balh_config.server_custom_th;
+          case "hk":
+            return balh_config.server_custom_hk;
+          case "tw":
+            return balh_config.server_custom_tw;
+          default:
+            return balh_config.server_custom;
+        }
+      }
+      function getProxyAreaLabel(area) {
+        switch (area) {
+          case "cn":
+            return "大陆";
+          case "th":
+            return "泰国";
+          case "hk":
+            return "香港";
+          case "tw":
+            return "台湾";
+          default:
+            return "首选";
+        }
+      }
+      function getBangumiAreaHintText() {
+        const initialState = window.__INITIAL_STATE__ || {};
+        const fields = [
+          document.title,
+          initialState.h1Title,
+          initialState.mediaInfo?.title,
+          initialState.mediaInfo?.originName,
+          initialState.mediaInfo?.origin_name,
+          initialState.mediaInfo?.seasonTitle,
+          initialState.mediaInfo?.season_title,
+          initialState.epInfo?.titleFormat,
+          initialState.epInfo?.longTitle,
+          initialState.epInfo?.long_title,
+          document.body?.textContent?.slice(0, 3e3)
+        ];
+        return fields.filter((item) => typeof item === "string" || typeof item === "number").map((item) => String(item)).join("\n");
+      }
+      function getHintedProxyArea() {
+        const hintText = getBangumiAreaHintText();
+        if (/(僅|仅)限?港澳(臺|台)?/.test(hintText)) return "hk";
+        if (/(僅|仅)限?(臺|台)(灣|湾)/.test(hintText)) return "tw";
+        return void 0;
+      }
+      var bangumiAreaCacheKey = "balh_bangumi_area_cache";
+      function getCurrentSeasonId() {
+        const initialState = window.__INITIAL_STATE__ || {};
+        const seasonId = initialState.mediaInfo?.season_id ?? initialState.mediaInfo?.seasonId ?? initialState.epInfo?.season_id ?? initialState.epInfo?.seasonId ?? window.location.pathname.match(/\/bangumi\/play\/ss(\d+)/)?.[1] ?? new URL(window.location.href).searchParams.get("season_id");
+        return seasonId == null ? void 0 : String(seasonId);
+      }
+      function readBangumiAreaCache() {
+        try {
+          return JSON.parse(localStorage.getItem(bangumiAreaCacheKey) || "{}");
+        } catch (error) {
+          util_warn("fetch bangumi area cache read failed", error);
+          return {};
+        }
+      }
+      function getCachedBangumiArea() {
+        const seasonId = getCurrentSeasonId();
+        if (!seasonId) return void 0;
+        const area = readBangumiAreaCache()[seasonId];
+        return area === "cn" || area === "th" || area === "hk" || area === "tw" ? area : void 0;
+      }
+      function storeBangumiArea(area) {
+        if (!area) return;
+        const seasonId = getCurrentSeasonId();
+        if (!seasonId) return;
+        try {
+          const cache = readBangumiAreaCache();
+          cache[seasonId] = area;
+          localStorage.setItem(bangumiAreaCacheKey, JSON.stringify(cache));
+        } catch (error) {
+          util_warn("fetch bangumi area cache write failed", error);
+        }
+      }
+      function buildProxyPlayUrl(originUrl, candidate, useMobi) {
+        const isBilibiliApiProxy = r.regex.bilibili_api_proxy.test(candidate.proxyHost);
+        if (useMobi) {
+          return isBilibiliApiProxy ? getMobiPlayUrl(originUrl, candidate.proxyHost, candidate.area) : `${candidate.proxyHost}?${generateMobiPlayUrlParams(originUrl, candidate.area)}`;
+        }
+        const params = new URLSearchParams(originUrl.split("?")[1]);
+        if (candidate.area) params.set("area", candidate.area);
+        const query = `${params}${access_key_param_if_exist(true)}`;
+        return isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
+      }
+      function normalizeProxyResponse(json, useMobi) {
+        const playUrl = useMobi && json?.data?.video_info ? fixThailandPlayUrlJson(json) : window.__balh_app_only__ === true && json?.type === "DASH" ? fixMobiPlayUrlJson(json) : Promise2.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data);
+        return playUrl.then((playUrl2) => ({
+          json,
+          playUrl: normalizeProxyPlayUrl(playUrl2)
+        }));
+      }
+      function normalizeProxyPlayUrl(playUrl) {
+        if (!playUrl) return playUrl;
+        if (playUrl.dash) {
+          Objects.convertKeyToSnakeCase(playUrl.dash);
+        }
+        let normalized = playUrl;
+        if (!window.__balh_app_only__ && balh_config.upos_server) {
+          normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
+        }
+        preferNonAkamaiDashUrls(normalized?.dash);
+        return normalized;
+      }
+      function preferNonAkamaiDashUrls(dash) {
+        if (!dash) return;
+        const streams = [
+          ...Array.isArray(dash.video) ? dash.video : [],
+          ...Array.isArray(dash.audio) ? dash.audio : [],
+          ...Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []
+        ];
+        if (dash.flac?.audio) streams.push(dash.flac.audio);
+        for (const stream of streams) {
+          preferNonAkamaiStreamUrls(stream);
+        }
+      }
+      function preferNonAkamaiStreamUrls(stream) {
+        if (!stream || typeof stream !== "object") return;
+        const baseUrl = stream.base_url ?? stream.baseUrl;
+        const backupUrls = [
+          ...Array.isArray(stream.backup_url) ? stream.backup_url : [],
+          ...Array.isArray(stream.backupUrl) ? stream.backupUrl : []
+        ];
+        const urls = uniqueStrings([baseUrl, ...backupUrls]);
+        if (urls.length < 2) return;
+        const nonAkamaiUrls = urls.filter((url) => !isAkamaiUrl(url));
+        if (!nonAkamaiUrls.length) return;
+        const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)];
+        const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls;
+        stream.base_url = nextBaseUrl;
+        stream.baseUrl = nextBaseUrl;
+        stream.backup_url = nextBackupUrls;
+        stream.backupUrl = nextBackupUrls;
+      }
+      function uniqueStrings(items) {
+        const seen = /* @__PURE__ */ new Set();
+        return items.filter((item) => {
+          if (typeof item !== "string" || !item) return false;
+          if (seen.has(item)) return false;
+          seen.add(item);
+          return true;
+        });
+      }
+      function isAkamaiUrl(url) {
+        return /(^|\/\/)[^/]*akamaized\.net\//.test(url);
+      }
+      function isBangumiPage() {
+        return /\/bangumi\/play\//.test(window.location.pathname);
+      }
+      function redactProxyHost(proxyHost) {
+        try {
+          const url = new URL(proxyHost);
+          url.username = "";
+          url.password = "";
+          return url.href.replace(/\/$/, "");
+        } catch (_) {
+          return proxyHost.replace(/\/\/[^/@]+@/, "//<redacted>@");
+        }
+      }
+      function describeProxyCandidate(candidate) {
+        return {
+          proxyHost: redactProxyHost(candidate.proxyHost),
+          area: candidate.area
+        };
+      }
+      function describeProxyError(error) {
+        if (error instanceof Error) return error.message;
+        if (error?.message) return error.message;
+        if (error?.code != null) return `${error.code}${error.message ? ` ${error.message}` : ""}`;
+        if (error?.status != null) return `HTTP ${error.status}`;
+        return Objects.stringify(error);
+      }
+      function getProxyErrorPriority(error) {
+        const message = describeProxyError(error);
+        if (error?.code === -10403 || /(大会员|大會員|会员专享|會員專享|付费|付費|承包|权限|權限)/.test(message)) return 300;
+        if (error?.code === 403 || error?.code === -40301 || /(地区限制|地區限制|区域限制|區域限制)/.test(message)) return 200;
+        if (error instanceof Error) return 100;
+        if (error?.status != null) return 80;
+        if (error?.code != null) return 60;
+        return 0;
+      }
+      function choosePreferredProxyError(current, next) {
+        if (!current) return next;
+        return getProxyErrorPriority(next) > getProxyErrorPriority(current) ? next : current;
+      }
+      function isEntitlementProxyError(error) {
+        return getProxyErrorPriority(error) >= 300;
+      }
+      function isTransientProxyError(error) {
+        const message = describeProxyError(error);
+        return error instanceof Error || error?.status === 0 || error?.status >= 500 || error?.code >= 500 || error?.code === -500 || error?.code === -502 || error?.code === -412 || /(timeout|解析服务器错误|解析伺服器錯誤|server error|network|failed to fetch)/i.test(message);
+      }
+      function getProxyRetryDelay(error, retryIndex) {
+        const delays = isEntitlementProxyError(error) && hasAccessKey() ? entitlementProxyRetryDelays : isTransientProxyError(error) ? transientProxyRetryDelays : [];
+        return delays[retryIndex];
+      }
+      function hasAccessKey() {
+        try {
+          return !!localStorage.access_key;
+        } catch (_) {
+          return false;
+        }
+      }
+      function proxyErrorResponse(error) {
+        return {
+          code: error?.code ?? -1,
+          message: describeProxyError(error)
         };
       }
       function getFetchUrl(input) {
@@ -5630,11 +6150,11 @@ function scriptSource(invokeBy) {
                   const reqUrl = new URL(url, document.location.href);
                   const isV1 = reqUrl.pathname === "/pgc/player/web/playurl";
                   let json = typeof xhr.response === "object" ? xhr.response : JSON.parse(xhr.responseText);
-                  if (!container.__redirect || !isV1 && isAreaLimitForPlayUrl(json.result)) {
-                    if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json.result)) {
+                  if (!container.__redirect || !isV1 && isAreaLimitForPlayUrl2(json.result)) {
+                    if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl2(json.result)) {
                       areaLimit(true);
                       let requestUrl = isV1 ? container.__url : `//api.bilibili.com/pgc/player/web/playurl${reqUrl.search}`;
-                      if (isBangumiPage()) {
+                      if (isBangumiPage2()) {
                         requestUrl += `&module=bangumi`;
                       }
                       return bilibiliApis._playurl.asyncAjax(requestUrl).then((data2) => {
@@ -5678,6 +6198,18 @@ function scriptSource(invokeBy) {
               /// - Promise, 表示需要替换成异步请求, Promise的结果会替换xhr.response
               /// {@endtemplate}
               transformRequest: ({ url, container }) => {
+                const subtitleMetadataUrl = rewriteSubtitleMetadataUrl(url, getCurrentSubtitleMetadataIds2());
+                if (subtitleMetadataUrl) {
+                  util_debug("subtitle metadata request fixed by xhr", {
+                    path: new URL(subtitleMetadataUrl).pathname,
+                    from: redactSubtitleMetadataUrl2(url),
+                    to: redactSubtitleMetadataUrl2(subtitleMetadataUrl)
+                  });
+                  return requestSubtitleMetadataByFetch(subtitleMetadataUrl).then((response) => {
+                    if (!subtitleMetadataUrl.match(RegExps.url("api.bilibili.com/x/v2/subtitle/web/view"))) return response;
+                    return rewriteSubtitleWebViewResponse(response, { generateSub: balh_config.generate_sub }) || response;
+                  });
+                }
                 if (url.match(RegExps.url("api.bilibili.com/x/player/playurl")) && balh_config.enable_in_av) {
                   util_debug("/x/player/playurl");
                   return bilibiliApis._playurl.asyncAjax(url).then((data2) => {
@@ -5694,7 +6226,7 @@ function scriptSource(invokeBy) {
                   });
                 } else if (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) && !Strings.getSearchParam(url, "balh_ajax") && needRedirect()) {
                   container.__redirect = true;
-                  if (isBangumiPage()) {
+                  if (isBangumiPage2()) {
                     url += `&module=bangumi`;
                   }
                   return bilibiliApis._playurl.asyncAjax(url).then((data2) => {
@@ -5707,6 +6239,59 @@ function scriptSource(invokeBy) {
                 return null;
               }
             });
+          }
+          function getCurrentSubtitleMetadataIds2() {
+            const playInfo = window.__PLAYURL_HYDRATE_DATA__ || window.__playinfo__;
+            const result = playInfo?.result || {};
+            const videoInfo = result.video_info || {};
+            const arc = result.arc || {};
+            const episode = result.supplement?.ogv_episode_info || {};
+            const initialState = window.__INITIAL_STATE__ || {};
+            const initialEp = initialState.epInfo || {};
+            const video = document.querySelector("video");
+            return {
+              aid: firstValidParam2(arc.aid, episode.aid, initialEp.aid, initialState.aid),
+              cid: firstValidParam2(arc.cid, episode.cid, initialEp.cid, initialState.cid),
+              durationMs: firstDurationMs2(
+                milliseconds2(videoInfo.timelength),
+                milliseconds2(result.timelength),
+                milliseconds2(episode.duration),
+                milliseconds2(initialEp.duration),
+                secondsToMilliseconds2(arc.duration),
+                secondsToMilliseconds2(video?.duration)
+              )
+            };
+          }
+          function firstValidParam2(...values) {
+            return values.find(isValidMetadataParam2);
+          }
+          function isValidMetadataParam2(value) {
+            if (value == null) return false;
+            const text = String(value);
+            return text !== "" && text !== "0" && text !== "null" && text !== "undefined" && text !== "NaN";
+          }
+          function firstDurationMs2(...values) {
+            return values.find((value) => value && value > 0);
+          }
+          function milliseconds2(value) {
+            const duration = Number(value);
+            if (!Number.isFinite(duration) || duration <= 0) return void 0;
+            return Math.round(duration);
+          }
+          function secondsToMilliseconds2(value) {
+            const duration = Number(value);
+            if (!Number.isFinite(duration) || duration <= 0) return void 0;
+            return Math.round(duration * 1e3);
+          }
+          function requestSubtitleMetadataByFetch(url) {
+            return fetch(url, { credentials: "include" }).then((response) => {
+              if (!response.ok) return Promise2.reject(new Error(`subtitle metadata request failed: ${response.status}`));
+              return response.arrayBuffer();
+            });
+          }
+          function redactSubtitleMetadataUrl2(url) {
+            const parsedUrl = new URL(url, document.location.href);
+            return `${parsedUrl.origin}${parsedUrl.pathname}?${parsedUrl.searchParams}`;
           }
           function injectAjax() {
             util_debug("injectAjax at:", window.jQuery);
@@ -5750,7 +6335,7 @@ function scriptSource(invokeBy) {
                     param.url += `?${Object.keys(param.data).map((key) => `${key}=${param.data[key]}`).join("&")}`;
                     param.data = void 0;
                   }
-                  if (isBangumiPage()) {
+                  if (isBangumiPage2()) {
                     param.url += `&module=bangumi`;
                   }
                   param.url += `&balh_ajax=1`;
@@ -5763,7 +6348,7 @@ function scriptSource(invokeBy) {
                   if (isNewPlayurl && !json.code) {
                     json = json.result;
                   }
-                  if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json)) {
+                  if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl2(json)) {
                     areaLimit(true);
                     return one_api.asyncAjax(param.url).catch((e) => json);
                   } else {
@@ -5877,7 +6462,7 @@ function scriptSource(invokeBy) {
             util_debug(`season_type: ${season_type}`);
             return season_type != null;
           }
-          function isBangumiPage() {
+          function isBangumiPage2() {
             const queries = window.__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries;
             const seasonData = queries?.find?.((query) => {
               const key = query?.queryKey?.[0];
@@ -5939,7 +6524,7 @@ function scriptSource(invokeBy) {
             }
             return seasonId || "000";
           }
-          function isAreaLimitForPlayUrl(json) {
+          function isAreaLimitForPlayUrl2(json) {
             return json.errorcid && json.errorcid == "8986943" || json.durl && json.durl.length === 1 && json.durl[0].length === 15126 && json.durl[0].size === 124627 || !json.video_info;
           }
           var bilibiliApis = (function() {
@@ -6149,7 +6734,7 @@ function scriptSource(invokeBy) {
                   } else {
                     return Promise2.reject(new AjaxException(`服务器错误: ${JSON.stringify(data2)}`, data2 ? data2.code : 0));
                   }
-                } else if (isAreaLimitForPlayUrl(data2) || data2.code === 401) {
+                } else if (isAreaLimitForPlayUrl2(data2) || data2.code === 401) {
                   util_error(">>area limit");
                   ui.pop({
                     content: `突破黑洞失败
