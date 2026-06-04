@@ -20,7 +20,13 @@ await build({
     target: 'es2020',
 })
 
-const { rewriteSubtitleWebViewResponse } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
+globalThis.document = {
+    location: {
+        href: 'https://www.bilibili.com/bangumi/play/ep664928',
+    },
+}
+
+const { rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
 
 const response = fieldMessage(1, fieldMessage(3, concat([
     fieldVarint(1, 10n),
@@ -43,6 +49,18 @@ assert.match(rewrittenText, /中文（简体）生成/)
 assert.match(rewrittenText, /translate=1/)
 assert.match(rewrittenText, /from=tw/)
 assert.match(rewrittenText, /to=cn/)
+
+const subtitleBody = {
+    body: [
+        { content: '繁體字幕 - 測試' },
+        { content: '第二行—測試' },
+    ],
+}
+const rewrittenBody = rewriteSubtitleBodyJson(subtitleBody, 'https://aisubtitle.hdslb.com/bfs/subtitle/example.json?translate=1&from=tw&to=cn')
+assert.equal(rewrittenBody, subtitleBody)
+assert.equal(subtitleBody.body[0].content, '繁体字幕\n- 测试')
+assert.equal(subtitleBody.body[1].content, '第二行—测试')
+assert.equal(rewriteSubtitleBodyJson({ body: [{ content: '繁體字幕' }] }, 'https://aisubtitle.hdslb.com/bfs/subtitle/example.json'), null)
 
 console.log('subtitle-web-view tests passed')
 
