@@ -23,6 +23,12 @@ interface RewriteOptions {
     generateSub?: boolean
 }
 
+interface SubtitleMetadataIds {
+    aid?: string | number
+    cid?: string | number
+    durationMs?: string | number
+}
+
 export function rewriteSubtitleWebViewResponse(response: unknown, options: RewriteOptions): ArrayBuffer | null {
     if (!options.generateSub) return null
 
@@ -61,6 +67,38 @@ export function isSubtitleBodyUrl(url: string) {
     return url.match(RegExps.urlPath('/bfs/subtitle/')) || url.match(RegExps.url('subtitle.bilibili.com/'))
 }
 
+export function rewriteSubtitleMetadataUrl(url: string, ids: SubtitleMetadataIds): string | null {
+    const parsedUrl = new URL(url, 'https://www.bilibili.com')
+    if (parsedUrl.hostname !== 'api.bilibili.com') return null
+
+    const isSubtitleView = parsedUrl.pathname === '/x/v2/subtitle/web/view'
+    const isDmView = parsedUrl.pathname === '/x/v2/dm/web/view'
+    if (!isSubtitleView && !isDmView) return null
+
+    const params = parsedUrl.searchParams
+    const needsIds = !isValidParam(params.get('oid')) || !isValidParam(params.get('pid'))
+    const needsDuration = !isValidParam(params.get('duration')) && isValidParam(ids.durationMs) && (isDmView || needsIds)
+    const needsSubtitleFlag = isDmView && params.get('without_subtitle') === 'true'
+    if (!needsIds && !needsDuration && !needsSubtitleFlag) return null
+    if (needsIds && (!isValidParam(ids.aid) || !isValidParam(ids.cid))) return null
+
+    if (!params.get('type')) {
+        params.set('type', '1')
+    }
+    if (needsIds) {
+        params.set('oid', String(ids.cid))
+        params.set('pid', String(ids.aid))
+    }
+    if (needsDuration && isValidParam(ids.durationMs)) {
+        params.set('duration', String(ids.durationMs))
+    }
+    if (needsSubtitleFlag) {
+        params.set('without_subtitle', 'false')
+    }
+
+    return parsedUrl.href
+}
+
 export function rewriteSubtitleBodyJson<T extends { body?: Array<{ content?: string }> }>(json: T, url: string): T | null {
     const parsedUrl = new URL(url, document.location.href)
     const translate = parsedUrl.searchParams.get('translate') === '1'
@@ -81,6 +119,12 @@ export function rewriteSubtitleBodyJson<T extends { body?: Array<{ content?: str
         value.content = result
     })
     return json
+}
+
+function isValidParam(value: unknown): value is string | number {
+    if (value == null) return false
+    const text = String(value)
+    return text !== '' && text !== '0' && text !== 'null' && text !== 'undefined' && text !== 'NaN'
 }
 
 function responseToBytes(response: unknown): Uint8Array | null {

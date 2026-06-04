@@ -8,7 +8,7 @@ import { RegExps } from "../../util/regexps"
 import { Strings } from "../../util/strings"
 import { balh_config } from "../config"
 import { FALSE, r } from "../r"
-import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
+import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
 
 type ProxyArea = '' | 'cn' | 'th' | 'hk' | 'tw'
@@ -20,8 +20,9 @@ const entitlementProxyRetryDelays = [700, 1600]
 export function injectFetch() {
     const originFetch = window.fetch;
     window.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const originResponse = await originFetch(input, init)
-        const url = getFetchUrl(input)
+        const request = rewriteSubtitleMetadataFetchInput(input, init)
+        const originResponse = await originFetch(request.input, request.init)
+        const url = request.url
         if (url) {
             if (isPgcPlayUrlUrl(url)) {
                 return handlePgcPlayUrlFetch(url, originResponse)
@@ -67,6 +68,79 @@ export function injectFetch() {
         }
         return originResponse
     }
+}
+
+function rewriteSubtitleMetadataFetchInput(input: RequestInfo | URL, init?: RequestInit) {
+    const url = getFetchUrl(input)
+    if (!url) return { input, init, url }
+
+    const rewrittenUrl = rewriteSubtitleMetadataUrl(url, getCurrentSubtitleMetadataIds())
+    if (!rewrittenUrl) return { input, init, url }
+
+    log('subtitle metadata request fixed', {
+        path: new URL(rewrittenUrl).pathname,
+        from: redactSubtitleMetadataUrl(url),
+        to: redactSubtitleMetadataUrl(rewrittenUrl),
+    })
+    if (typeof input === 'string') return { input: rewrittenUrl, init, url: rewrittenUrl }
+    if (input instanceof URL) return { input: new URL(rewrittenUrl), init, url: rewrittenUrl }
+    if (input instanceof Request) return { input: new Request(rewrittenUrl, input), init, url: rewrittenUrl }
+    return { input, init, url }
+}
+
+function getCurrentSubtitleMetadataIds() {
+    const anyWindow = window as any
+    const playInfo = anyWindow.__PLAYURL_HYDRATE_DATA__ || anyWindow.__playinfo__
+    const result = playInfo?.result || {}
+    const videoInfo = result.video_info || {}
+    const arc = result.arc || {}
+    const episode = result.supplement?.ogv_episode_info || {}
+    const initialState = anyWindow.__INITIAL_STATE__ || {}
+    const initialEp = initialState.epInfo || {}
+    const video = document.querySelector('video')
+    return {
+        aid: firstValidParam(arc.aid, episode.aid, initialEp.aid, initialState.aid),
+        cid: firstValidParam(arc.cid, episode.cid, initialEp.cid, initialState.cid),
+        durationMs: firstDurationMs(
+            milliseconds(videoInfo.timelength),
+            milliseconds(result.timelength),
+            milliseconds(episode.duration),
+            milliseconds(initialEp.duration),
+            secondsToMilliseconds(arc.duration),
+            secondsToMilliseconds(video?.duration),
+        ),
+    }
+}
+
+function firstValidParam(...values: any[]) {
+    return values.find(isValidMetadataParam)
+}
+
+function isValidMetadataParam(value: any) {
+    if (value == null) return false
+    const text = String(value)
+    return text !== '' && text !== '0' && text !== 'null' && text !== 'undefined' && text !== 'NaN'
+}
+
+function firstDurationMs(...values: Array<number | undefined>) {
+    return values.find((value) => value && value > 0)
+}
+
+function milliseconds(value: any) {
+    const duration = Number(value)
+    if (!Number.isFinite(duration) || duration <= 0) return undefined
+    return Math.round(duration)
+}
+
+function secondsToMilliseconds(value: any) {
+    const duration = Number(value)
+    if (!Number.isFinite(duration) || duration <= 0) return undefined
+    return Math.round(duration * 1000)
+}
+
+function redactSubtitleMetadataUrl(url: string) {
+    const parsedUrl = new URL(url, document.location.href)
+    return `${parsedUrl.origin}${parsedUrl.pathname}?${parsedUrl.searchParams}`
 }
 
 function isPgcPlayUrlUrl(url: string) {
