@@ -25,7 +25,10 @@ const accessKeyFileOption = readOption('--access-key-file')
 const proxyServerOption = readOption('--proxy-server')
 const generateSub = args.includes('--generate-sub')
 const probeSubtitleMenu = args.includes('--probe-subtitle-menu')
+const probeFetchPlayUrlOption = args.includes('--probe-fetch-playurl')
 const waitAfterStartMs = Number(readOption('--wait-after-start-ms') || 0)
+const seekToSeconds = parseNumberList(readOption('--seek-to-seconds') || '')
+const seekWaitMs = Number(readOption('--seek-wait-ms') || 8000)
 const userscriptPath = userscriptOption ? path.resolve(rootDir, userscriptOption) : undefined
 const tampermonkeyExtensionPath = tampermonkeyExtensionOption ? path.resolve(rootDir, tampermonkeyExtensionOption) : undefined
 const tampermonkeyInstallPath = tampermonkeyInstallOption ? path.resolve(rootDir, tampermonkeyInstallOption) : undefined
@@ -53,7 +56,10 @@ Options:
   --proxy-server <url>   Set BALH custom proxy cookies. Defaults to https://atri.ink with --launch/--userscript/Tampermonkey install.
   --generate-sub         Enable BALH generated simplified/traditional subtitles.
   --probe-subtitle-menu  Open the player subtitle menu and click a generated subtitle if present.
+  --probe-fetch-playurl  Fetch the PGC playurl API from the page to exercise fetch interception.
   --wait-after-start-ms  Wait after the first playable episode before switching.
+  --seek-to-seconds      Comma-separated video positions to seek before switching.
+  --seek-wait-ms         Wait after each seek. Default: 8000.
   --start-url <url>      Initial playable episode URL.
   --blocked-url <url>    Episode URL expected to fail because of account entitlement.
   --return-url <url>     URL to click back to after the blocked episode.
@@ -87,6 +93,15 @@ function readOption(name) {
         throw new Error(`Missing value for ${name}`)
     }
     return value
+}
+
+function parseNumberList(value) {
+    return String(value)
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => Number(item))
+        .filter((item) => Number.isFinite(item) && item >= 0)
 }
 
 function episodeId(url) {
@@ -300,6 +315,107 @@ async function samplePlayer(page, label) {
     record(`${label} player sample ${JSON.stringify(sample)}`)
 }
 
+async function seekVideo(page, seconds, label) {
+    const result = await page.evaluate(async (targetSeconds) => {
+        const video = Array.from(document.querySelectorAll('video'))
+            .find((item) => Number.isFinite(item.duration) && item.duration > 0)
+            || document.querySelector('video')
+        if (!video) return { ok: false, reason: 'video not found' }
+
+        const before = {
+            currentTime: video.currentTime,
+            duration: video.duration,
+            networkState: video.networkState,
+            paused: video.paused,
+            readyState: video.readyState,
+        }
+        const maxTarget = Number.isFinite(video.duration) && video.duration > 3
+            ? Math.max(0, video.duration - 2)
+            : targetSeconds
+        const target = Math.min(targetSeconds, maxTarget)
+        let playResult = 'not-called'
+        let seeked = false
+
+        const seekedPromise = new Promise((resolve) => {
+            const timeout = window.setTimeout(() => resolve(false), 5000)
+            video.addEventListener('seeked', () => {
+                window.clearTimeout(timeout)
+                resolve(true)
+            }, { once: true })
+        })
+
+        video.currentTime = target
+        try {
+            await video.play()
+            playResult = 'resolved'
+        } catch (error) {
+            playResult = `${error?.name || 'Error'}: ${error?.message || String(error)}`
+        }
+        seeked = await seekedPromise
+
+        return {
+            ok: true,
+            before,
+            after: {
+                currentTime: video.currentTime,
+                duration: video.duration,
+                networkState: video.networkState,
+                paused: video.paused,
+                readyState: video.readyState,
+            },
+            playResult,
+            seeked,
+            target,
+        }
+    }, seconds).catch((error) => ({ ok: false, error: String(error) }))
+
+    record(`${label} seek ${seconds}s result ${JSON.stringify(result)}`)
+}
+
+async function probePgcFetchPlayUrl(page, label = 'fetch playurl') {
+    const result = await page.evaluate(async () => {
+        const anyWindow = window
+        const playInfo = anyWindow.__PLAYURL_HYDRATE_DATA__ || anyWindow.__playinfo__
+        const arc = playInfo?.result?.arc || {}
+        const episode = playInfo?.result?.supplement?.ogv_episode_info || {}
+        const aid = arc.aid
+        const cid = arc.cid
+        const epId = episode.episode_id
+        if (!aid || !cid || !epId) {
+            return { ok: false, reason: 'missing aid/cid/ep_id', aid, cid, epId }
+        }
+        const params = new URLSearchParams({
+            avid: String(aid),
+            cid: String(cid),
+            qn: '64',
+            type: '',
+            otype: 'json',
+            ep_id: String(epId),
+            fourk: '1',
+            fnver: '0',
+            fnval: '4048',
+            session: '',
+            module: 'bangumi',
+        })
+        const response = await fetch(`https://api.bilibili.com/pgc/player/web/playurl?${params}`, {
+            credentials: 'include',
+        })
+        const json = await response.json()
+        const playUrl = json?.result?.video_info ?? json?.result
+        return {
+            ok: true,
+            status: response.status,
+            code: json?.code,
+            message: json?.message,
+            hasDash: !!playUrl?.dash,
+            videoCount: playUrl?.dash?.video?.length,
+            audioCount: playUrl?.dash?.audio?.length,
+            hasDurl: Array.isArray(playUrl?.durl),
+        }
+    }).catch((error) => ({ ok: false, error: String(error) }))
+    record(`${label} fetch playurl probe ${JSON.stringify(result)}`)
+}
+
 async function probeGeneratedSubtitle(page, label = 'subtitle') {
     try {
         await page.mouse.move(720, 500)
@@ -426,6 +542,14 @@ async function main() {
         recordContextState(context, 'after goto')
         await waitForVideoReady(page, 'after start')
         await samplePlayer(page, 'after start')
+        if (probeFetchPlayUrlOption) {
+            await probePgcFetchPlayUrl(page, 'after start')
+        }
+        for (const seconds of seekToSeconds) {
+            await seekVideo(page, seconds, `after start`)
+            await page.waitForTimeout(seekWaitMs)
+            await samplePlayer(page, `after seek ${seconds}s`)
+        }
         if (waitAfterStartMs > 0) {
             record(`wait after start ${waitAfterStartMs}ms`)
             await page.waitForTimeout(waitAfterStartMs)
