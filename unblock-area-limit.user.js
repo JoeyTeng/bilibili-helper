@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.7.0
+// @version      8.7.1
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260603T062958491Z";
+    const __BALH_BUILD_VERSION__ = "20260604T105527492Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -4927,80 +4927,6 @@ function scriptSource(invokeBy) {
         RegExps2.urlPath = (path) => new RegExp(`^(https?:)?//[\\w\\-\\.]+${_raw(path)}`);
       })(RegExps || (RegExps = {}));
 
-      // packages/unblock-area-limit/src/feature/bili/space_account_info_map.ts
-      var data = {
-        "11783021": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 11783021, "name": "哔哩哔哩番剧出差", "sex": "保密", "face": "http://i2.hdslb.com/bfs/face/9f10323503739e676857f06f5e4f5eb323e9f3f2.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 3, "title": "哔哩哔哩番剧出差 官方账号", "desc": "", "type": 1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": { "roomStatus": 1, "liveStatus": 0, "url": "https://live.bilibili.com/931774?broadcast_type=0&is_room_feed=0", "title": "", "cover": "", "roomid": 931774, "roundStatus": 0, "broadcast_type": 0 }, "birthday": "", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=11783021" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } },
-        "1988098633": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 1988098633, "name": "b站_戲劇咖", "sex": "保密", "face": "https://i1.hdslb.com/bfs/face/9718fb1aa9fa37d62749506f677c8f2f5804c725.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "提供bilibili港澳台地區專屬戲劇節目。", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 0, "title": "", "desc": "", "type": -1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": null, "birthday": "01-01", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=1988098633" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } },
-        "2042149112": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 2042149112, "name": "b站_綜藝咖", "sex": "保密", "face": "https://i0.hdslb.com/bfs/face/member/noface.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 0, "title": "", "desc": "", "type": -1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": null, "birthday": "", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=2042149112" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } }
-      };
-      var typedData = data;
-      var space_account_info_map_default = typedData;
-
-      // packages/unblock-area-limit/src/feature/bili/area_limit_fetch.ts
-      function injectFetch() {
-        const originFetch = window.fetch;
-        window.fetch = async function(input, init) {
-          const originResponse = await originFetch(input, init);
-          if (typeof input === "string") {
-            if (input.match(RegExps.url("api.bilibili.com/x/space/wbi/acc/info?"))) {
-              const json = await originResponse.json();
-              if (json.code === -404) {
-                const mid = new URL(input, document.location.href).searchParams.get("mid");
-                if (mid && space_account_info_map_default[mid || ""]) {
-                  return new Response(JSON.stringify(space_account_info_map_default[mid]));
-                }
-              }
-              return new Response(JSON.stringify(json));
-            }
-          }
-          return originResponse;
-        };
-      }
-      function injectFetch4Mobile() {
-        util_debug("injectFetch4Mobile");
-        window.fetch = Async.wrapper(
-          window.fetch,
-          (resp) => new Proxy(resp, {
-            get: function(target2, prop, receiver) {
-              if (prop === "json") {
-                return Async.wrapper(
-                  target2.json.bind(target2),
-                  (oriResult) => {
-                    util_debug("injectFetch:", target2.url);
-                    if (target2.url.match(RegExps.urlPath("/player/web_api/v2/playurl/html5"))) {
-                      let cid = Strings.getSearchParam(target2.url, "cid");
-                      return BiliPlusApi.playurl(cid).then((result) => {
-                        if (result.code) {
-                          return Promise.reject("error: " + JSON.stringify(result));
-                        } else {
-                          return BiliPlusApi.playurl_for_mp4(cid).then((url) => {
-                            util_debug(`mp4地址, 移动版: ${url}, pc版: ${result.durl[0].url}`);
-                            return {
-                              "code": 0,
-                              "cid": `http://comment.bilibili.com/${cid}.xml`,
-                              "timelength": result.timelength,
-                              "src": url || result.durl[0].url
-                              // 只取第一个片段的url...
-                            };
-                          });
-                        }
-                      }).catch((e) => {
-                        util_debug("fetch mp4 url failed", e);
-                        return oriResult;
-                      });
-                    }
-                    return oriResult;
-                  },
-                  (error) => error
-                );
-              }
-              return target2[prop];
-            }
-          }),
-          (error) => error
-        );
-      }
-
       // node_modules/.pnpm/opencc-js@1.0.5/node_modules/opencc-js/dist/esm/full.js
       var Trie = class {
         // 使用 Map 實作 Trie 樹
@@ -5204,6 +5130,27 @@ function scriptSource(invokeBy) {
           return null;
         }
       }
+      function isSubtitleBodyUrl(url) {
+        return url.match(RegExps.urlPath("/bfs/subtitle/")) || url.match(RegExps.url("subtitle.bilibili.com/"));
+      }
+      function rewriteSubtitleBodyJson(json, url) {
+        const parsedUrl = new URL(url, document.location.href);
+        const translate = parsedUrl.searchParams.get("translate") === "1";
+        if (!translate) return null;
+        const from = parsedUrl.searchParams.get("from");
+        const to = parsedUrl.searchParams.get("to");
+        if (!from || !to || !Array.isArray(json.body)) return null;
+        const translator = Converter({ from, to });
+        json.body.forEach((value) => {
+          if (typeof value.content !== "string") return;
+          const original = value.content;
+          let result = original.replace(/\s[-—－]/, (s) => `
+    ${s.substring(1)}`);
+          result = translator(result);
+          value.content = result;
+        });
+        return json;
+      }
       function responseToBytes(response) {
         if (response instanceof ArrayBuffer) {
           return new Uint8Array(response);
@@ -5390,10 +5337,131 @@ function scriptSource(invokeBy) {
         }
       }
 
-      // packages/unblock-area-limit/src/feature/bili/area_limit_xhr_.ts
-      function isSubtitleBodyUrl(url) {
-        return url.match(RegExps.urlPath("/bfs/subtitle/")) || url.match(RegExps.url("subtitle.bilibili.com/"));
+      // packages/unblock-area-limit/src/feature/bili/space_account_info_map.ts
+      var data = {
+        "11783021": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 11783021, "name": "哔哩哔哩番剧出差", "sex": "保密", "face": "http://i2.hdslb.com/bfs/face/9f10323503739e676857f06f5e4f5eb323e9f3f2.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 3, "title": "哔哩哔哩番剧出差 官方账号", "desc": "", "type": 1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": { "roomStatus": 1, "liveStatus": 0, "url": "https://live.bilibili.com/931774?broadcast_type=0&is_room_feed=0", "title": "", "cover": "", "roomid": 931774, "roundStatus": 0, "broadcast_type": 0 }, "birthday": "", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=11783021" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } },
+        "1988098633": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 1988098633, "name": "b站_戲劇咖", "sex": "保密", "face": "https://i1.hdslb.com/bfs/face/9718fb1aa9fa37d62749506f677c8f2f5804c725.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "提供bilibili港澳台地區專屬戲劇節目。", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 0, "title": "", "desc": "", "type": -1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": null, "birthday": "01-01", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=1988098633" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } },
+        "2042149112": { "code": 0, "message": "0", "ttl": 1, "data": { "mid": 2042149112, "name": "b站_綜藝咖", "sex": "保密", "face": "https://i0.hdslb.com/bfs/face/member/noface.jpg", "face_nft": 0, "face_nft_type": 0, "sign": "", "rank": 1e4, "level": 6, "jointime": 0, "moral": 0, "silence": 0, "coins": 0, "fans_badge": false, "fans_medal": { "show": false, "wear": false, "medal": null }, "official": { "role": 0, "title": "", "desc": "", "type": -1 }, "vip": { "type": 0, "status": 0, "due_date": 0, "vip_pay_type": 0, "theme_type": 0, "label": { "path": "", "text": "", "label_theme": "", "text_color": "", "bg_style": 0, "bg_color": "", "border_color": "", "use_img_label": true, "img_label_uri_hans": "", "img_label_uri_hant": "", "img_label_uri_hans_static": "https://i0.hdslb.com/bfs/vip/d7b702ef65a976b20ed854cbd04cb9e27341bb79.png", "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/KJunwh19T5.png" }, "avatar_subscript": 0, "nickname_color": "", "role": 0, "avatar_subscript_url": "", "tv_vip_status": 0, "tv_vip_pay_type": 0, "tv_due_date": 0 }, "pendant": { "pid": 0, "name": "", "image": "", "expire": 0, "image_enhance": "", "image_enhance_frame": "", "n_pid": 0 }, "nameplate": { "nid": 0, "name": "", "image": "", "image_small": "", "level": "", "condition": "" }, "user_honour_info": { "mid": 0, "colour": null, "tags": [], "is_latest_100honour": 0 }, "top_photo": "http://i1.hdslb.com/bfs/space/cb1c3ef50e22b6096fde67febe863494caefebad.png", "theme": {}, "sys_notice": {}, "live_room": null, "birthday": "", "school": { "name": "" }, "profession": { "name": "", "department": "", "title": "", "is_show": 0 }, "tags": null, "series": { "user_upgrade_status": 3, "show_upgrade_window": false }, "is_senior_member": 0, "mcn_info": null, "gaia_res_type": 0, "gaia_data": null, "is_risk": false, "elec": { "show_info": { "show": false, "state": -1, "title": "", "icon": "", "jump_url": "?oid=2042149112" } }, "contract": { "is_display": false, "is_follow_display": false }, "certificate_show": false } }
+      };
+      var typedData = data;
+      var space_account_info_map_default = typedData;
+
+      // packages/unblock-area-limit/src/feature/bili/area_limit_fetch.ts
+      function injectFetch() {
+        const originFetch = window.fetch;
+        window.fetch = async function(input, init) {
+          const originResponse = await originFetch(input, init);
+          const url = getFetchUrl(input);
+          if (url) {
+            if (url.match(RegExps.url("api.bilibili.com/x/space/wbi/acc/info?"))) {
+              const json = await originResponse.json();
+              if (json.code === -404) {
+                const mid = new URL(url, document.location.href).searchParams.get("mid");
+                if (mid && space_account_info_map_default[mid || ""]) {
+                  return jsonResponse(space_account_info_map_default[mid], originResponse);
+                }
+              }
+              return jsonResponse(json, originResponse);
+            }
+            if (url.match(RegExps.url("api.bilibili.com/x/v2/subtitle/web/view"))) {
+              if (!balh_config.generate_sub) return originResponse;
+              try {
+                const buffer = await originResponse.clone().arrayBuffer();
+                const response = rewriteSubtitleWebViewResponse(buffer, { generateSub: true });
+                if (response) {
+                  util_debug("/x/v2/subtitle/web/view", "generated subtitle by fetch");
+                  return new Response(response, responseInit(originResponse));
+                }
+              } catch (error) {
+                util_debug("/x/v2/subtitle/web/view fetch rewrite failed", error);
+              }
+              return originResponse;
+            }
+            if (isSubtitleBodyUrl(url) && new URL(url, document.location.href).searchParams.get("translate") === "1") {
+              try {
+                const text = await originResponse.clone().text();
+                const json = JSON.parse(text);
+                const response = rewriteSubtitleBodyJson(json, url);
+                if (response) {
+                  util_debug("/subtitle", "fetch", url);
+                  return jsonResponse(response, originResponse);
+                }
+              } catch (error) {
+                util_debug("/subtitle fetch rewrite failed", error);
+              }
+              return originResponse;
+            }
+          }
+          return originResponse;
+        };
       }
+      function getFetchUrl(input) {
+        if (typeof input === "string") return input;
+        if (input instanceof URL) return input.href;
+        if (input instanceof Request) return input.url;
+        return void 0;
+      }
+      function responseInit(response) {
+        return {
+          headers: response.headers,
+          status: response.status,
+          statusText: response.statusText
+        };
+      }
+      function jsonResponse(json, response) {
+        const headers = new Headers(response.headers);
+        headers.set("content-type", "application/json; charset=utf-8");
+        return new Response(JSON.stringify(json), {
+          ...responseInit(response),
+          headers
+        });
+      }
+      function injectFetch4Mobile() {
+        util_debug("injectFetch4Mobile");
+        window.fetch = Async.wrapper(
+          window.fetch,
+          (resp) => new Proxy(resp, {
+            get: function(target2, prop, receiver) {
+              if (prop === "json") {
+                return Async.wrapper(
+                  target2.json.bind(target2),
+                  (oriResult) => {
+                    util_debug("injectFetch:", target2.url);
+                    if (target2.url.match(RegExps.urlPath("/player/web_api/v2/playurl/html5"))) {
+                      let cid = Strings.getSearchParam(target2.url, "cid");
+                      return BiliPlusApi.playurl(cid).then((result) => {
+                        if (result.code) {
+                          return Promise.reject("error: " + JSON.stringify(result));
+                        } else {
+                          return BiliPlusApi.playurl_for_mp4(cid).then((url) => {
+                            util_debug(`mp4地址, 移动版: ${url}, pc版: ${result.durl[0].url}`);
+                            return {
+                              "code": 0,
+                              "cid": `http://comment.bilibili.com/${cid}.xml`,
+                              "timelength": result.timelength,
+                              "src": url || result.durl[0].url
+                              // 只取第一个片段的url...
+                            };
+                          });
+                        }
+                      }).catch((e) => {
+                        util_debug("fetch mp4 url failed", e);
+                        return oriResult;
+                      });
+                    }
+                    return oriResult;
+                  },
+                  (error) => error
+                );
+              }
+              return target2[prop];
+            }
+          }),
+          (error) => error
+        );
+      }
+
+      // packages/unblock-area-limit/src/feature/bili/area_limit_xhr_.ts
       var area_limit_xhr = /* @__PURE__ */ (() => {
         return function() {
           if (isClosed()) return;
@@ -5552,24 +5620,10 @@ function scriptSource(invokeBy) {
                   }
                   return json;
                 } else if (isSubtitleBodyUrl(url)) {
+                  if (new URL(url, document.location.href).searchParams.get("translate") !== "1") return null;
                   util_debug("/subtitle", url);
-                  const parsedUrl = new URL(url);
-                  const translate = parsedUrl.searchParams.get("translate") == "1";
-                  if (!translate) {
-                    return null;
-                  }
-                  const from = parsedUrl.searchParams.get("from");
-                  const to = parsedUrl.searchParams.get("to");
-                  const translator = Converter({ from, to });
                   const json = JSON.parse(xhr.responseText);
-                  json.body.forEach((value) => {
-                    const original = value.content;
-                    let result = original.replace(/\s[-—－]/, (s) => `
-    ${s.substring(1)}`);
-                    result = translator(result);
-                    value.content = result;
-                  });
-                  return json;
+                  return rewriteSubtitleBodyJson(json, url);
                 } else if (url.match(RegExps.url("api.bilibili.com/x/player/playurl"))) {
                   util_debug("/x/player/playurl", "origin", `block: ${container.__block_response}`, xhr.response);
                 } else if (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) || url.match(RegExps.url("api.bilibili.com/pgc/player/web/v2/playurl")) && !Strings.getSearchParam(url, "balh_ajax")) {
