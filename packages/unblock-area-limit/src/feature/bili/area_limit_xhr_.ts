@@ -18,14 +18,9 @@ import { RegExps } from '../../util/regexps'
 import { bilibili_login } from './bilibili_login';
 import { injectFetch, injectFetch4Mobile } from '../../feature/bili/area_limit_fetch'
 import space_account_info_map from '../../feature/bili/space_account_info_map'
-import * as OpenCC from 'opencc-js'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
-import { rewriteSubtitleWebViewResponse } from './subtitle_web_view'
+import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
-
-function isSubtitleBodyUrl(url: string) {
-    return url.match(RegExps.urlPath('/bfs/subtitle/')) || url.match(RegExps.url('subtitle.bilibili.com/'))
-}
 
 export const area_limit_xhr = (() => {
     return function () {
@@ -197,26 +192,10 @@ export const area_limit_xhr = (() => {
                         }
                         return json
                     } else if (isSubtitleBodyUrl(url)) {
+                        if (new URL(url, document.location.href).searchParams.get('translate') !== '1') return null
                         log('/subtitle', url);
-                        const parsedUrl = new URL(url);
-                        const translate = parsedUrl.searchParams.get('translate') == '1';
-                        if (!translate) {
-                            return null;
-                        }
-                        const from = parsedUrl.searchParams.get('from');
-                        const to = parsedUrl.searchParams.get('to');
-                        const translator = OpenCC.Converter({ from: from, to: to });
                         const json = JSON.parse(xhr.responseText);
-
-                        // 参考 https://github.com/Kr328/bilibili-subtitle-tweaks
-                        json.body.forEach((value) => {
-                            const original = value.content;
-
-                            let result = original.replace(/\s[-—－]/, s => `\n${s.substring(1)}`);
-                            result = translator(result);
-                            value.content = result;
-                        });
-                        return json;
+                        return rewriteSubtitleBodyJson(json, url);
                     } else if (url.match(RegExps.url('api.bilibili.com/x/player/playurl'))) {
                         log('/x/player/playurl', 'origin', `block: ${container.__block_response}`, xhr.response)
                         // todo      : 当前只实现了r.const.mode.REPLACE, 需要支持其他模式

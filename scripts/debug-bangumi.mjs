@@ -300,7 +300,7 @@ async function samplePlayer(page, label) {
     record(`${label} player sample ${JSON.stringify(sample)}`)
 }
 
-async function probeGeneratedSubtitle(page) {
+async function probeGeneratedSubtitle(page, label = 'subtitle') {
     try {
         await page.mouse.move(720, 500)
         await page.waitForTimeout(300)
@@ -313,18 +313,18 @@ async function probeGeneratedSubtitle(page) {
             const index = text.indexOf('多语言字幕')
             return index >= 0 ? text.slice(index, index + 500) : text.slice(0, 500)
         })
-        record(`subtitle menu text ${JSON.stringify(menuText)}`)
+        record(`${label} subtitle menu text ${JSON.stringify(menuText)}`)
 
         const generatedOption = page.getByText(/生成/).first()
         const count = await generatedOption.count()
-        record(`subtitle generated option count ${count}`)
+        record(`${label} subtitle generated option count ${count}`)
         if (count > 0) {
             await generatedOption.click({ timeout: 5000, force: true })
-            record('clicked generated subtitle option')
+            record(`${label} clicked generated subtitle option`)
             await page.waitForTimeout(2000)
         }
     } catch (error) {
-        record(`subtitle menu probe failed ${error.stack || error.message || error}`)
+        record(`${label} subtitle menu probe failed ${error.stack || error.message || error}`)
     }
 }
 
@@ -432,7 +432,7 @@ async function main() {
             await samplePlayer(page, 'after start wait')
         }
         if (probeSubtitleMenu) {
-            await probeGeneratedSubtitle(page)
+            await probeGeneratedSubtitle(page, 'after start')
             await samplePlayer(page, 'after subtitle probe')
         }
 
@@ -443,6 +443,10 @@ async function main() {
         await clickEpisode(page, returnUrl)
         await waitForVideoReady(page, 'after return')
         await samplePlayer(page, 'after return')
+        if (probeSubtitleMenu) {
+            await probeGeneratedSubtitle(page, 'after return')
+            await samplePlayer(page, 'after return subtitle probe')
+        }
 
         await writeFile(logPath, `${lines.join('\n')}\n`)
         record(`wrote ${path.relative(rootDir, logPath)}`)

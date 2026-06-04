@@ -1,3 +1,6 @@
+import * as OpenCC from 'opencc-js'
+import { RegExps } from '../../util/regexps'
+
 const decoder = new TextDecoder()
 const encoder = new TextEncoder()
 
@@ -52,6 +55,32 @@ export function rewriteSubtitleWebViewResponse(response: unknown, options: Rewri
     } catch (error) {
         return null
     }
+}
+
+export function isSubtitleBodyUrl(url: string) {
+    return url.match(RegExps.urlPath('/bfs/subtitle/')) || url.match(RegExps.url('subtitle.bilibili.com/'))
+}
+
+export function rewriteSubtitleBodyJson<T extends { body?: Array<{ content?: string }> }>(json: T, url: string): T | null {
+    const parsedUrl = new URL(url, document.location.href)
+    const translate = parsedUrl.searchParams.get('translate') === '1'
+    if (!translate) return null
+
+    const from = parsedUrl.searchParams.get('from')
+    const to = parsedUrl.searchParams.get('to')
+    if (!from || !to || !Array.isArray(json.body)) return null
+
+    const translator = OpenCC.Converter({ from, to })
+    json.body.forEach((value) => {
+        if (typeof value.content !== 'string') return
+        const original = value.content
+
+        // 参考 https://github.com/Kr328/bilibili-subtitle-tweaks
+        let result = original.replace(/\s[-—－]/, s => `\n${s.substring(1)}`)
+        result = translator(result)
+        value.content = result
+    })
+    return json
 }
 
 function responseToBytes(response: unknown): Uint8Array | null {

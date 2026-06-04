@@ -3,27 +3,83 @@ import { Async } from "../../util/async"
 import { log, util_debug } from "../../util/log"
 import { RegExps } from "../../util/regexps"
 import { Strings } from "../../util/strings"
+import { balh_config } from "../config"
+import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
 
 export function injectFetch() {
     const originFetch = window.fetch;
     window.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
         const originResponse = await originFetch(input, init)
-        if (typeof input === 'string') {
-            if (input.match(RegExps.url('api.bilibili.com/x/space/wbi/acc/info?'))) {
+        const url = getFetchUrl(input)
+        if (url) {
+            if (url.match(RegExps.url('api.bilibili.com/x/space/wbi/acc/info?'))) {
                 const json = await originResponse.json()
                 if (json.code === -404) {
-                    const mid = new URL(input, document.location.href).searchParams.get('mid')
+                    const mid = new URL(url, document.location.href).searchParams.get('mid')
                     if (mid && space_account_info_map[mid || '']) {
-                        return new Response(JSON.stringify(space_account_info_map[mid]))
+                        return jsonResponse(space_account_info_map[mid], originResponse)
                     }
                 }
-                return new Response(JSON.stringify(json))
+                return jsonResponse(json, originResponse)
+            }
+            if (url.match(RegExps.url('api.bilibili.com/x/v2/subtitle/web/view'))) {
+                if (!balh_config.generate_sub) return originResponse
+                try {
+                    const buffer = await originResponse.clone().arrayBuffer()
+                    const response = rewriteSubtitleWebViewResponse(buffer, { generateSub: true })
+                    if (response) {
+                        log('/x/v2/subtitle/web/view', 'generated subtitle by fetch')
+                        return new Response(response, responseInit(originResponse))
+                    }
+                } catch (error) {
+                    log('/x/v2/subtitle/web/view fetch rewrite failed', error)
+                }
+                return originResponse
+            }
+            if (isSubtitleBodyUrl(url) && new URL(url, document.location.href).searchParams.get('translate') === '1') {
+                try {
+                    const text = await originResponse.clone().text()
+                    const json = JSON.parse(text)
+                    const response = rewriteSubtitleBodyJson(json, url)
+                    if (response) {
+                        log('/subtitle', 'fetch', url)
+                        return jsonResponse(response, originResponse)
+                    }
+                } catch (error) {
+                    log('/subtitle fetch rewrite failed', error)
+                }
+                return originResponse
             }
         }
         return originResponse
     }
 }
+
+function getFetchUrl(input: RequestInfo | URL): string | undefined {
+    if (typeof input === 'string') return input
+    if (input instanceof URL) return input.href
+    if (input instanceof Request) return input.url
+    return undefined
+}
+
+function responseInit(response: Response): ResponseInit {
+    return {
+        headers: response.headers,
+        status: response.status,
+        statusText: response.statusText,
+    }
+}
+
+function jsonResponse(json: unknown, response: Response): Response {
+    const headers = new Headers(response.headers)
+    headers.set('content-type', 'application/json; charset=utf-8')
+    return new Response(JSON.stringify(json), {
+        ...responseInit(response),
+        headers,
+    })
+}
+
 export function injectFetch4Mobile() {
     util_debug('injectFetch4Mobile')
     window.fetch = Async.wrapper(window.fetch,

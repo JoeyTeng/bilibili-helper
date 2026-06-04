@@ -33,3 +33,7 @@ declare module '*.css' {
     const str: string
     export default str
 }
+
+declare module 'opencc-js' {
+    export function Converter(options: { from: string, to: string }): (input: string) => string
+}
