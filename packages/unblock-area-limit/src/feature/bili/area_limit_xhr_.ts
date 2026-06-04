@@ -19,7 +19,7 @@ import { bilibili_login } from './bilibili_login';
 import { injectFetch, injectFetch4Mobile } from '../../feature/bili/area_limit_fetch'
 import space_account_info_map from '../../feature/bili/space_account_info_map'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
-import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
+import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
 
 export const area_limit_xhr = (() => {
@@ -259,6 +259,20 @@ export const area_limit_xhr = (() => {
                 /// - Promise, 表示需要替换成异步请求, Promise的结果会替换xhr.response
                 /// {@endtemplate}
                 transformRequest: ({ url, container }) => {
+                    const subtitleMetadataUrl = rewriteSubtitleMetadataUrl(url, getCurrentSubtitleMetadataIds())
+                    if (subtitleMetadataUrl) {
+                        log('subtitle metadata request fixed by xhr', {
+                            path: new URL(subtitleMetadataUrl).pathname,
+                            from: redactSubtitleMetadataUrl(url),
+                            to: redactSubtitleMetadataUrl(subtitleMetadataUrl),
+                        })
+                        return requestSubtitleMetadataByFetch(subtitleMetadataUrl)
+                            .then(response => {
+                                if (!subtitleMetadataUrl.match(RegExps.url('api.bilibili.com/x/v2/subtitle/web/view'))) return response
+                                return rewriteSubtitleWebViewResponse(response, { generateSub: balh_config.generate_sub }) || response
+                            })
+                    }
+
                     if (url.match(RegExps.url('api.bilibili.com/x/player/playurl')) && balh_config.enable_in_av) {
                         log('/x/player/playurl')
                         // debugger
@@ -295,6 +309,68 @@ export const area_limit_xhr = (() => {
                     return null
                 }
             })
+        }
+
+        function getCurrentSubtitleMetadataIds() {
+            const playInfo = window.__PLAYURL_HYDRATE_DATA__ || window.__playinfo__
+            const result = playInfo?.result || {}
+            const videoInfo = result.video_info || {}
+            const arc = result.arc || {}
+            const episode = result.supplement?.ogv_episode_info || {}
+            const initialState = window.__INITIAL_STATE__ || {}
+            const initialEp = initialState.epInfo || {}
+            const video = document.querySelector('video')
+            return {
+                aid: firstValidParam(arc.aid, episode.aid, initialEp.aid, initialState.aid),
+                cid: firstValidParam(arc.cid, episode.cid, initialEp.cid, initialState.cid),
+                durationMs: firstDurationMs(
+                    milliseconds(videoInfo.timelength),
+                    milliseconds(result.timelength),
+                    milliseconds(episode.duration),
+                    milliseconds(initialEp.duration),
+                    secondsToMilliseconds(arc.duration),
+                    secondsToMilliseconds(video?.duration),
+                ),
+            }
+        }
+
+        function firstValidParam(...values) {
+            return values.find(isValidMetadataParam)
+        }
+
+        function isValidMetadataParam(value) {
+            if (value == null) return false
+            const text = String(value)
+            return text !== '' && text !== '0' && text !== 'null' && text !== 'undefined' && text !== 'NaN'
+        }
+
+        function firstDurationMs(...values) {
+            return values.find((value) => value && value > 0)
+        }
+
+        function milliseconds(value) {
+            const duration = Number(value)
+            if (!Number.isFinite(duration) || duration <= 0) return undefined
+            return Math.round(duration)
+        }
+
+        function secondsToMilliseconds(value) {
+            const duration = Number(value)
+            if (!Number.isFinite(duration) || duration <= 0) return undefined
+            return Math.round(duration * 1000)
+        }
+
+        function requestSubtitleMetadataByFetch(url) {
+            return fetch(url, { credentials: 'include' })
+                .then(response => {
+                    if (!response.ok) return Promise.reject(new Error(`subtitle metadata request failed: ${response.status}`))
+                    return response.arrayBuffer()
+                })
+        }
+
+        function redactSubtitleMetadataUrl(url) {
+            const parsedUrl = new URL(url, document.location.href)
+            return `${parsedUrl.origin}${parsedUrl.pathname}?${parsedUrl.searchParams}`
         }
 
         function injectAjax() {

@@ -26,7 +26,7 @@ globalThis.document = {
     },
 }
 
-const { rewriteSubtitleBodyJson, rewriteSubtitleWebViewResponse } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
+const { rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
 
 const response = fieldMessage(1, fieldMessage(3, concat([
     fieldVarint(1, 10n),
@@ -61,6 +61,22 @@ assert.equal(rewrittenBody, subtitleBody)
 assert.equal(subtitleBody.body[0].content, '繁体字幕\n- 测试')
 assert.equal(subtitleBody.body[1].content, '第二行—测试')
 assert.equal(rewriteSubtitleBodyJson({ body: [{ content: '繁體字幕' }] }, 'https://aisubtitle.hdslb.com/bfs/subtitle/example.json'), null)
+
+const metadataIds = { aid: 856724277, cid: 794496427, durationMs: 1469870 }
+const subtitleViewUrl = rewriteSubtitleMetadataUrl('https://api.bilibili.com/x/v2/subtitle/web/view?context_ext=%7B%22video_type%22%3A2%7D&type=1&cur_production_type=0', metadataIds)
+assert.equal(subtitleViewUrl, 'https://api.bilibili.com/x/v2/subtitle/web/view?context_ext=%7B%22video_type%22%3A2%7D&type=1&cur_production_type=0&oid=794496427&pid=856724277&duration=1469870')
+
+const dmViewUrl = rewriteSubtitleMetadataUrl('https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=null&pid=null&duration=0&without_subtitle=true', metadataIds)
+assert.equal(dmViewUrl, 'https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=794496427&pid=856724277&duration=1469870&without_subtitle=false')
+
+const dmViewWithIdsUrl = rewriteSubtitleMetadataUrl('https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=123&pid=456&duration=789&without_subtitle=true', metadataIds)
+assert.equal(dmViewWithIdsUrl, 'https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=123&pid=456&duration=789&without_subtitle=false')
+
+const dmViewWithoutGlobalIdsUrl = rewriteSubtitleMetadataUrl('https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=123&pid=456&duration=0&without_subtitle=true', { durationMs: 789 })
+assert.equal(dmViewWithoutGlobalIdsUrl, 'https://api.bilibili.com/x/v2/dm/web/view?type=1&oid=123&pid=456&duration=789&without_subtitle=false')
+
+assert.equal(rewriteSubtitleMetadataUrl('https://api.bilibili.com/x/v2/subtitle/web/view?type=1&oid=794496427&pid=856724277', metadataIds), null)
+assert.equal(rewriteSubtitleMetadataUrl('https://example.com/x/v2/subtitle/web/view', metadataIds), null)
 
 console.log('subtitle-web-view tests passed')
 
