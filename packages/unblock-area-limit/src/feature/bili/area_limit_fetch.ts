@@ -13,6 +13,9 @@ import space_account_info_map from "./space_account_info_map"
 
 type ProxyArea = '' | 'cn' | 'th' | 'hk' | 'tw'
 type ProxyCandidate = { proxyHost: string, area: ProxyArea, label: string }
+const proxyPlayUrlRequestTimeout = 8000
+const transientProxyRetryDelays = [500, 1200]
+const entitlementProxyRetryDelays = [700, 1600]
 
 export function injectFetch() {
     const originFetch = window.fetch;
@@ -133,10 +136,8 @@ function fetchPgcPlayUrlByProxy(reqUrl: URL): Promise<any> {
             return requestCandidate(index + 1)
         }
         const requestUrl = buildProxyPlayUrl(originUrl, candidate, useMobi)
-        return NativePromise.race([
-            Async.ajaxByXhr<any>(requestUrl),
-            Async.timeout(8000).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
-        ]).then(json => normalizeProxyResponse(json, useMobi))
+        return requestProxyCandidateWithRetry(candidate, () => requestProxyJson(requestUrl)
+            .then(json => normalizeProxyResponse(json, useMobi))
             .then(({ json, playUrl }) => {
                 if (playUrl?.dash || playUrl?.durl) {
                     if (candidate.area) storeBangumiArea(candidate.area)
@@ -149,7 +150,7 @@ function fetchPgcPlayUrlByProxy(reqUrl: URL): Promise<any> {
                     return playUrl
                 }
                 return NativePromise.reject(json || playUrl)
-            })
+            }))
             .catch(error => {
                 lastError = choosePreferredProxyError(lastError, error)
                 util_warn('fetch pgc playurl proxy candidate failed', describeProxyCandidate(candidate), error)
@@ -157,6 +158,32 @@ function fetchPgcPlayUrlByProxy(reqUrl: URL): Promise<any> {
             })
     }
     return requestCandidate(0)
+}
+
+function requestProxyJson(url: string): Promise<any> {
+    return NativePromise.race([
+        Async.ajaxByXhr<any>(url),
+        Async.timeout(proxyPlayUrlRequestTimeout).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
+    ])
+}
+
+function requestProxyCandidateWithRetry<T>(
+    candidate: ProxyCandidate,
+    request: () => Promise<T>,
+    retryIndex = 0,
+    preferredError?: any,
+): Promise<T> {
+    return request().catch(error => {
+        const nextPreferredError = choosePreferredProxyError(preferredError, error)
+        const delay = getProxyRetryDelay(error, retryIndex)
+        if (delay === undefined) return NativePromise.reject(nextPreferredError)
+        util_warn('fetch pgc playurl proxy candidate retry', describeProxyCandidate(candidate), {
+            attempt: retryIndex + 1,
+            delay,
+            error: describeProxyError(error),
+        })
+        return Async.timeout(delay).then(() => requestProxyCandidateWithRetry(candidate, request, retryIndex + 1, nextPreferredError))
+    })
 }
 
 function toPgcPlayUrl(reqUrl: URL) {
@@ -319,10 +346,58 @@ function normalizeProxyPlayUrl(playUrl: any) {
     if (playUrl.dash) {
         Objects.convertKeyToSnakeCase(playUrl.dash)
     }
+    let normalized = playUrl
     if (!window.__balh_app_only__ && balh_config.upos_server) {
-        return Converters.replaceUpos(playUrl, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
+        normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
     }
-    return playUrl
+    preferNonAkamaiDashUrls(normalized?.dash)
+    return normalized
+}
+
+function preferNonAkamaiDashUrls(dash: any) {
+    if (!dash) return
+    const streams = [
+        ...(Array.isArray(dash.video) ? dash.video : []),
+        ...(Array.isArray(dash.audio) ? dash.audio : []),
+        ...(Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []),
+    ]
+    if (dash.flac?.audio) streams.push(dash.flac.audio)
+    for (const stream of streams) {
+        preferNonAkamaiStreamUrls(stream)
+    }
+}
+
+function preferNonAkamaiStreamUrls(stream: any) {
+    if (!stream || typeof stream !== 'object') return
+    const baseUrl = stream.base_url ?? stream.baseUrl
+    const backupUrls = [
+        ...(Array.isArray(stream.backup_url) ? stream.backup_url : []),
+        ...(Array.isArray(stream.backupUrl) ? stream.backupUrl : []),
+    ]
+    const urls = uniqueStrings([baseUrl, ...backupUrls])
+    if (urls.length < 2) return
+    const nonAkamaiUrls = urls.filter(url => !isAkamaiUrl(url))
+    if (!nonAkamaiUrls.length) return
+    const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)]
+    const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls
+    stream.base_url = nextBaseUrl
+    stream.baseUrl = nextBaseUrl
+    stream.backup_url = nextBackupUrls
+    stream.backupUrl = nextBackupUrls
+}
+
+function uniqueStrings(items: any[]) {
+    const seen = new Set<string>()
+    return items.filter((item): item is string => {
+        if (typeof item !== 'string' || !item) return false
+        if (seen.has(item)) return false
+        seen.add(item)
+        return true
+    })
+}
+
+function isAkamaiUrl(url: string) {
+    return /(^|\/\/)[^/]*akamaized\.net\//.test(url)
 }
 
 function isBangumiPage() {
@@ -372,6 +447,35 @@ function choosePreferredProxyError(current: any, next: any) {
 
 function isEntitlementProxyError(error: any) {
     return getProxyErrorPriority(error) >= 300
+}
+
+function isTransientProxyError(error: any) {
+    const message = describeProxyError(error)
+    return error instanceof Error
+        || error?.status === 0
+        || error?.status >= 500
+        || error?.code >= 500
+        || error?.code === -500
+        || error?.code === -502
+        || error?.code === -412
+        || /(timeout|解析服务器错误|解析伺服器錯誤|server error|network|failed to fetch)/i.test(message)
+}
+
+function getProxyRetryDelay(error: any, retryIndex: number) {
+    const delays = isEntitlementProxyError(error) && hasAccessKey()
+        ? entitlementProxyRetryDelays
+        : isTransientProxyError(error)
+        ? transientProxyRetryDelays
+        : []
+    return delays[retryIndex]
+}
+
+function hasAccessKey() {
+    try {
+        return !!localStorage.access_key
+    } catch (_) {
+        return false
+    }
 }
 
 function proxyErrorResponse(error: any) {

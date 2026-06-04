@@ -514,6 +514,9 @@ export function area_limit_for_vue() {
         const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v1:'
         const proxyPlayInfoReloadPrefix = 'balh_proxy_playinfo_reload_v1:'
         const proxyPlayInfoCacheTtl = 10 * 60 * 1000
+        const proxyPlayUrlRequestTimeout = 8000
+        const transientProxyRetryDelays = [500, 1200]
+        const entitlementProxyRetryDelays = [700, 1600]
         const bangumiAreaCacheKey = 'balh_bangumi_area_cache'
         type ProxyArea = '' | 'cn' | 'th' | 'hk' | 'tw'
         type ProxyCandidate = { proxyHost: string, area: ProxyArea, label: string }
@@ -891,10 +894,109 @@ export function area_limit_for_vue() {
             if (playUrl.dash) {
                 Objects.convertKeyToSnakeCase(playUrl.dash)
             }
+            let normalized = playUrl
             if (!window.__balh_app_only__ && balh_config.upos_server) {
-                return Converters.replaceUpos(playUrl, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
+                normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
             }
-            return playUrl
+            preferNonAkamaiDashUrls(normalized?.dash)
+            return normalized
+        }
+        function preferNonAkamaiDashUrls(dash: any) {
+            if (!dash) return
+            const streams = [
+                ...(Array.isArray(dash.video) ? dash.video : []),
+                ...(Array.isArray(dash.audio) ? dash.audio : []),
+                ...(Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []),
+            ]
+            if (dash.flac?.audio) streams.push(dash.flac.audio)
+            for (const stream of streams) {
+                preferNonAkamaiStreamUrls(stream)
+            }
+        }
+        function preferNonAkamaiStreamUrls(stream: any) {
+            if (!stream || typeof stream !== 'object') return
+            const baseUrl = stream.base_url ?? stream.baseUrl
+            const backupUrls = [
+                ...(Array.isArray(stream.backup_url) ? stream.backup_url : []),
+                ...(Array.isArray(stream.backupUrl) ? stream.backupUrl : []),
+            ]
+            const urls = uniqueStrings([baseUrl, ...backupUrls])
+            if (urls.length < 2) return
+            const nonAkamaiUrls = urls.filter(url => !isAkamaiUrl(url))
+            if (!nonAkamaiUrls.length) return
+            const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)]
+            const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls
+            stream.base_url = nextBaseUrl
+            stream.baseUrl = nextBaseUrl
+            stream.backup_url = nextBackupUrls
+            stream.backupUrl = nextBackupUrls
+        }
+        function uniqueStrings(items: any[]) {
+            const seen = new Set<string>()
+            return items.filter((item): item is string => {
+                if (typeof item !== 'string' || !item) return false
+                if (seen.has(item)) return false
+                seen.add(item)
+                return true
+            })
+        }
+        function isAkamaiUrl(url: string) {
+            return /(^|\/\/)[^/]*akamaized\.net\//.test(url)
+        }
+        function isTransientProxyError(error: any) {
+            const message = describeProxyError(error)
+            return error instanceof Error
+                || error?.status === 0
+                || error?.status >= 500
+                || error?.code >= 500
+                || error?.code === -500
+                || error?.code === -502
+                || error?.code === -412
+                || /(timeout|解析服务器错误|解析伺服器錯誤|server error|network|failed to fetch)/i.test(message)
+        }
+        function getProxyRetryDelay(error: any, retryIndex: number) {
+            const delays = isEntitlementProxyError(error) && hasAccessKey()
+                ? entitlementProxyRetryDelays
+                : isTransientProxyError(error)
+                ? transientProxyRetryDelays
+                : []
+            return delays[retryIndex]
+        }
+        function hasAccessKey() {
+            try {
+                return !!localStorage.access_key
+            } catch (_) {
+                return false
+            }
+        }
+        function requestProxyJson(url: string): Promise<any> {
+            return NativePromise.race([
+                Async.ajaxByXhr<any>(url),
+                Async.timeout(proxyPlayUrlRequestTimeout).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
+            ])
+        }
+        function requestProxyCandidateWithRetry<T>(
+            candidate: ProxyCandidate,
+            epId: string,
+            requestId: number,
+            request: () => Promise<T>,
+            retryIndex = 0,
+            preferredError?: any,
+        ): Promise<T> {
+            return request().catch(error => {
+                const nextPreferredError = choosePreferredProxyError(preferredError, error)
+                const delay = getProxyRetryDelay(error, retryIndex)
+                if (delay === undefined) return NativePromise.reject(nextPreferredError)
+                playerStatusForRequest(epId, requestId, `正在重试${candidate.label}解析服务器`, {
+                    detail: `${describeProxyError(error)}，${delay}ms 后重试`,
+                })
+                util_warn('replace playinfo by proxy candidate retry', describeProxyCandidate(candidate), {
+                    attempt: retryIndex + 1,
+                    delay,
+                    error: describeProxyError(error),
+                })
+                return Async.timeout(delay).then(() => requestProxyCandidateWithRetry(candidate, epId, requestId, request, retryIndex + 1, nextPreferredError))
+            })
         }
         function redactProxyHost(proxyHost: string) {
             try {
@@ -989,41 +1091,40 @@ export function area_limit_for_vue() {
                         ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}`
                         : `${candidate.proxyHost}?${query}`
                 })()
-                return NativePromise.race([
-                    Async.ajaxByXhr<any>(url),
-                    Async.timeout(8000).then(() => NativePromise.reject(new Error('proxy playurl timeout'))),
-                ]).then(json => {
-                    const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info
-                        ? fixThailandPlayUrlJson(json)
-                        : window.__balh_app_only__ === true && json?.type === 'DASH'
-                        ? fixMobiPlayUrlJson(json)
-                        : NativePromise.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data)
-                    return playUrl.then(playUrl => ({ json, playUrl }))
-                }).then(({ json, playUrl }) => {
-                    const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
-                    if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
-                        log('replace playinfo by proxy success', {
-                            epId,
-                            proxyHost: redactProxyHost(candidate.proxyHost),
-                            area: candidate.area,
-                            videoCount: normalizedPlayUrl.dash?.video?.length,
-                            audioCount: normalizedPlayUrl.dash?.audio?.length,
-                        })
-                        value.result.play_video_type = 'dash'
-                        delete value.result.play_check
-                        value.result.video_info = normalizedPlayUrl
-                        value.video_info = normalizedPlayUrl
-                        removePlayInfoAreaLimit(value)
-                        storeBangumiArea(value, candidate.area)
-                        playerStatusForRequest(epId, requestId, '解析成功，正在启动播放器', {
-                            detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
-                            state: 'success',
-                        })
-                        hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId)
-                        return value
-                    }
-                    return NativePromise.reject(json)
-                }).catch(error => {
+                return requestProxyCandidateWithRetry(candidate, epId, requestId, () => requestProxyJson(url)
+                    .then(json => {
+                        const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info
+                            ? fixThailandPlayUrlJson(json)
+                            : window.__balh_app_only__ === true && json?.type === 'DASH'
+                            ? fixMobiPlayUrlJson(json)
+                            : NativePromise.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data)
+                        return playUrl.then(playUrl => ({ json, playUrl }))
+                    }).then(({ json, playUrl }) => {
+                        const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
+                        if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
+                            log('replace playinfo by proxy success', {
+                                epId,
+                                proxyHost: redactProxyHost(candidate.proxyHost),
+                                area: candidate.area,
+                                videoCount: normalizedPlayUrl.dash?.video?.length,
+                                audioCount: normalizedPlayUrl.dash?.audio?.length,
+                            })
+                            value.result.play_video_type = 'dash'
+                            delete value.result.play_check
+                            value.result.video_info = normalizedPlayUrl
+                            value.video_info = normalizedPlayUrl
+                            removePlayInfoAreaLimit(value)
+                            storeBangumiArea(value, candidate.area)
+                            playerStatusForRequest(epId, requestId, '解析成功，正在启动播放器', {
+                                detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
+                                state: 'success',
+                            })
+                            hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId)
+                            return value
+                        }
+                        return NativePromise.reject(json)
+                    }))
+                    .catch(error => {
                     lastCandidateError = choosePreferredProxyError(lastCandidateError, error)
                     playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
                         detail: `${candidate.label}失败：${describeProxyError(error)}`,

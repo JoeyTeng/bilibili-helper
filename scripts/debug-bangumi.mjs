@@ -26,7 +26,10 @@ const proxyServerOption = readOption('--proxy-server')
 const generateSub = args.includes('--generate-sub')
 const probeSubtitleMenu = args.includes('--probe-subtitle-menu')
 const probeFetchPlayUrlOption = args.includes('--probe-fetch-playurl')
+const skipSwitch = args.includes('--skip-switch')
 const waitAfterStartMs = Number(readOption('--wait-after-start-ms') || 0)
+const reloadCount = Number(readOption('--reload-count') || 0)
+const reloadWaitMs = Number(readOption('--reload-wait-ms') || 3000)
 const seekToSeconds = parseNumberList(readOption('--seek-to-seconds') || '')
 const seekWaitMs = Number(readOption('--seek-wait-ms') || 8000)
 const userscriptPath = userscriptOption ? path.resolve(rootDir, userscriptOption) : undefined
@@ -57,6 +60,9 @@ Options:
   --generate-sub         Enable BALH generated simplified/traditional subtitles.
   --probe-subtitle-menu  Open the player subtitle menu and click a generated subtitle if present.
   --probe-fetch-playurl  Fetch the PGC playurl API from the page to exercise fetch interception.
+  --reload-count <n>    Run normal page.reload() cycles after the initial page probe.
+  --reload-wait-ms      Wait after each normal reload before probing. Default: 3000.
+  --skip-switch         Do not switch to blocked/return episodes after the initial probes.
   --wait-after-start-ms  Wait after the first playable episode before switching.
   --seek-to-seconds      Comma-separated video positions to seek before switching.
   --seek-wait-ms         Wait after each seek. Default: 8000.
@@ -321,6 +327,18 @@ async function seekVideo(page, seconds, label) {
             .find((item) => Number.isFinite(item.duration) && item.duration > 0)
             || document.querySelector('video')
         if (!video) return { ok: false, reason: 'video not found' }
+        const hasSource = Boolean(video.currentSrc || video.src)
+        if (!hasSource && !(Number.isFinite(video.duration) && video.duration > 0)) {
+            return {
+                ok: false,
+                reason: 'video has no playable source',
+                currentTime: video.currentTime,
+                duration: video.duration,
+                networkState: video.networkState,
+                paused: video.paused,
+                readyState: video.readyState,
+            }
+        }
 
         const before = {
             currentTime: video.currentTime,
@@ -346,7 +364,10 @@ async function seekVideo(page, seconds, label) {
 
         video.currentTime = target
         try {
-            await video.play()
+            await Promise.race([
+                video.play(),
+                new Promise((_, reject) => window.setTimeout(() => reject(new Error('play timeout')), 5000)),
+            ])
             playResult = 'resolved'
         } catch (error) {
             playResult = `${error?.name || 'Error'}: ${error?.message || String(error)}`
@@ -441,6 +462,24 @@ async function probeGeneratedSubtitle(page, label = 'subtitle') {
         }
     } catch (error) {
         record(`${label} subtitle menu probe failed ${error.stack || error.message || error}`)
+    }
+}
+
+async function probeNormalReloads(page) {
+    for (let index = 1; index <= reloadCount; index += 1) {
+        const label = `after reload ${index}`
+        record(`normal reload ${index}/${reloadCount}`)
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 })
+        await waitForVideoReady(page, label)
+        await page.waitForTimeout(reloadWaitMs)
+        await samplePlayer(page, label)
+        if (probeFetchPlayUrlOption) {
+            await probePgcFetchPlayUrl(page, label)
+        }
+        if (probeSubtitleMenu) {
+            await probeGeneratedSubtitle(page, label)
+            await samplePlayer(page, `${label} subtitle probe`)
+        }
     }
 }
 
@@ -558,6 +597,14 @@ async function main() {
         if (probeSubtitleMenu) {
             await probeGeneratedSubtitle(page, 'after start')
             await samplePlayer(page, 'after subtitle probe')
+        }
+        if (reloadCount > 0) {
+            await probeNormalReloads(page)
+        }
+        if (skipSwitch) {
+            await writeFile(logPath, `${lines.join('\n')}\n`)
+            record(`wrote ${path.relative(rootDir, logPath)}`)
+            return
         }
 
         await clickEpisode(page, blockedUrl)
