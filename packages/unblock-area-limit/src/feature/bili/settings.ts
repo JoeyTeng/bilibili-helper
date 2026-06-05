@@ -1,5 +1,5 @@
 import { util_init } from "../../util/initiator"
-import { log, logHub, util_debug } from "../../util/log"
+import { log, util_debug } from "../../util/log"
 import { _ } from "../../util/react"
 import { ui } from "../../util/ui"
 import { balh_config } from "../config"
@@ -7,6 +7,7 @@ import { util_page } from "../page"
 import { r } from "../r"
 import { util_ui_msg } from '../../util/message'
 import { bilibili_login } from "./bilibili_login"
+import { createDiagnosticArtifacts, downloadDiagnosticReport } from "./diagnostics"
 import css from './settings.css'
 
 const balh_feature_runPing = function () {
@@ -49,7 +50,27 @@ const balh_feature_runPing = function () {
 }
 
 export function settings() {
+    const floatingSettingsHiddenSelectors = [
+        '.bpx-player-container[data-screen="web"]',
+        '.bpx-player-container[data-screen="full"]',
+        '.bpx-player-container.bpx-state-webscreen',
+        '.bpx-player-container.bpx-state-fullscreen',
+        '.bpx-player-webscreen',
+        '.bpx-player-fullscreen',
+        '.bilibili-player-mode-webfullscreen',
+        '.bilibili-player-mode-fullscreen',
+        '.player-mode-webfullscreen',
+        '.player-mode-fullscreen',
+        '.video-state-webfullscreen',
+        '.video-state-fullscreen',
+        '.mode-webscreen',
+        '.mode-fullscreen',
+    ]
+
     function addSettingsButton() {
+        if (document.getElementById('balh-settings-btn')) {
+            return
+        }
         let indexNav = document.querySelector<HTMLElement>('.bangumi-nav-right, #index_nav, #fixnav_report')
         let settingBtnSvgContainer: HTMLElement | undefined
         const createBtnStyle = (size: string, diffCss?: string) => {
@@ -120,6 +141,59 @@ export function settings() {
                     })
                 }
             }
+            if (!indexNav && shouldUseFloatingSettingsFallback()) {
+                const floatingRoot = document.body.appendChild(_('div', {
+                    id: 'balh-settings-floating-root',
+                    style: {
+                        position: 'fixed',
+                        right: '0',
+                        bottom: '24px',
+                        zIndex: '9999',
+                        textAlign: 'center',
+                    },
+                }))
+                indexNav = floatingRoot
+                indexNav.appendChild(createBtnStyle('36px', `
+                    #balh-settings-floating-root {
+                        pointer-events: none;
+                    }
+                    #balh-settings-btn {
+                        width: 32px;
+                        height: 32px;
+                        border: 1px solid #d9dee4;
+                        border-right: 0;
+                        border-radius: 5px 0 0 5px;
+                        background: rgba(255, 255, 255, .86);
+                        box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
+                        cursor: pointer;
+                        opacity: .38;
+                        pointer-events: auto;
+                        transform: translateX(30px);
+                        transition: transform .15s ease, opacity .15s ease, background .15s ease, border-color .15s ease;
+                    }
+                    #balh-settings-btn:hover,
+                    #balh-settings-btn:focus-within {
+                        background: #00a1d6;
+                        border-color: #00a1d6;
+                        opacity: 1;
+                        transform: translateX(0);
+                    }
+                    #balh-settings-btn > :first-child {
+                        text-align: center;
+                        height: 100%;
+                    }
+                    #balh-settings-btn .icon-saturn {
+                        width: 18px;
+                        height: 32px;
+                        fill: rgb(153,162,170);
+                    }
+                    #balh-settings-btn:hover .icon-saturn,
+                    #balh-settings-btn:focus-within .icon-saturn {
+                        fill: white;
+                    }
+                `))
+                setupFloatingSettingsVisibility(floatingRoot)
+            }
             if (indexNav) {
                 settingBtnSvgContainer = indexNav.appendChild(_('div', { id: 'balh-settings-btn', title: GM_info.script.name + ' 设置', event: { click: showSettings } }, [_('div', {})])).firstChild as HTMLElement;
             }
@@ -131,6 +205,50 @@ export function settings() {
             settingBtnSvgContainer = indexNav.appendChild(_('div', { id: 'balh-settings-btn', title: GM_info.script.name + ' 设置', event: { click: showSettings } }, [_('div', { className: 'btn-gotop' })])).firstChild as HTMLElement;
         }
         settingBtnSvgContainer && (settingBtnSvgContainer.innerHTML = `<!-- https://www.flaticon.com/free-icon/saturn_53515 --><svg class="icon-saturn" viewBox="0 0 612.017 612.017"><path d="M596.275,15.708C561.978-18.59,478.268,5.149,380.364,68.696c-23.51-7.384-48.473-11.382-74.375-11.382c-137.118,0-248.679,111.562-248.679,248.679c0,25.902,3.998,50.865,11.382,74.375C5.145,478.253-18.575,561.981,15.724,596.279c34.318,34.318,118.084,10.655,216.045-52.949c23.453,7.365,48.378,11.344,74.241,11.344c137.137,0,248.679-111.562,248.679-248.68c0-25.862-3.979-50.769-11.324-74.24C606.931,133.793,630.574,50.026,596.275,15.708zM66.435,545.53c-18.345-18.345-7.919-61.845,23.338-117.147c22.266,39.177,54.824,71.716,94.02,93.943C128.337,553.717,84.837,563.933,66.435,545.53z M114.698,305.994c0-105.478,85.813-191.292,191.292-191.292c82.524,0,152.766,52.605,179.566,125.965c-29.918,41.816-68.214,87.057-113.015,131.839c-44.801,44.819-90.061,83.116-131.877,113.034C167.303,458.76,114.698,388.479,114.698,305.994z M305.99,497.286c-3.156,0-6.236-0.325-9.354-0.459c35.064-27.432,70.894-58.822,106.11-94.059c35.235-35.235,66.646-71.046,94.058-106.129c0.153,3.118,0.479,6.198,0.479,9.354C497.282,411.473,411.469,497.286,305.99,497.286z M428.379,89.777c55.303-31.238,98.803-41.683,117.147-23.338c18.402,18.383,8.187,61.902-23.204,117.377C500.095,144.62,467.574,112.043,428.379,89.777z"/></svg>`);
+    }
+
+    function setupFloatingSettingsVisibility(root: HTMLElement) {
+        let updateFrame = 0
+        const update = () => {
+            updateFrame = 0
+            root.style.display = shouldHideFloatingSettingsButton() ? 'none' : ''
+        }
+        const scheduleUpdate = () => {
+            if (updateFrame) return
+            updateFrame = requestAnimationFrame(update)
+        }
+        update()
+        document.addEventListener('fullscreenchange', scheduleUpdate)
+        window.addEventListener('resize', scheduleUpdate)
+        const observer = new MutationObserver(scheduleUpdate)
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
+        document.body && observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class', 'data-screen', 'data-mode'] })
+        window.addEventListener('beforeunload', () => {
+            observer.disconnect()
+            if (updateFrame) {
+                cancelAnimationFrame(updateFrame)
+                updateFrame = 0
+            }
+        }, { once: true })
+    }
+
+    function shouldHideFloatingSettingsButton() {
+        if (document.fullscreenElement) {
+            return true
+        }
+        const pageClassName = `${document.documentElement.className || ''} ${document.body?.className || ''}`
+        if (/(web[-_]?screen|web[-_]?full|fullscreen|full[-_]?screen)/i.test(pageClassName)) {
+            return true
+        }
+        return floatingSettingsHiddenSelectors.some(selector => !!document.querySelector(selector))
+    }
+
+    function shouldUseFloatingSettingsFallback() {
+        return util_page.anime_ep()
+            || util_page.anime_ss()
+            || util_page.anime_ep_m()
+            || util_page.anime_ss_m()
+            || (util_page.av() && !!balh_config.enable_in_av)
     }
 
     function _showSettings() {
@@ -161,7 +279,10 @@ export function settings() {
         window.addEventListener('message', (event) => {
             if (event.data === 'balh-show-setting') {
                 _showSettings();
-                window.$('#upos-server')[0].value = balh_config.upos_server || '';
+                const uposServer = document.getElementById('upos-server') as HTMLSelectElement | null
+                if (uposServer) {
+                    uposServer.value = balh_config.upos_server || ''
+                }
             }
         })
     }
@@ -200,11 +321,11 @@ export function settings() {
         log(name, ' => ', value);
     }
 
-    // 第一次点击时:
-    // 1. '复制日志&问题反馈' => '复制日志'
-    // 2. 显示'问题反馈'
-    // 3. 复制成功后请求跳转到GitHub
-    // 之后的点击, 只是正常的复制功能~~
+    // On first click:
+    // 1. Rename the entry from feedback mode to plain diagnostic mode.
+    // 2. Show the feedback link.
+    // 3. Offer to continue to GitHub after downloading the report and copying the summary.
+    // Later clicks only create another diagnostic download and summary.
     function onCopyClick(this: {}, event: Event) {
         let issueLink = document.getElementById('balh-issue-link')
         if (!issueLink) {
@@ -214,26 +335,38 @@ export function settings() {
         if (continueToIssue) {
             issueLink.style.display = 'inline'
             let copyBtn = document.getElementById('balh-copy-log')!
-            copyBtn.innerText = '复制日志'
+            copyBtn.innerText = '下载诊断文件'
         }
 
         let textarea = document.getElementById('balh-textarea-copy') as HTMLTextAreaElement
+        const artifacts = createDiagnosticArtifacts()
+        const downloaded = downloadDiagnosticReport(artifacts.report, artifacts.fileName)
         textarea.style.display = 'inline-block'
-        if (ui.copy(logHub.getAllMsg({ [localStorage.access_key]: '{{access_key}}' }), textarea)) {
+        const copied = ui.copy(artifacts.summary, textarea)
+        if (downloaded && copied) {
             textarea.style.display = 'none'
-            util_ui_msg.show(window.$(this),
-                continueToIssue ? '复制日志成功; 点击确定, 继续提交问题(需要GitHub帐号)\n请把日志粘贴到问题描述中' : '复制成功',
+            util_ui_msg.show(getMessageReference(this),
+                continueToIssue ? `诊断文件已下载，摘要已复制；点击确定继续提交问题(需要GitHub帐号)\n请把刚下载的 ${artifacts.fileName} 作为附件上传` : '诊断文件已下载，摘要已复制',
                 continueToIssue ? 0 : 3e3,
                 continueToIssue ? 'button' : undefined,
                 continueToIssue ? openIssuePage : undefined)
+        } else if (!downloaded) {
+            textarea.value = artifacts.report
+            textarea.select()
+            util_ui_msg.show(getMessageReference(this), '诊断文件下载失败，请从下面的文本框手动复制完整诊断报告', 8e3)
         } else {
-            util_ui_msg.show(window.$(this), '复制失败, 请从下面的文本框手动复制', 5e3)
+            textarea.value = artifacts.summary
+            textarea.select()
+            util_ui_msg.show(getMessageReference(this), '诊断文件已下载，但摘要复制失败，请从下面的文本框手动复制摘要', 8e3)
         }
     }
 
+    function getMessageReference(target: any) {
+        return typeof window.$ === 'function' ? window.$(target) : target
+    }
+
     function openIssuePage() {
-        // window.open(r.url.issue)
-        window.open(r.url.readme)
+        window.open(r.url.issue_new)
     }
 
     let printSystemInfoOk = false
@@ -399,7 +532,7 @@ export function settings() {
                     _('text', '　'),
                     _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md', target: '_blank' }, [_('text', '帮助说明')]),
                     _('text', '　'),
-                    _('a', { id: 'balh-copy-log', href: 'javascript:;', event: { click: onCopyClick } }, [_('text', '复制日志&问题反馈')]),
+                    _('a', { id: 'balh-copy-log', href: 'javascript:;', event: { click: onCopyClick } }, [_('text', '下载诊断文件&问题反馈')]),
                     _('text', '　'),
                     _('a', { id: 'balh-issue-link', href: 'javascript:;', event: { click: openIssuePage }, style: { display: 'none' } }, [_('text', '问题反馈')]),
                     _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/graphs/contributors' }, [_('text', '贡献者')]),

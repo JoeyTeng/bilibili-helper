@@ -70,7 +70,10 @@ function scriptContent() {
             login: bili.bilibili_login.showLogin,
             logout: bili.bilibili_login.showLogout,
             getLog: () => {
-                return logHub.getAllMsg({ [localStorage.access_key]: '{{access_key}}' })
+                return bili.sanitizeDiagnosticText(logHub.getAllMsg())
+            },
+            getDiagnosticReport: () => {
+                return bili.createDiagnosticReport({ buildVersion: __BALH_BUILD_VERSION__, invokeBy })
             },
             getAllLog: (...args: any) => {
                 setTimeout(() => {

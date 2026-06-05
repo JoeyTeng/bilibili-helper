@@ -19,8 +19,9 @@
     "dev:balh": "node scripts/build.mjs --watch",
     "serve:userscript": "node scripts/serve-userscript.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm run test:async && pnpm run test:subtitle && pnpm run build",
+    "check": "pnpm run typecheck && pnpm run test:async && pnpm run test:subtitle && pnpm run test:diagnostics && pnpm run build",
     "test:async": "node scripts/test-async-request.mjs",
+    "test:diagnostics": "node scripts/test-diagnostics-report.mjs",
     "test:subtitle": "node scripts/test-subtitle-web-view.mjs"
   },
   "repository": {
