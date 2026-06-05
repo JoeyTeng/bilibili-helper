@@ -8,7 +8,6 @@
     "opencc-js": "^1.0.5"
   },
   "devDependencies": {
-    "@types/greasemonkey": "^4.0.2",
     "esbuild": "^0.28.0",
     "playwright": "^1.60.0",
     "typescript": "^5.8.2"
@@ -20,7 +19,8 @@
     "dev:balh": "node scripts/build.mjs --watch",
     "serve:userscript": "node scripts/serve-userscript.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm run test:subtitle && pnpm run build",
+    "check": "pnpm run typecheck && pnpm run test:async && pnpm run test:subtitle && pnpm run build",
+    "test:async": "node scripts/test-async-request.mjs",
     "test:subtitle": "node scripts/test-subtitle-web-view.mjs"
   },
   "repository": {
