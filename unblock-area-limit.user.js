@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.7.2
+// @version      8.8.0
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260604T231035335Z";
+    const __BALH_BUILD_VERSION__ = "20260605T093533180Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -503,7 +503,7 @@ function scriptSource(invokeBy) {
 
       // packages/unblock-area-limit/src/util/async.ts
       var Promise2 = window.Promise;
-      var fetch2 = window.fetch;
+      var fetch2 = window.fetch?.bind(window);
       Promise2.prototype.compose = function(transformer) {
         return transformer ? transformer(this) : this;
       };
@@ -546,8 +546,66 @@ function scriptSource(invokeBy) {
           };
         }
         Async2.wrapper = wrapper;
+        function rewriteUrlAuth(url) {
+          let authorization = "";
+          const originUrl = new URL(url, document.location.href);
+          if (originUrl.username && originUrl.password) {
+            authorization = "Basic " + btoa(`${originUrl.username}:${originUrl.password}`);
+            originUrl.username = "";
+            originUrl.password = "";
+            url = originUrl.href;
+          }
+          return { url, authorization };
+        }
+        function parseResponseText(text, contentType = "") {
+          contentType = contentType.toLowerCase();
+          if (contentType.includes("xml")) {
+            return new DOMParser().parseFromString(text, "text/xml");
+          }
+          const shouldParseJson = contentType.includes("json") || /^[\s\r\n]*[\[{]/.test(text);
+          if (shouldParseJson) {
+            try {
+              return JSON.parse(text);
+            } catch (e) {
+              if (contentType.includes("json")) {
+                throw e;
+              }
+            }
+          }
+          return text;
+        }
+        function parseFetchResponse(response) {
+          return response.text().then((text) => parseResponseText(text, response.headers.get("content-type") || ""));
+        }
+        function xhrError(req) {
+          return {
+            readyState: req.status === 0 ? 0 : req.readyState,
+            status: req.status,
+            statusText: req.statusText || "error",
+            response: req.response,
+            responseText: req.responseText,
+            responseURL: req.responseURL
+          };
+        }
         function requestByFetch(url) {
-          return fetch2(url).then((it) => it.json());
+          if (!fetch2) {
+            return Promise2.reject(new Error("fetch is not available"));
+          }
+          const request = rewriteUrlAuth(url);
+          const headers = {};
+          if (request.authorization) {
+            headers.Authorization = request.authorization;
+          }
+          util_debug(`ajax(fetch): ${request.url}`);
+          return fetch2(request.url, {
+            credentials: "include",
+            headers
+          }).then((response) => {
+            if (!response.ok) {
+              return Promise2.reject(response);
+            }
+            return parseFetchResponse(response);
+          });
         }
         function requestByXhr(url) {
           return new Promise2((resolve, reject) => {
@@ -556,24 +614,19 @@ function scriptSource(invokeBy) {
               if (req.readyState === 4) {
                 if (req.status === 200) {
                   try {
-                    resolve(JSON.parse(req.responseText));
+                    resolve(parseResponseText(req.responseText, req.getResponseHeader("content-type") || ""));
                   } catch (e) {
-                    reject(req);
+                    reject(e);
                   }
                 } else {
-                  reject(req);
+                  reject(xhrError(req));
                 }
               }
             };
             req.withCredentials = true;
-            let authorization = "";
-            const originUrl = new URL(url, document.location.href);
-            if (originUrl.username && originUrl.password) {
-              authorization = "Basic " + btoa(`${originUrl.username}:${originUrl.password}`);
-              originUrl.username = "";
-              originUrl.password = "";
-              url = originUrl.href;
-            }
+            const request = rewriteUrlAuth(url);
+            url = request.url;
+            const authorization = request.authorization;
             req.open("GET", url);
             if (authorization) {
               req.setRequestHeader("Authorization", authorization);
@@ -581,40 +634,8 @@ function scriptSource(invokeBy) {
             req.send();
           });
         }
-        function requestByJQuery(url) {
-          const creator = () => new Promise2((resolve, reject) => {
-            let options = { url };
-            const originUrl = new URL(url, document.location.href);
-            if (originUrl.username && originUrl.password) {
-              options.headers = { "Authorization": "Basic " + btoa(`${originUrl.username}:${originUrl.password}`) };
-              originUrl.username = "";
-              originUrl.password = "";
-              options.url = originUrl.href;
-            }
-            options.async === void 0 && (options.async = true);
-            options.xhrFields === void 0 && (options.xhrFields = { withCredentials: true });
-            options.success = function(data2) {
-              resolve(data2);
-            };
-            options.error = function(err) {
-              reject(err);
-            };
-            util_debug(`ajax: ${options.url}`);
-            window.$.ajax(options);
-          });
-          return retryUntil(() => {
-            util_debug(`retryUntil.ajaxBy$: ${window.$}`);
-            return window.$;
-          }, creator, 30, 100);
-        }
         function ajax(url) {
-          return requestByJQuery(url).catch((e) => {
-            if (e instanceof RetryUntilTimeoutException) {
-              return requestByXhr(url);
-            } else {
-              return Promise2.reject(e);
-            }
-          });
+          return requestByFetch(url).catch(() => requestByXhr(url));
         }
         Async2.ajax = ajax;
         function ajaxByXhr(url) {
