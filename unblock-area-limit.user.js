@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.8.0
+// @version      8.9.0
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -108,7 +108,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260605T093533180Z";
+    const __BALH_BUILD_VERSION__ = "20260605T194617677Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -4437,6 +4437,393 @@ function scriptSource(invokeBy) {
         });
       }
 
+      // packages/unblock-area-limit/src/feature/bili/diagnostics.ts
+      var sensitiveParamNames = [
+        "access_key",
+        "access_token",
+        "auth_key",
+        "refresh_token",
+        "token",
+        "bili_jct",
+        "csrf",
+        "csrf_token",
+        "SESSDATA",
+        "DedeUserID",
+        "DedeUserID__ckMd5",
+        "sid"
+      ];
+      var signedMediaParamNames = [
+        "agrr",
+        "allo_id",
+        "build",
+        "buvid",
+        "bvc",
+        "bw",
+        "deadline",
+        "dl",
+        "e",
+        "f",
+        "gen",
+        "lrs",
+        "mid",
+        "nbs",
+        "nettype",
+        "og",
+        "oi",
+        "orderid",
+        "os",
+        "platform",
+        "qn_dyeid",
+        "trid",
+        "uipk",
+        "uparams",
+        "upsig"
+      ];
+      var relevantLogPattern = /(playurl|proxy|解析|服务器|伺服器|subtitle|字幕|__playinfo__|hydrate|status|error|warn|failed|retry|timeout|地区|地區|区域|區域|大会员|大會員|权限|權限)/i;
+      var urlTextPattern = /(?:https?:)?\/\/[^\s"'<>\\{}]+/gi;
+      function createDiagnosticArtifacts(options = {}) {
+        const now = options.now ?? /* @__PURE__ */ new Date();
+        const normalizedOptions = { ...options, now };
+        const fileName = options.fileName || createDiagnosticFileName(normalizedOptions);
+        return {
+          report: createDiagnosticReport(normalizedOptions),
+          summary: createDiagnosticSummary({ ...normalizedOptions, fileName }),
+          fileName
+        };
+      }
+      function createDiagnosticReport(options = {}) {
+        const rawLog = options.logText ?? logHub.getAllMsg();
+        const sanitizedLog = sanitizeDiagnosticText(rawLog, options.extraSecrets);
+        const runtimeLog = limitLogText(sanitizedLog, 600, 6e4);
+        const relevantLog = limitLogText(sanitizedLog.split("\n").filter((line) => relevantLogPattern.test(line)).join("\n"), 120, 3e4);
+        const report = [
+          "# BALH Diagnostic Report",
+          "",
+          "## Script",
+          formatRows(getScriptSnapshot(options)),
+          "",
+          "## Page",
+          formatRows(getPageSnapshot()),
+          "",
+          "## Settings",
+          formatRows(getSettingsSnapshot()),
+          "",
+          "## Playback",
+          formatRows(getPlaybackSnapshot()),
+          "",
+          "## Recent Relevant Log Lines",
+          codeBlock(relevantLog || "(empty)"),
+          "",
+          "## Runtime Log",
+          codeBlock(runtimeLog || "(empty)"),
+          "",
+          "## Redaction",
+          "- access keys, tokens, selected cookies, and proxy credentials are redacted before download."
+        ].join("\n");
+        return sanitizeDiagnosticText(report, options.extraSecrets);
+      }
+      function createDiagnosticSummary(options = {}) {
+        const script = getScriptSnapshot(options);
+        const page = getPageSnapshot();
+        const settings3 = getSettingsSnapshot();
+        const playback = getPlaybackSnapshot();
+        const summary = [
+          "# BALH Issue Summary",
+          "",
+          formatRows({
+            generated_at: script.generated_at,
+            script_version: script.script_version,
+            build_version: script.build_version,
+            page_url: page.url,
+            current_ep_id: playback.current_ep_id,
+            playinfo_ep_id: playback.playinfo_ep_id,
+            aid: playback.aid,
+            cid: playback.cid,
+            server_inner: settings3.server_inner,
+            server_custom: settings3.server_custom,
+            server_custom_hk: settings3.server_custom_hk,
+            server_custom_tw: settings3.server_custom_tw,
+            subtitle_ui_present: playback.subtitle_ui_present,
+            player_status_state: playback.player_status_state,
+            video_current_time: playback.video_current_time,
+            diagnostic_file: options.fileName || createDiagnosticFileName(options)
+          }),
+          "",
+          "Please attach the downloaded diagnostic file to this GitHub issue."
+        ].join("\n");
+        return sanitizeDiagnosticText(summary, options.extraSecrets);
+      }
+      function createDiagnosticFileName(options = {}) {
+        const script = getScriptSnapshot(options);
+        const playback = getPlaybackSnapshot();
+        const timestamp = script.generated_at.replace(/[-:.]/g, "").replace(/Z$/, "Z");
+        const version = sanitizeFileName(`v${script.script_version}`);
+        const build = sanitizeFileName(script.build_version || "unknown-build");
+        const episode = sanitizeFileName(playback.current_ep_id ? `ep${playback.current_ep_id}` : "unknown-episode");
+        return `balh-diagnostic-${version}-${build}-${episode}-${timestamp}.txt`;
+      }
+      function downloadDiagnosticReport(report, fileName) {
+        try {
+          const blob = new Blob([report], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = fileName;
+          link.rel = "noopener";
+          link.style.display = "none";
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            link.remove();
+          }, 0);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+      function sanitizeDiagnosticText(text, extraSecrets = {}) {
+        let output = text;
+        output = redactMediaUrlQueries(output);
+        output = output.replace(/((?:\bhttps?:)?\/\/)([^/\s?#@]+)@/g, "$1redacted@");
+        output = output.replace(/\b[^\s:/?#@]+:[^\s/?#@]+@([a-z0-9.-]+\.[a-z]{2,}(?::\d+)?)/gi, "redacted@$1");
+        output = output.replace(new RegExp(`([?&](?:${sensitiveParamNames.join("|")})=)[^&#\\s"']+`, "gi"), "$1<redacted>");
+        output = output.replace(new RegExp(`(["']?(?:${sensitiveParamNames.join("|")})["']?\\s*[:=]\\s*["']?)[^"',}\\]\\s&]+`, "gi"), "$1<redacted>");
+        const secrets = collectSensitiveValues(extraSecrets);
+        for (const [key, value] of Object.entries(secrets)) {
+          if (!value) continue;
+          output = output.replace(new RegExp(escapeRegExp(value), "g"), () => `<${sanitizeSecretLabel(key)}:redacted>`);
+        }
+        return output;
+      }
+      function redactMediaUrlQueries(text) {
+        return text.replace(urlTextPattern, (rawUrl) => {
+          try {
+            const url = new URL(rawUrl, window.location.href);
+            if (!shouldRedactMediaUrlQuery(url)) return rawUrl;
+            return `${url.origin}${url.pathname}${url.search ? "?<media-query:redacted>" : ""}${url.hash ? "#<redacted>" : ""}`;
+          } catch (_) {
+            return rawUrl;
+          }
+        });
+      }
+      function shouldRedactMediaUrlQuery(url) {
+        if (!url.search) return false;
+        const host = url.hostname.toLowerCase();
+        const path = url.pathname.toLowerCase();
+        const isBilibiliMediaHost = host === "bilivideo.com" || host.endsWith(".bilivideo.com") || host.endsWith(".bilivideo.cn");
+        const hasSignedParam = signedMediaParamNames.some((name) => url.searchParams.has(name));
+        const hasMediaPath = /\/upgcxcode\//.test(path) || /\.(?:m4s|mp4|flv|m3u8)$/i.test(path);
+        return hasSignedParam && (isBilibiliMediaHost || hasMediaPath);
+      }
+      function getScriptSnapshot(options) {
+        return {
+          generated_at: (options.now ?? /* @__PURE__ */ new Date()).toISOString(),
+          script_name: GM_info.script.name,
+          script_version: GM_info.script.version,
+          build_version: options.buildVersion ?? getBuildVersion(),
+          script_handler: GM_info.scriptHandler,
+          invoke_by: options.invokeBy ?? getInvokeBy()
+        };
+      }
+      function getPageSnapshot() {
+        return {
+          url: redactUrl(window.location.href),
+          title: document.title,
+          ready_state: document.readyState,
+          referrer: document.referrer ? redactUrl(document.referrer) : "",
+          user_agent: navigator.userAgent,
+          language: navigator.language,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || ""
+        };
+      }
+      function getSettingsSnapshot() {
+        return {
+          mode: balh_config.mode,
+          closed: boolLabel(balh_config.is_closed),
+          blocked_vip: boolLabel(balh_config.blocked_vip),
+          generate_sub: boolLabel(balh_config.generate_sub),
+          enable_in_av: boolLabel(balh_config.enable_in_av),
+          remove_pre_ad: boolLabel(balh_config.remove_pre_ad),
+          server: redactUrl(balh_config.server),
+          server_inner: balh_config.server_inner,
+          server_custom: redactUrl(balh_config.server_custom),
+          server_custom_hk: redactUrl(balh_config.server_custom_hk),
+          server_custom_tw: redactUrl(balh_config.server_custom_tw),
+          server_custom_cn: redactUrl(balh_config.server_custom_cn),
+          server_custom_th: redactUrl(balh_config.server_custom_th),
+          upos_server: balh_config.upos_server || "",
+          has_access_key: boolLabel(hasStorageValue("access_key") || hasStorageValue("access_token")),
+          is_login_balh: boolLabel(bilibili_login.isLogin()),
+          is_login_bilibili: boolLabel(bilibili_login.isLoginBiliBili())
+        };
+      }
+      function getPlaybackSnapshot() {
+        const anyWindow = window;
+        const playInfo = anyWindow.__PLAYURL_HYDRATE_DATA__ || anyWindow.__playinfo__ || anyWindow.__playinfo__origin;
+        const result = playInfo?.result || {};
+        const videoInfo = result.video_info || playInfo?.video_info || {};
+        const arc = result.arc || {};
+        const episode = result.supplement?.ogv_episode_info || {};
+        const season = result.supplement?.ogv_season_info || {};
+        const initialState = anyWindow.__INITIAL_STATE__ || {};
+        const initialEp = initialState.epInfo || {};
+        const video = document.querySelector("video");
+        const playerStatus = document.getElementById("balh-player-status");
+        return {
+          current_ep_id: window.location.pathname.match(/\/bangumi\/play\/ep(\d+)/)?.[1] || "",
+          playinfo_ep_id: firstNonEmpty(episode.episode_id, initialEp.id, initialEp.ep_id),
+          season_id: firstNonEmpty(season.season_id, result.season_id, initialState.mediaInfo?.season_id, initialState.mediaInfo?.seasonId),
+          aid: firstNonEmpty(arc.aid, episode.aid, initialEp.aid, initialState.aid),
+          cid: firstNonEmpty(arc.cid, episode.cid, initialEp.cid, initialState.cid),
+          play_video_type: result.play_video_type || "",
+          has_dash: boolLabel(!!videoInfo.dash),
+          video_streams: videoInfo.dash?.video?.length ?? "",
+          audio_streams: videoInfo.dash?.audio?.length ?? "",
+          has_durl: boolLabel(Array.isArray(videoInfo.durl)),
+          app_only: boolLabel(anyWindow.__balh_app_only__ === true),
+          subtitle_ui_present: boolLabel(!!document.body?.innerText?.includes("多语言字幕")),
+          player_status: playerStatus?.innerText?.trim() || "",
+          player_status_state: playerStatus?.dataset?.state || "",
+          video_current_time: video ? finiteNumber(video.currentTime) : "",
+          video_duration: video ? finiteNumber(video.duration) : "",
+          video_paused: video ? boolLabel(video.paused) : "",
+          video_ready_state: video?.readyState ?? "",
+          video_network_state: video?.networkState ?? "",
+          video_error: video?.error ? formatMediaError(video.error) : ""
+        };
+      }
+      function collectSensitiveValues(extraSecrets) {
+        const values = {};
+        const add = (key, value) => {
+          if (typeof value !== "string") return;
+          const trimmed = value.trim();
+          if (trimmed.length < 4) return;
+          if (/^(true|false|null|undefined)$/i.test(trimmed)) return;
+          values[key] = trimmed;
+        };
+        for (const key of sensitiveParamNames) {
+          add(key, safeLocalStorageGet(key));
+        }
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && isSensitiveName(key)) {
+              add(key, localStorage.getItem(key));
+            }
+          }
+        } catch (_) {
+        }
+        try {
+          for (const item of document.cookie.split("; ")) {
+            const [key, value] = item.split("=");
+            if (key && isSensitiveName(key)) {
+              add(key, value);
+            }
+          }
+        } catch (_) {
+        }
+        for (const [key, value] of Object.entries(extraSecrets)) {
+          add(key, value);
+        }
+        return values;
+      }
+      function redactUrl(value) {
+        if (value == null || value === "") return "";
+        const text = String(value);
+        if (!/^(https?:)?\/\//i.test(text)) return sanitizeDiagnosticText(text);
+        try {
+          const parsedUrl = new URL(text, window.location.href);
+          if (parsedUrl.username || parsedUrl.password) {
+            parsedUrl.username = "redacted";
+            parsedUrl.password = "";
+          }
+          parsedUrl.searchParams.forEach((_, key) => {
+            if (isSensitiveName(key)) {
+              parsedUrl.searchParams.set(key, "<redacted>");
+            }
+          });
+          return sanitizeDiagnosticText(parsedUrl.href);
+        } catch (_) {
+          return sanitizeDiagnosticText(text);
+        }
+      }
+      function formatRows(rows) {
+        return Object.entries(rows).map(([key, value]) => `- ${key}: ${formatValue(value)}`).join("\n");
+      }
+      function formatValue(value) {
+        if (value == null || value === "") return "(empty)";
+        if (typeof value === "object") return sanitizeDiagnosticText(Objects.stringify(value));
+        return sanitizeDiagnosticText(String(value));
+      }
+      function codeBlock(value) {
+        return `\`\`\`text
+    ${sanitizeDiagnosticText(value).replace(/```/g, "`\\`\\`")}
+    \`\`\``;
+      }
+      function boolLabel(value) {
+        return value ? "true" : "false";
+      }
+      function firstNonEmpty(...values) {
+        const value = values.find((value2) => value2 != null && value2 !== "" && value2 !== "0");
+        return value == null ? "" : String(value);
+      }
+      function finiteNumber(value) {
+        return Number.isFinite(value) ? Math.round(value * 1e3) / 1e3 : "";
+      }
+      function formatMediaError(error) {
+        return `code=${error.code}${error.message ? ` message=${error.message}` : ""}`;
+      }
+      function safeLocalStorageGet(key) {
+        try {
+          return localStorage.getItem(key) || localStorage[key];
+        } catch (_) {
+          return void 0;
+        }
+      }
+      function hasStorageValue(key) {
+        return !!safeLocalStorageGet(key);
+      }
+      function isSensitiveName(name) {
+        return sensitiveParamNames.some((key) => key.toLowerCase() === name.toLowerCase()) || /(access|refresh|token|sess|secret|csrf|bili_jct)/i.test(name);
+      }
+      function lastLines(text, count) {
+        const lines = text.split("\n");
+        return lines.slice(Math.max(0, lines.length - count)).join("\n");
+      }
+      function limitLogText(text, maxLines, maxLength) {
+        const lines = lastLines(text, maxLines).split("\n").map((line) => limitLine(line, 3e3)).join("\n");
+        return limitText(lines, maxLength);
+      }
+      function limitLine(text, maxLength) {
+        if (text.length <= maxLength) return text;
+        const edgeLength = Math.floor((maxLength - 80) / 2);
+        return `${text.slice(0, edgeLength)}
+    ... line omitted ${text.length - maxLength} characters ...
+    ${text.slice(text.length - edgeLength)}`;
+      }
+      function limitText(text, maxLength) {
+        if (text.length <= maxLength) return text;
+        return `${text.slice(0, 1e3)}
+    ... omitted ${text.length - maxLength} characters ...
+    ${text.slice(text.length - maxLength + 1e3)}`;
+      }
+      function getBuildVersion() {
+        return typeof __BALH_BUILD_VERSION__ === "string" ? __BALH_BUILD_VERSION__ : "";
+      }
+      function getInvokeBy() {
+        return typeof invokeBy === "string" ? invokeBy : "";
+      }
+      function escapeRegExp(value) {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+      function sanitizeSecretLabel(value) {
+        return value.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 60) || "secret";
+      }
+      function sanitizeFileName(value) {
+        return value.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "unknown";
+      }
+
       // packages/unblock-area-limit/src/util/notification.ts
       var available = {};
       var shown = [];
@@ -4625,7 +5012,26 @@ function scriptSource(invokeBy) {
         pingLoop();
       };
       function settings2() {
+        const floatingSettingsHiddenSelectors = [
+          '.bpx-player-container[data-screen="web"]',
+          '.bpx-player-container[data-screen="full"]',
+          ".bpx-player-container.bpx-state-webscreen",
+          ".bpx-player-container.bpx-state-fullscreen",
+          ".bpx-player-webscreen",
+          ".bpx-player-fullscreen",
+          ".bilibili-player-mode-webfullscreen",
+          ".bilibili-player-mode-fullscreen",
+          ".player-mode-webfullscreen",
+          ".player-mode-fullscreen",
+          ".video-state-webfullscreen",
+          ".video-state-fullscreen",
+          ".mode-webscreen",
+          ".mode-fullscreen"
+        ];
         function addSettingsButton() {
+          if (document.getElementById("balh-settings-btn")) {
+            return;
+          }
           let indexNav = document.querySelector(".bangumi-nav-right, #index_nav, #fixnav_report");
           let settingBtnSvgContainer;
           const createBtnStyle = (size, diffCss) => {
@@ -4694,6 +5100,59 @@ function scriptSource(invokeBy) {
                 });
               }
             }
+            if (!indexNav && shouldUseFloatingSettingsFallback()) {
+              const floatingRoot = document.body.appendChild(createElement("div", {
+                id: "balh-settings-floating-root",
+                style: {
+                  position: "fixed",
+                  right: "0",
+                  bottom: "24px",
+                  zIndex: "9999",
+                  textAlign: "center"
+                }
+              }));
+              indexNav = floatingRoot;
+              indexNav.appendChild(createBtnStyle("36px", `
+                        #balh-settings-floating-root {
+                            pointer-events: none;
+                        }
+                        #balh-settings-btn {
+                            width: 32px;
+                            height: 32px;
+                            border: 1px solid #d9dee4;
+                            border-right: 0;
+                            border-radius: 5px 0 0 5px;
+                            background: rgba(255, 255, 255, .86);
+                            box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
+                            cursor: pointer;
+                            opacity: .38;
+                            pointer-events: auto;
+                            transform: translateX(30px);
+                            transition: transform .15s ease, opacity .15s ease, background .15s ease, border-color .15s ease;
+                        }
+                        #balh-settings-btn:hover,
+                        #balh-settings-btn:focus-within {
+                            background: #00a1d6;
+                            border-color: #00a1d6;
+                            opacity: 1;
+                            transform: translateX(0);
+                        }
+                        #balh-settings-btn > :first-child {
+                            text-align: center;
+                            height: 100%;
+                        }
+                        #balh-settings-btn .icon-saturn {
+                            width: 18px;
+                            height: 32px;
+                            fill: rgb(153,162,170);
+                        }
+                        #balh-settings-btn:hover .icon-saturn,
+                        #balh-settings-btn:focus-within .icon-saturn {
+                            fill: white;
+                        }
+                    `));
+              setupFloatingSettingsVisibility(floatingRoot);
+            }
             if (indexNav) {
               settingBtnSvgContainer = indexNav.appendChild(createElement("div", { id: "balh-settings-btn", title: GM_info.script.name + " 设置", event: { click: showSettings } }, [createElement("div", {})])).firstChild;
             }
@@ -4704,6 +5163,43 @@ function scriptSource(invokeBy) {
             settingBtnSvgContainer = indexNav.appendChild(createElement("div", { id: "balh-settings-btn", title: GM_info.script.name + " 设置", event: { click: showSettings } }, [createElement("div", { className: "btn-gotop" })])).firstChild;
           }
           settingBtnSvgContainer && (settingBtnSvgContainer.innerHTML = `<!-- https://www.flaticon.com/free-icon/saturn_53515 --><svg class="icon-saturn" viewBox="0 0 612.017 612.017"><path d="M596.275,15.708C561.978-18.59,478.268,5.149,380.364,68.696c-23.51-7.384-48.473-11.382-74.375-11.382c-137.118,0-248.679,111.562-248.679,248.679c0,25.902,3.998,50.865,11.382,74.375C5.145,478.253-18.575,561.981,15.724,596.279c34.318,34.318,118.084,10.655,216.045-52.949c23.453,7.365,48.378,11.344,74.241,11.344c137.137,0,248.679-111.562,248.679-248.68c0-25.862-3.979-50.769-11.324-74.24C606.931,133.793,630.574,50.026,596.275,15.708zM66.435,545.53c-18.345-18.345-7.919-61.845,23.338-117.147c22.266,39.177,54.824,71.716,94.02,93.943C128.337,553.717,84.837,563.933,66.435,545.53z M114.698,305.994c0-105.478,85.813-191.292,191.292-191.292c82.524,0,152.766,52.605,179.566,125.965c-29.918,41.816-68.214,87.057-113.015,131.839c-44.801,44.819-90.061,83.116-131.877,113.034C167.303,458.76,114.698,388.479,114.698,305.994z M305.99,497.286c-3.156,0-6.236-0.325-9.354-0.459c35.064-27.432,70.894-58.822,106.11-94.059c35.235-35.235,66.646-71.046,94.058-106.129c0.153,3.118,0.479,6.198,0.479,9.354C497.282,411.473,411.469,497.286,305.99,497.286z M428.379,89.777c55.303-31.238,98.803-41.683,117.147-23.338c18.402,18.383,8.187,61.902-23.204,117.377C500.095,144.62,467.574,112.043,428.379,89.777z"/></svg>`);
+        }
+        function setupFloatingSettingsVisibility(root) {
+          let updateFrame = 0;
+          const update = () => {
+            updateFrame = 0;
+            root.style.display = shouldHideFloatingSettingsButton() ? "none" : "";
+          };
+          const scheduleUpdate = () => {
+            if (updateFrame) return;
+            updateFrame = requestAnimationFrame(update);
+          };
+          update();
+          document.addEventListener("fullscreenchange", scheduleUpdate);
+          window.addEventListener("resize", scheduleUpdate);
+          const observer = new MutationObserver(scheduleUpdate);
+          observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style"] });
+          document.body && observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["class", "data-screen", "data-mode"] });
+          window.addEventListener("beforeunload", () => {
+            observer.disconnect();
+            if (updateFrame) {
+              cancelAnimationFrame(updateFrame);
+              updateFrame = 0;
+            }
+          }, { once: true });
+        }
+        function shouldHideFloatingSettingsButton() {
+          if (document.fullscreenElement) {
+            return true;
+          }
+          const pageClassName = `${document.documentElement.className || ""} ${document.body?.className || ""}`;
+          if (/(web[-_]?screen|web[-_]?full|fullscreen|full[-_]?screen)/i.test(pageClassName)) {
+            return true;
+          }
+          return floatingSettingsHiddenSelectors.some((selector) => !!document.querySelector(selector));
+        }
+        function shouldUseFloatingSettingsFallback() {
+          return util_page.anime_ep() || util_page.anime_ss() || util_page.anime_ep_m() || util_page.anime_ss_m() || util_page.av() && !!balh_config.enable_in_av;
         }
         function _showSettings() {
           document.body.appendChild(settingsDOM);
@@ -4728,7 +5224,10 @@ function scriptSource(invokeBy) {
           window.addEventListener("message", (event) => {
             if (event.data === "balh-show-setting") {
               _showSettings();
-              window.$("#upos-server")[0].value = balh_config.upos_server || "";
+              const uposServer = document.getElementById("upos-server");
+              if (uposServer) {
+                uposServer.value = balh_config.upos_server || "";
+              }
             }
           });
         }
@@ -4770,25 +5269,38 @@ function scriptSource(invokeBy) {
           if (continueToIssue) {
             issueLink.style.display = "inline";
             let copyBtn = document.getElementById("balh-copy-log");
-            copyBtn.innerText = "复制日志";
+            copyBtn.innerText = "下载诊断文件";
           }
           let textarea = document.getElementById("balh-textarea-copy");
+          const artifacts = createDiagnosticArtifacts();
+          const downloaded = downloadDiagnosticReport(artifacts.report, artifacts.fileName);
           textarea.style.display = "inline-block";
-          if (ui.copy(logHub.getAllMsg({ [localStorage.access_key]: "{{access_key}}" }), textarea)) {
+          const copied = ui.copy(artifacts.summary, textarea);
+          if (downloaded && copied) {
             textarea.style.display = "none";
             util_ui_msg.show(
-              window.$(this),
-              continueToIssue ? "复制日志成功; 点击确定, 继续提交问题(需要GitHub帐号)\n请把日志粘贴到问题描述中" : "复制成功",
+              getMessageReference(this),
+              continueToIssue ? `诊断文件已下载，摘要已复制；点击确定继续提交问题(需要GitHub帐号)
+    请把刚下载的 ${artifacts.fileName} 作为附件上传` : "诊断文件已下载，摘要已复制",
               continueToIssue ? 0 : 3e3,
               continueToIssue ? "button" : void 0,
               continueToIssue ? openIssuePage : void 0
             );
+          } else if (!downloaded) {
+            textarea.value = artifacts.report;
+            textarea.select();
+            util_ui_msg.show(getMessageReference(this), "诊断文件下载失败，请从下面的文本框手动复制完整诊断报告", 8e3);
           } else {
-            util_ui_msg.show(window.$(this), "复制失败, 请从下面的文本框手动复制", 5e3);
+            textarea.value = artifacts.summary;
+            textarea.select();
+            util_ui_msg.show(getMessageReference(this), "诊断文件已下载，但摘要复制失败，请从下面的文本框手动复制摘要", 8e3);
           }
         }
+        function getMessageReference(target2) {
+          return typeof window.$ === "function" ? window.$(target2) : target2;
+        }
         function openIssuePage() {
-          window.open(r.url.readme);
+          window.open(r.url.issue_new);
         }
         let printSystemInfoOk = false;
         function onMouseEnterSettingBottom(event) {
@@ -4976,7 +5488,7 @@ function scriptSource(invokeBy) {
                 createElement("text", "　"),
                 createElement("a", { href: "https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md", target: "_blank" }, [createElement("text", "帮助说明")]),
                 createElement("text", "　"),
-                createElement("a", { id: "balh-copy-log", href: "javascript:;", event: { click: onCopyClick } }, [createElement("text", "复制日志&问题反馈")]),
+                createElement("a", { id: "balh-copy-log", href: "javascript:;", event: { click: onCopyClick } }, [createElement("text", "下载诊断文件&问题反馈")]),
                 createElement("text", "　"),
                 createElement("a", { id: "balh-issue-link", href: "javascript:;", event: { click: openIssuePage }, style: { display: "none" } }, [createElement("text", "问题反馈")]),
                 createElement("a", { href: "https://github.com/JoeyTeng/bilibili-helper/graphs/contributors" }, [createElement("text", "贡献者")]),
@@ -7118,7 +7630,10 @@ function scriptSource(invokeBy) {
             login: bilibili_login.showLogin,
             logout: bilibili_login.showLogout,
             getLog: () => {
-              return logHub.getAllMsg({ [localStorage.access_key]: "{{access_key}}" });
+              return sanitizeDiagnosticText(logHub.getAllMsg());
+            },
+            getDiagnosticReport: () => {
+              return createDiagnosticReport({ buildVersion: __BALH_BUILD_VERSION__, invokeBy });
             },
             getAllLog: (...args) => {
               setTimeout(() => {
