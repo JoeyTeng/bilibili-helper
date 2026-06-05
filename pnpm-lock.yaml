@@ -12,9 +12,6 @@ importers:
         specifier: ^1.0.5
         version: 1.0.5
     devDependencies:
-      '@types/greasemonkey':
-        specifier: ^4.0.2
-        version: 4.0.7
       esbuild:
         specifier: ^0.28.0
         version: 0.28.0
@@ -183,9 +180,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@types/greasemonkey@4.0.7':
-    resolution: {integrity: sha512-DuYBRf/T4zixO/xhQ3eicZCBjjOgbSSXuHP5XkLNf/UBayrJpBniP9il/AQaPy0lffl4Bco48zgHL+pZmQ6Q0A==}
-
   esbuild@0.28.0:
     resolution: {integrity: sha512-sNR9MHpXSUV/XB4zmsFKN+QgVG82Cc7+/aaxJ8Adi8hyOac+EXptIp45QBPaVyX3N70664wRbTcLTOemCAnyqw==}
     engines: {node: '>=18'}
@@ -293,8 +287,6 @@ snapshots:
 
   '@esbuild/win32-x64@0.28.0':
     optional: true
-
-  '@types/greasemonkey@4.0.7': {}
 
   esbuild@0.28.0:
     optionalDependencies:
