@@ -27,7 +27,9 @@ superseded_by:
   `durl` segment 隔离候选；protocol-relative 字符串、重复项、字段风格与
   MCDN/PCDN 最后兜底均原样保留。
 - runtime 提供 host-only 健康缓存、网络上下文失效、无凭据且有预算的浏览器探测，
-  playurl 关键路径不等待探测结果。
+  playurl 关键路径不等待探测结果。主动探测只准入实际 URL 命中的受信任 Bilibili
+  媒体域名并拒绝 redirect；IP literal、localhost、私网风格、未知域和 PCDN 候选
+  继续作为播放器回退，但不发主动请求、不读写 health。
 - 新配置键缺失或非法时，只有既有 legacy UPOS 配置会迁移到 `manual`；其他情况
   默认 `safe`。旧 UPOS/Akamai 设置只在有效 `manual` 模式下生效。
 - 无自定义区域代理但脚本未显式关闭时，仍安装 CDN-only Fetch/XHR，并处理现有
@@ -41,10 +43,11 @@ superseded_by:
   旧 body 的长度、编码、range 与 validator headers；解析失败或 CDN policy 抛错时
   返回 predecessor response，丢弃 clone 上的部分修改。
 - XHR 返回真实 native 实例，保留外部 subclass、私有字段、WeakMap identity 与
-  native brand；`send()` 先由 native 验证，`abort()`/`open()` 使旧 generation
-  失效，跨 realm thenable、异步 race、失败回退、callback 异常与实例复用均有
-  确定性回归覆盖。代理 body 只在真实 native `DONE` 后发布，不伪造 status、URL
-  或 headers。
+  native brand；`send()` 先由 native 验证，`abort()` 和成功的 `open()` 使旧
+  generation 失效，而同步失败的 `open()` 完整保留已有 replacement、pending
+  conversion 与被扣留的 `DONE`。跨 realm thenable、异步 race、失败回退、callback
+  异常与实例复用均有确定性回归覆盖。代理 body 只在真实 native `DONE` 后发布，
+  不伪造 status、URL 或 headers。
 - CDN Switcher 门禁从 canonical `.user.js` 与 `.meta.js` 获取 latest，强制固定
   version 和 SHA-256，并在真实浏览器 context 测试两种加载顺序。
 
@@ -52,6 +55,9 @@ superseded_by:
 
 - 自动模式不得从静态 candidate pool、catalog 或历史 host 构造媒体 URL，也不按
   locale、timezone、IP 地理位置或“英国常用 CDN”硬编码偏好。
+- Probe 准入按 candidate URL 判断、health 按 host 聚合；同 host 的未准入 duplicate
+  不污染可安全探测 URL 的 health。禁止自动跟随 30x，避免准入 host 二跳到未准入
+  地址。
 - MCDN/PCDN 只软降级，不删除；下游播放器继续拥有媒体请求 fallback。
 - 探测只影响之后取得的 playurl；当前播放的 stall recovery 明确延期。
 - 持久化记录只包含 host 级聚合、统一 cache version、时间、候选集合摘要和粗粒度

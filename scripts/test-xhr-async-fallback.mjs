@@ -59,6 +59,10 @@ await testListenerOnlyNativeFallback()
 await testNativeFallbackMetadata()
 await testCallbackThrowIsolation()
 await testReusedInstanceClearsReplacement()
+await testFailedOpenPreservesCompletedReplacement()
+await testFailedOpenPreservesPendingNativeFallback()
+await testSyntheticConverterDoesNotPrecommitValidOpen()
+await testFailedOuterOpenPreservesReentrantInnerCompletion()
 await testReusedInstanceIgnoresStaleAsyncResult()
 await testAbortInvalidatesAsyncResult()
 await testInvalidSendHasNoProxySideEffects()
@@ -313,6 +317,206 @@ async function testReusedInstanceClearsReplacement() {
     assert.equal(callbacks.length, 2)
     assert.equal(callbacks[1].response, 'second-native')
     assert.equal(callbacks[1].receiver, xhr)
+}
+
+async function testFailedOpenPreservesCompletedReplacement() {
+    const request = createDeferred()
+    let container
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformRequest(context) {
+            container = context.container
+            return request.promise
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const callbacks = []
+    xhr.open('GET', '/completed-before-invalid-open')
+    xhr.onreadystatechange = function (event) {
+        callbacks.push(snapshotCallback(this, event))
+    }
+    xhr.send()
+    NativeXMLHttpRequest.instances[0].complete(createNativeFixture())
+    request.resolve({ source: 'completed-proxy' })
+    await flushPromises()
+    assert.equal(callbacks.length, 1)
+    assert.deepEqual(xhr.response, { source: 'completed-proxy' })
+
+    let stateDuringMethodConversion
+    const invalidMethod = {
+        toString() {
+            xhr.dispatchEvent(new Event('readystatechange'))
+            stateDuringMethodConversion = {
+                readyState: xhr.readyState,
+                response: xhr.response,
+                responseText: xhr.responseText,
+            }
+            return 'INVALID METHOD'
+        },
+    }
+    assert.throws(
+        () => xhr.open(invalidMethod, '/must-not-reset-completed-request'),
+        error => error?.name === 'SyntaxError',
+    )
+    assert.deepEqual(stateDuringMethodConversion, {
+        readyState: 4,
+        response: { source: 'completed-proxy' },
+        responseText: '{"source":"completed-proxy"}',
+    })
+    assert.equal(callbacks.length, 1, 'failed open must not redispatch the completed request')
+    assert.equal(xhr.readyState, 4)
+    assert.deepEqual(xhr.response, { source: 'completed-proxy' })
+    assert.equal(xhr.responseText, '{"source":"completed-proxy"}')
+    assert.equal(container.__method, 'GET')
+    assert.equal(container.__url, '/completed-before-invalid-open')
+    assert.equal(container.__has_replacement, true)
+    assert.equal(container.__block_response, true)
+
+    NativeXMLHttpRequest.instances[0].dispatchReadyStateChangeOnNextOpen()
+    xhr.open('GET', '/successful-open-after-failure')
+    assert.equal(callbacks.length, 2)
+    assert.equal(callbacks[1].readyState, 1)
+    assert.equal(callbacks[1].response, null, 'successful open must clear overlays before its native event is observed')
+    assert.equal(container.__method, 'GET')
+    assert.equal(container.__url, '/successful-open-after-failure')
+    assert.equal('__has_replacement' in container, false)
+    assert.equal('__block_response' in container, false)
+}
+
+async function testFailedOpenPreservesPendingNativeFallback() {
+    const request = createDeferred()
+    let container
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformRequest(context) {
+            container = context.container
+            return request.promise
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const callbacks = []
+    xhr.open('GET', '/pending-before-invalid-open')
+    xhr.onreadystatechange = function (event) {
+        callbacks.push(snapshotCallback(this, event))
+    }
+    xhr.send()
+    NativeXMLHttpRequest.instances[0].complete(createNativeFixture({
+        response: 'held-native',
+        responseText: 'held-native',
+    }))
+    assert.equal(callbacks.length, 0, 'native DONE must remain held while proxy conversion is pending')
+
+    const invalidMethod = {
+        toString() {
+            xhr.dispatchEvent(new Event('readystatechange'))
+            return 'INVALID METHOD'
+        },
+    }
+    assert.throws(
+        () => xhr.open(invalidMethod, '/must-not-reset-pending-request'),
+        error => error?.name === 'SyntaxError',
+    )
+    assert.equal(callbacks.length, 0)
+    assert.equal(container.__method, 'GET')
+    assert.equal(container.__url, '/pending-before-invalid-open')
+    assert.equal(container.__block_response, true)
+
+    request.resolve({ source: 'pending-proxy' })
+    await flushPromises()
+    await flushPromises()
+    assert.equal(callbacks.length, 1, 'the original held DONE must be delivered exactly once')
+    assert.deepEqual(callbacks[0].response, { source: 'pending-proxy' })
+    assert.equal(callbacks[0].readyState, 4)
+}
+
+async function testSyntheticConverterDoesNotPrecommitValidOpen() {
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformRequest() {
+            return null
+        },
+        transformResponse({ url }) {
+            return url.endsWith('/old-native') ? { source: 'old-replacement' } : null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const callbacks = []
+    xhr.onreadystatechange = function (event) {
+        callbacks.push(snapshotCallback(this, event))
+    }
+    xhr.open('GET', '/old-request')
+    xhr.send()
+    NativeXMLHttpRequest.instances[0].complete(createNativeFixture({
+        responseURL: 'https://api.bilibili.com/old-native',
+    }))
+    assert.equal(callbacks.length, 1)
+    assert.deepEqual(callbacks[0].response, { source: 'old-replacement' })
+
+    const validMethod = {
+        toString() {
+            xhr.dispatchEvent(new Event('readystatechange'))
+            return 'GET'
+        },
+    }
+    xhr.open(validMethod, '/valid-after-synthetic-converter-event')
+    assert.equal(callbacks.length, 1, 'converter event must not publish or precommit the new request')
+    assert.equal(xhr.readyState, 1)
+    assert.equal(xhr.response, null)
+
+    xhr.send()
+    NativeXMLHttpRequest.instances[0].complete(createNativeFixture({
+        response: 'new-native',
+        responseText: 'new-native',
+        responseURL: 'https://api.bilibili.com/new-native',
+    }))
+    assert.equal(callbacks.length, 2, 'the valid request DONE must not be suppressed by old completion state')
+    assert.equal(callbacks[1].response, 'new-native')
+}
+
+async function testFailedOuterOpenPreservesReentrantInnerCompletion() {
+    const request = createDeferred()
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformRequest() {
+            return request.promise
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const callbacks = []
+    xhr.onreadystatechange = function (event) {
+        callbacks.push(snapshotCallback(this, event))
+    }
+    const invalidOuterMethod = {
+        toString() {
+            NativeXMLHttpRequest.instances[0].dispatchReadyStateChangeOnNextOpen()
+            xhr.open('GET', '/reentrant-inner')
+            xhr.send()
+            NativeXMLHttpRequest.instances[0].complete(createNativeFixture({
+                response: 'inner-native',
+                responseText: 'inner-native',
+            }))
+            return 'INVALID METHOD'
+        },
+    }
+
+    assert.throws(
+        () => xhr.open(invalidOuterMethod, '/invalid-outer'),
+        error => error?.name === 'SyntaxError',
+    )
+    assert.equal(callbacks.length, 1, 'inner OPENED should publish, while its DONE remains held')
+    assert.equal(callbacks[0].readyState, 1)
+
+    request.resolve({ source: 'inner-proxy' })
+    await flushPromises()
+    await flushPromises()
+    assert.equal(callbacks.length, 2, 'failed outer open must not consume the inner held DONE')
+    assert.deepEqual(callbacks[1].response, { source: 'inner-proxy' })
+    assert.equal(callbacks[1].readyState, 4)
 }
 
 async function testReusedInstanceIgnoresStaleAsyncResult() {
@@ -621,13 +825,21 @@ function createNativeXhrClass() {
         }
 
         open(method, url) {
+            const normalizedMethod = String(method)
+            if (normalizedMethod === 'INVALID METHOD') {
+                throw new DOMException('Invalid HTTP method', 'SyntaxError')
+            }
             const state = getState(this)
             Object.assign(state, createInitialNativeState(), {
-                method,
+                method: normalizedMethod,
                 url,
                 readyState: 1,
                 onreadystatechange: state.onreadystatechange,
             })
+            if (this.dispatchOnOpen) {
+                this.dispatchOnOpen = false
+                this.dispatchEvent(createNativeReadyStateChangeEvent())
+            }
         }
 
         send(body) {
@@ -655,7 +867,7 @@ function createNativeXhrClass() {
             state.responseURL = ''
             state.status = 0
             state.statusText = ''
-            this.dispatchEvent(new Event('readystatechange'))
+            this.dispatchEvent(createNativeReadyStateChangeEvent())
         }
 
         dispatchEvent(event) {
@@ -673,6 +885,10 @@ function createNativeXhrClass() {
             getState(this).completeOnSend = fixture
         }
 
+        dispatchReadyStateChangeOnNextOpen() {
+            this.dispatchOnOpen = true
+        }
+
         getAllResponseHeaders() {
             return serializeHeaders(getState(this).headers)
         }
@@ -686,7 +902,7 @@ function createNativeXhrClass() {
         complete(fixture) {
             const state = getState(this)
             Object.assign(state, fixture, { readyState: 4 })
-            this.dispatchEvent(new Event('readystatechange'))
+            this.dispatchEvent(createNativeReadyStateChangeEvent())
         }
     }
 
@@ -703,6 +919,12 @@ function createNativeXhrClass() {
     }
 
     return NativeXMLHttpRequest
+}
+
+function createNativeReadyStateChangeEvent() {
+    const event = new Event('readystatechange')
+    Object.defineProperty(event, 'isTrusted', { value: true })
+    return event
 }
 
 function createInitialNativeState() {

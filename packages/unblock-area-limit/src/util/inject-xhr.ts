@@ -129,10 +129,22 @@ export function injectXhr({ transformRequest, transformResponse }) {
 
         open(...args) {
             const state = requireState(this)
-            resetRequestState(state)
-            state.container.__method = args[0]
-            state.container.__url = args[1]
-            const result = nativeOpen.apply(this, args)
+            // WebIDL argument conversion can run page code before native open
+            // validates the call. Keep a stack for reentrant conversion hooks,
+            // and only commit the new request after native success is known.
+            const transaction = {
+                args,
+                committed: false,
+            }
+            state.openTransactions.push(transaction)
+            let result
+            try {
+                result = nativeOpen.apply(this, args)
+            } catch (error) {
+                removeOpenTransaction(state, transaction)
+                throw error
+            }
+            commitOpenTransaction(state, transaction)
             if (!state.usesNativeEventTarget) {
                 setNativeReadyStateChange(this, state.nativeReadyStateChange)
             }
@@ -235,6 +247,7 @@ export function injectXhr({ transformRequest, transformResponse }) {
             hasNativeFallback: false,
             nativeFallbackEvent: undefined,
             nativeCompletionDelivered: false,
+            openTransactions: [],
             originalPrototype: Object.getPrototypeOf(instance),
             nativeReadyStateChange: undefined,
             nativeValues: pendingNativeValues.get(instance) ?? {},
@@ -338,6 +351,22 @@ export function injectXhr({ transformRequest, transformResponse }) {
         }
     }
 
+    function commitOpenTransaction(state, transaction) {
+        if (transaction.committed) return
+        transaction.committed = true
+        removeOpenTransaction(state, transaction)
+        resetRequestState(state)
+        state.container.__method = transaction.args[0]
+        state.container.__url = transaction.args[1]
+    }
+
+    function removeOpenTransaction(state, transaction) {
+        const index = state.openTransactions.lastIndexOf(transaction)
+        if (index >= 0) {
+            state.openTransactions.splice(index, 1)
+        }
+    }
+
     function setContainerResponse(container, response: any) {
         container.__has_replacement = true
         container.response = response
@@ -376,6 +405,16 @@ export function injectXhr({ transformRequest, transformResponse }) {
 
     function handleNativeReadyStateChange(instance, state, event) {
         if (state.syntheticDelivery || state.aborting) return
+        const openTransaction = state.openTransactions[state.openTransactions.length - 1]
+        if (
+            openTransaction
+            && event?.isTrusted === true
+            && readNativeProperty(instance, 'readyState') === 1
+        ) {
+            // Only a trusted native OPENED event proves that this transaction
+            // passed validation. Converter-dispatched or old-request events do not.
+            commitOpenTransaction(state, openTransaction)
+        }
         if (readNativeProperty(instance, 'readyState') === 4) {
             if (state.nativeCompletionDelivered) {
                 suppressNativeEvent(event)

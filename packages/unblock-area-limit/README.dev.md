@@ -36,6 +36,10 @@ key为`'balh_server'`，可选的`value`为：
 
 `balh_cdn_mode` 未设置或值无效时会解析为 `'safe'`；仅当检测到旧版 `balh_upos_server` 配置时迁移为 `'manual'`。迁移结果会写回 `balh_cdn_mode` cookie。
 
+`auto` 的主动探测以候选实际 URL 为准，只准入 `bilivideo.com`、`bilivideo.cn`、
+`bilivideo.net` 的 label-bound 域及精确 Bilibili Akamai 主机；不信任旁路 host
+metadata，也不跟随重定向。未准入候选仍保留给播放器回退，但不读写 host health。
+
 主动测试当前视频 CDN：
 
 ```javascript

@@ -56,7 +56,7 @@ interface StorageLike {
 interface RuntimeCandidate {
     url: string
     host: string
-    persistable: boolean
+    probeAllowed: boolean
 }
 
 interface ProbeOutcome {
@@ -176,13 +176,34 @@ function normalizeHost(value: unknown) {
     return host
 }
 
-function parseRuntimeCandidate(url: unknown, fallbackHost?: unknown): RuntimeCandidate | undefined {
+const TRUSTED_BILIBILI_MEDIA_DOMAINS = [
+    'bilivideo.com',
+    'bilivideo.cn',
+    'bilivideo.net',
+] as const
+
+const TRUSTED_BILIBILI_MEDIA_HOSTS = new Set([
+    'upos-hz-mirrorakam.akamaized.net',
+])
+
+function isTrustedBilibiliMediaHostname(hostname: string) {
+    const canonical = hostname.toLowerCase().replace(/\.$/, '')
+    if (TRUSTED_BILIBILI_MEDIA_HOSTS.has(canonical)) return true
+    return TRUSTED_BILIBILI_MEDIA_DOMAINS.some(domain => (
+        canonical === domain || canonical.endsWith(`.${domain}`)
+    ))
+}
+
+function parseRuntimeCandidate(url: unknown): RuntimeCandidate | undefined {
     if (typeof url !== 'string' || !url) return undefined
     try {
         const parsed = new URL(url, 'https://www.bilibili.com/')
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined
-        const host = normalizeHost(fallbackHost) ?? normalizeHost(parsed.host)
-        return host ? { url, host, persistable: !isIpLiteralHost(host) } : undefined
+        const host = normalizeHost(parsed.host)
+        if (!host) return undefined
+        const probeAllowed = !parsed.username && !parsed.password
+            && isTrustedBilibiliMediaHostname(parsed.hostname)
+        return { url, host, probeAllowed }
     } catch {
         return undefined
     }
@@ -194,9 +215,8 @@ function extractCandidates(groups: readonly CdnCandidateGroup[]) {
     for (const group of groups) {
         for (const candidate of group.candidates) {
             if (seenUrls.has(candidate.url)) continue
-            const parsed = parseRuntimeCandidate(candidate.url, candidate.host || candidate.hostname)
+            const parsed = parseRuntimeCandidate(candidate.url)
             if (!parsed) continue
-            parsed.persistable = !candidate.riskKinds.includes('ip-literal') && parsed.persistable
             seenUrls.add(parsed.url)
             result.push(parsed)
         }
@@ -204,17 +224,19 @@ function extractCandidates(groups: readonly CdnCandidateGroup[]) {
     return result
 }
 
-function isIpLiteralHost(host: string) {
-    try {
-        const hostname = new URL(`https://${host}`).hostname
-        return /^\[.*\]$/.test(hostname) || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)
-    } catch {
-        return true
-    }
-}
-
 function uniqueSorted(values: readonly string[]) {
     return [...new Set(values)].sort()
+}
+
+function probeAllowedHosts(candidates: readonly RuntimeCandidate[]) {
+    return new Set(candidates.filter(candidate => candidate.probeAllowed).map(candidate => candidate.host))
+}
+
+function policyBlockedHosts(candidates: readonly RuntimeCandidate[]) {
+    const allowedHosts = probeAllowedHosts(candidates)
+    return uniqueSorted(candidates
+        .filter(candidate => !candidate.probeAllowed && !allowedHosts.has(candidate.host))
+        .map(candidate => candidate.host))
 }
 
 function hashCandidateHosts(hosts: readonly string[]) {
@@ -472,10 +494,10 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             || cache.candidateHostHash !== candidateHostHash
             || !cache.hosts || typeof cache.hosts !== 'object') return undefined
         const hosts: Record<string, HostHealth> = Object.create(null)
-        const allowedHosts = new Set(currentCandidates.map(candidate => candidate.host))
+        const allowedHosts = probeAllowedHosts(currentCandidates)
         for (const [rawHost, rawHealth] of Object.entries(cache.hosts)) {
             const host = normalizeHost(rawHost)
-            if (!host || isIpLiteralHost(host) || !allowedHosts.has(host)) continue
+            if (!host || !allowedHosts.has(host)) continue
             const health = normalizeHealth(rawHealth, host)
             if (health) hosts[host] = health
         }
@@ -487,10 +509,8 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         const storage = dependencies.storage
         if (!storage || !Object.keys(healthByHost).length || !currentCandidates.length) return
         const hosts: Record<string, HostHealth> = Object.create(null)
-        const persistableHosts = new Set(
-            currentCandidates.filter(candidate => candidate.persistable).map(candidate => candidate.host),
-        )
-        for (const host of uniqueSorted([...persistableHosts])) {
+        const allowedHosts = probeAllowedHosts(currentCandidates)
+        for (const host of uniqueSorted([...allowedHosts])) {
             const health = normalizeHealth(healthByHost[host], host)
             if (health) hosts[host] = health
         }
@@ -598,8 +618,9 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         currentCandidates = next
         currentHostHash = hashCandidateHosts(next.map(candidate => candidate.host))
         ensureHealthForCurrentHosts()
-        for (const candidate of next) {
-            if (!candidate.persistable) delete healthByHost[candidate.host]
+        const allowedHosts = probeAllowedHosts(next)
+        for (const host of uniqueSorted(next.map(candidate => candidate.host))) {
+            if (!allowedHosts.has(host)) delete healthByHost[host]
         }
         const hasValidHealth = healthHostHash === currentHostHash
             && dependencies.now() < healthValidUntil
@@ -675,6 +696,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         // Keep the candidate set to two hosts, then sample each host once per stage.
         const limit = limits.maxConcurrent
         for (const candidate of currentCandidates) {
+            if (!candidate.probeAllowed) continue
             if (seenHosts.has(candidate.host)) continue
             seenHosts.add(candidate.host)
             targets.push(candidate)
@@ -685,7 +707,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
 
     async function probeCandidate(candidate: RuntimeCandidate, byteCap: number, timeoutMs: number): Promise<ProbeOutcome> {
         const fetchImpl = dependencies.fetch
-        if (!fetchImpl || byteCap <= 0) {
+        if (!candidate.probeAllowed || !fetchImpl || byteCap <= 0) {
             return { host: candidate.host, kind: 'unprobeable', bytes: 0, observedBytes: 0 }
         }
         const controller = dependencies.createAbortController()
@@ -769,6 +791,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                     mode: 'cors',
                     credentials: 'omit',
                     cache: 'no-store',
+                    redirect: 'error',
                     signal: controller.signal,
                 })
                 responseBody = response.body
@@ -876,7 +899,10 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     function statusFromOutcomes(outcomes: readonly ProbeOutcome[], total: number): CdnProbeStatus {
         const healthyHosts = uniqueSorted(outcomes.filter(outcome => outcome.kind === 'success').map(outcome => outcome.host))
         const failedHosts = uniqueSorted(outcomes.filter(outcome => outcome.kind === 'failure').map(outcome => outcome.host))
-        const unprobeableHosts = uniqueSorted(outcomes.filter(outcome => outcome.kind === 'unprobeable').map(outcome => outcome.host))
+        const unprobeableHosts = uniqueSorted([
+            ...outcomes.filter(outcome => outcome.kind === 'unprobeable').map(outcome => outcome.host),
+            ...policyBlockedHosts(currentCandidates),
+        ])
         let state: CdnProbeState
         let message: string
         if (healthyHosts.length && outcomes.length === total && !failedHosts.length && !unprobeableHosts.length) {
@@ -911,8 +937,23 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         const runNetworkHint = currentNetworkHint()
         const stageTargets = selectProbeTargets()
         if (!stageTargets.length) {
-            const next = emptyStatus('No CDN candidates are available for probing.')
+            const candidateHosts = uniqueSorted(currentCandidates.map(candidate => candidate.host))
+            const next: CdnProbeStatus = candidateHosts.length
+                ? {
+                    state: 'unprobeable',
+                    message: 'No current CDN candidates are eligible for active probing.',
+                    candidateHosts,
+                    probedHosts: [],
+                    healthyHosts: [],
+                    failedHosts: [],
+                    unprobeableHosts: candidateHosts,
+                    completed: 0,
+                    total: 0,
+                    updatedAt: dependencies.now(),
+                }
+                : emptyStatus('No CDN candidates are available for probing.')
             publish(next)
+            if (next.state === 'unprobeable') rememberUnprobeable(next, runGeneration)
             return cloneStatus(next)
         }
         const candidateHosts = uniqueSorted(currentCandidates.map(candidate => candidate.host))
@@ -924,7 +965,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             probedHosts: [],
             healthyHosts: [],
             failedHosts: [],
-            unprobeableHosts: [],
+            unprobeableHosts: policyBlockedHosts(currentCandidates),
             completed: 0,
             total: stageTargets.length * limits.maxStages,
             updatedAt: dependencies.now(),

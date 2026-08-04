@@ -68,8 +68,10 @@ compatibility。新增播放入口时，优先扩展 envelope/adapter 和现有�
    混用 URL。
 4. 某个候选无法解析、探测或请求时，不得因此删除原始候选。
 
-这条边界既保护签名正确性，也限制探测外发范围：自动模式只会联系 Bilibili
-已经为当前媒体对象授权并返回的 host。
+这条边界既保护签名正确性，也限制候选来源。主动探测还有更窄的网络准入边界：
+自动模式只会联系当前媒体对象中由 Bilibili 返回、且实际 URL hostname 命中下文
+受信任媒体域名规则的候选；未知或高风险地址仍保留为播放器和排序回退，但不会由
+BALH 主动发起请求。
 
 ### 按 representation 和 segment 分组
 
@@ -239,6 +241,9 @@ Akamai、`mirrorov` 与 `bcache` 本身都不是 MCDN/PCDN 风险信号。旧版
   bytes（进入测量与计分的响应前缀字节数）。
 - 视频、episode、质量或候选集合变化时，取消不再相关的工作。
 - 页面隐藏、网络离线或浏览器不支持可读流时，可以推迟或跳过探测。
+- 只有实际 URL（不能依赖候选旁路 metadata）的 hostname 命中受信任公开 Bilibili
+  媒体域名准入规则时才能主动探测。IPv4/IPv6 literal、`localhost`、私网/链路本地
+  风格地址与未知域名不进入探测 target；它们仍保留在原始候选和安全排序回退中。
 - 同一 host 的并发探测应合并；完成、取消与超时都必须释放 reader、timer 和
   `AbortController`。
 
@@ -270,18 +275,27 @@ const init: RequestInit = {
   mode: "cors",
   cache: "no-store",
   credentials: "omit",
+  redirect: "error",
   signal: controller.signal,
 }
 ```
 
-1. 使用候选组中已经存在的完整签名 URL。
-2. 默认不发送 `Range`。自定义 `Range` 可能触发 CORS preflight，而且不同 CDN
+1. 使用候选组中已经存在的完整签名 URL，并根据该 URL 自身经 WHATWG URL parser
+   解析出的 hostname 做准入；不得信任另一个 `host` / `hostname` metadata 字段。
+2. 当前主动探测准入范围是 `bilivideo.com`、`bilivideo.cn`、`bilivideo.net` 的
+   apex 或 label-bound 子域，以及精确主机
+   `upos-hz-mirrorakam.akamaized.net`。匹配时只为域名判断移除末尾 DNS root dot；
+   不使用子字符串或宽泛 `akamaized.net` 后缀匹配，也不准入携带 URL userinfo 的
+   候选。这个规则把 DNS 控制视为 Bilibili 信任边界；浏览器代码无法在请求前可靠
+   验证最终解析 IP。
+3. 禁止自动跟随重定向，避免初始准入 host 把探测转到未准入目标。
+4. 默认不发送 `Range`。自定义 `Range` 可能触发 CORS preflight，而且不同 CDN
    支持不一致；未来只有在独立能力检测和测试证明安全后才能作为显式扩展。
-3. 读取 `ReadableStream` 的有限前缀，达到字节上限后调用 `reader.cancel()`，并在
+5. 读取 `ReadableStream` 的有限前缀，达到字节上限后调用 `reader.cancel()`，并在
    必要时中止请求。
-4. 记录有限的 TTFB、读取字节、耗时与吞吐量；不保留响应正文。
-5. `no-cors` 不可作为回退，因为 opaque response 无法区分正常内容与快速 403。
-6. CORS 拒绝、缺少可读 body 或浏览器无法进一步区分的 Fetch/readability 错误，
+6. 记录有限的 TTFB、读取字节、耗时与吞吐量；不保留响应正文。
+7. `no-cors` 不可作为回退，因为 opaque response 无法区分正常内容与快速 403。
+8. CORS 拒绝、缺少可读 body 或浏览器无法进一步区分的 Fetch/readability 错误，
    保守标记为 `unprobeable` 并保留候选；不要把它缓存成永久失败。
 
 前缀上限严格约束进入测量、缓存和计分的字节；它不是 JavaScript 实际收到字节或
@@ -291,8 +305,9 @@ const init: RequestInit = {
 候选数、timeout、reader cancel 与 abort 共同提供 best-effort transport bound
 （尽力限制链路传输），文档和 UI 不得把它描述为精确流量上限。
 
-探测会把当前签名 URL 发送给该 URL 自身的 host，这是选择功能不可避免的最小
-外发面。实现不得把 URL 再发送到分析、代理测速或遥测服务。
+探测会把当前已准入签名 URL 发送给该 URL 自身的 host，这是选择功能不可避免的
+最小外发面。未准入 URL 不发请求，也不能通过重定向进入第二个 host。实现不得把
+URL 再发送到分析、代理测速或遥测服务。
 
 ### 排名
 
@@ -320,10 +335,11 @@ outcome，也不能降低 host 信誉；`unprobeable` 不能等同已确认失�
 
 ## Host-only 缓存与隐私边界
 
-可持久化缓存以 `URL.host.toLowerCase()` 为唯一媒体路由键。这里 `host` 是
-hostname 加显式非默认 port；浏览器会省略默认 port。这样仍然不包含 scheme、
-path 或 query，同时避免把同 hostname 的不同服务 port 合并。缓存值只能包含
-选择所需的 host 级聚合，例如：
+可持久化缓存以已准入候选的 `URL.host.toLowerCase()` 为唯一媒体路由键。这里
+`host` 是 hostname 加显式非默认 port；浏览器会省略默认 port。域名准入时的末尾
+root dot 规范化不改写这个键，显式 port 也不会被丢弃，因此不同 authority 不会
+合并。这样仍然不包含 scheme、path 或 query。缓存值只能包含选择所需的 host 级
+聚合，例如：
 
 ```ts
 type HostProbeCacheEntry = {
@@ -348,7 +364,12 @@ type HostProbeCacheEntry = {
 
 - 不持久化完整 URL、path、query、签名、CID、BVID、episode ID、账号标识、
   cookie、IP、locale 或 timezone。
-- IP-literal candidate 的结果只留在当前媒体上下文内存中，不写 host cache。
+- IP-literal、localhost、私网/链路本地风格与其他未准入 candidate 不主动探测，
+  不读写 host health；旧 cache envelope 中相应 entry 也按 miss 忽略。
+- 准入按 candidate URL 判断、health 按 host 聚合：同一 `URL.host` 同时有准入和
+  未准入 URL 时，只选择准入 URL 探测并保留该 host 的 health；未准入 duplicate
+  不把整个 host 标成 `unprobeable`。只有该 host 不再有任何准入候选时才忽略其
+  health。
 - 不以视频或用户为缓存 key，也不把缓存同步到远程服务。
 - signed URL 只在当前页面的短生命周期内存中存在；媒体上下文变化时清除。
 - 诊断、日志与导出只允许 host、时间、测量摘要和分类原因。
@@ -533,6 +554,8 @@ tag 内的 BALH 源码与兼容记录。
 | 分类器异常 | 将候选视为 `unknown`，不删除 |
 | 缓存缺失、损坏或过期 | cache miss；使用当前模式的无缓存排序 |
 | CORS 阻止探测 | `unprobeable`；候选保留 |
+| IP literal、localhost、私网/链路本地风格或未知 host | 不发主动请求、不使用 health cache；候选保留为原始播放/排序回退 |
+| 准入 host 返回 redirect | Fetch 以 `redirect: "error"` 拒绝跟随；按不可测失败路径保留候选 |
 | 探测超时或明确的 HTTP/network failure | 记录有限失败样本；候选保留且失败/无分数项维持稳定顺序 |
 | 所有普通候选不可用 | MCDN/PCDN 仍保留在末尾供下游播放器 fallback |
 | 所有探测结果不可用 | `safe`，最终可回到 `original` |
@@ -575,13 +598,16 @@ tag 内的 BALH 源码与兼容记录。
 - 新模式键优先、legacy UPOS 迁移、默认 `safe` 与 UI 保留/启用规则。
 - host-only cache schema、显式 port 隔离、TTL、统一 cache version、health 聚合与
   隐私字段拒绝。
+- 主动探测 hostname 准入：普通 `bilivideo`、精确 Bilibili Akamai、显式 port、
+  IPv4/IPv6 literal、localhost、私网/链路本地与 URL/域名混淆形式。
 
 ### Browser/runtime tests
 
 - 有界前缀读取达到上限后 cancel；timeout 或媒体/网络 generation 失效后无遗留任务。
 - 验证 scored-prefix bytes 上限，并明确默认 reader 可能多交付一个 chunk；不对
   JavaScript 实收或底层 transport bytes 作错误断言。
-- 请求包含 `credentials: "omit"`、`cache: "no-store"`，默认没有 `Range`。
+- 请求包含 `credentials: "omit"`、`cache: "no-store"`、`redirect: "error"`，默认
+  没有 `Range`。
 - 浏览器无法证明响应可读的 Fetch/policy error 产生 `unprobeable` 而不是永久失败。
 - 探测不阻塞 playurl 返回，并且不会消费播放器自己的 response body。
 - Vue、Fetch、XHR 各自覆盖 source success、proxy success、解析失败和 fail-open。

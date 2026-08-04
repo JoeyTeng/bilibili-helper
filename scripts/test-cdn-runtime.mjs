@@ -144,7 +144,7 @@ async function flushMicrotasks(rounds = 5) {
     for (let index = 0; index < rounds; index += 1) await Promise.resolve()
 }
 
-const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&token=do-not-persist'
+const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadline=999&token=do-not-persist'
 
 {
     const protocolRelative = {
@@ -255,19 +255,20 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     assert.equal(requests[0].init.mode, 'cors')
     assert.equal(requests[0].init.credentials, 'omit')
     assert.equal(requests[0].init.cache, 'no-store')
+    assert.equal(requests[0].init.redirect, 'error')
     assert.equal('headers' in requests[0].init, false)
     assert.ok(requests[0].init.signal instanceof AbortSignal)
     assert.equal(streamTracker.reads, 1)
     assert.equal(streamTracker.cancels, 1)
     assert.equal(streamTracker.releases, 1)
     assert.deepEqual([...clearedTimers].sort(), [1, 2])
-    assert.deepEqual(result.candidateHosts, ['cdn-a.example:8443'])
+    assert.deepEqual(result.candidateHosts, ['cdn-a.test.bilivideo.com:8443'])
 
     const cacheText = storage.getItem(CDN_HEALTH_CACHE_KEY)
     assert.ok(cacheText)
     assert.doesNotMatch(cacheText, /deadline|token|segment\.m4s/)
     const cache = JSON.parse(cacheText)
-    assert.deepEqual(Object.keys(cache.hosts), ['cdn-a.example:8443'])
+    assert.deepEqual(Object.keys(cache.hosts), ['cdn-a.test.bilivideo.com:8443'])
     assert.equal(cache.version, 1)
     assert.equal(cache.networkHint, 'wifi:test')
     assert.equal(typeof cache.candidateHostHash, 'string')
@@ -276,7 +277,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
 
     const publicStatus = runtime.getCdnProbeStatus()
     publicStatus.candidateHosts.push('mutated.example')
-    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, ['cdn-a.example:8443'])
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, ['cdn-a.test.bilivideo.com:8443'])
     const eventCount = subscribed.length
     unsubscribe()
     runtime.clearCdnHealthCache()
@@ -306,7 +307,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     assert.equal(fetches, 1)
     assert.equal(result.state, 'unprobeable')
     assert.deepEqual(result.failedHosts, [])
-    assert.deepEqual(result.unprobeableHosts, ['cdn-a.example:8443'])
+    assert.deepEqual(result.unprobeableHosts, ['cdn-a.test.bilivideo.com:8443'])
     assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
     assert.doesNotMatch(JSON.stringify(logs), /deadline|token|segment\.m4s/)
     assert.deepEqual(await runtime.probeCurrentPlayUrlCdn(), result)
@@ -697,7 +698,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     assert.equal(result.state, 'partial')
     assert.equal(requestIndex, 2)
     assert.equal(secondStageReads, 1)
-    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.example:8443']
+    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.test.bilivideo.com:8443']
     assert.equal(health.samples, 2)
     assert.equal(health.failures, 1)
     assert.equal(health.successes, 1)
@@ -724,17 +725,17 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
     assert.equal(result.state, 'partial')
     assert.equal(fetches, 1)
-    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.example:8443']
+    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.test.bilivideo.com:8443']
     assert.equal(health.samples, 1)
     assert.equal(health.throughputKbps, 32)
 }
 
 {
     const urls = [
-        'https://one.example/a?sig=1',
-        'https://two.example/a?sig=2',
-        'https://three.example/a?sig=3',
-        'https://four.example/a?sig=4',
+        'https://one.test.bilivideo.com/a?sig=1',
+        'https://two.test.bilivideo.com/a?sig=2',
+        'https://three.test.bilivideo.com/a?sig=3',
+        'https://four.test.bilivideo.com/a?sig=4',
     ]
     const storage = new MemoryStorage()
     const pendingFetches = []
@@ -770,14 +771,14 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     assert.equal(maxActive, 2)
     assert.equal(result.total, 4)
     const cache = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY))
-    assert.equal(cache.hosts['one.example'].samples, 2)
-    assert.equal(cache.hosts['two.example'].samples, 2)
-    assert.equal(cache.hosts['three.example'], undefined)
+    assert.equal(cache.hosts['one.test.bilivideo.com'].samples, 2)
+    assert.equal(cache.hosts['two.test.bilivideo.com'].samples, 2)
+    assert.equal(cache.hosts['three.test.bilivideo.com'], undefined)
 }
 
 {
     const now = 1_000_000
-    const url = 'https://cache.example/media.m4s?secret=signed'
+    const url = 'https://cache.test.bilivideo.com/media.m4s?secret=signed'
     const storage = new MemoryStorage()
     let seedFetches = 0
     const seedRuntime = makeRuntime({
@@ -812,7 +813,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         scheduleBackground() { },
     })
     freshRuntime.applyCdnPolicy({ urls: [url] })
-    assert.equal(cachedOptions.hostHealth['cache.example'].samples, 2)
+    assert.equal(cachedOptions.hostHealth['cache.test.bilivideo.com'].samples, 2)
     const cachedStatus = await freshRuntime.probeCurrentPlayUrlCdn()
     assert.equal(cachedStatus.source, 'cache')
     assert.equal(cachedFetches, 0)
@@ -859,7 +860,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         },
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
-    candidateMismatchRuntime.applyCdnPolicy({ urls: ['https://different.example/media.m4s?secret=other'] })
+    candidateMismatchRuntime.applyCdnPolicy({ urls: ['https://different.test.bilivideo.com/media.m4s?secret=other'] })
     await candidateMismatchRuntime.probeCurrentPlayUrlCdn()
     assert.equal(candidateMismatchFetches, 1)
 
@@ -889,14 +890,14 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     const failedCacheStatus = await failedCacheRuntime.probeCurrentPlayUrlCdn()
     assert.equal(failedCacheStatus.state, 'failed')
     assert.equal(failedCacheStatus.source, 'cache')
-    assert.deepEqual(failedCacheStatus.failedHosts, ['cache.example'])
+    assert.deepEqual(failedCacheStatus.failedHosts, ['cache.test.bilivideo.com'])
     assert.equal(failedCacheFetches, 0)
 }
 
 {
     const now = 1_500_000
-    const url = 'https://network.example/media.m4s?sig=network'
-    const host = 'network.example'
+    const url = 'https://network.test.bilivideo.com/media.m4s?sig=network'
+    const host = 'network.test.bilivideo.com'
     let networkHint = 'wifi:test'
     const cacheFor = (hint, health) => JSON.stringify({
         version: 1,
@@ -931,8 +932,8 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
 
 {
     const now = 1_600_000
-    const oldUrl = 'https://old-context.example/media.m4s?sig=old'
-    const newUrl = 'https://new-context.example/media.m4s?sig=new'
+    const oldUrl = 'https://old-context.test.bilivideo.com/media.m4s?sig=old'
+    const newUrl = 'https://new-context.test.bilivideo.com/media.m4s?sig=new'
     let resolveOldFetch
     let oldSignal
     let lateCancels = 0
@@ -954,10 +955,10 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         version: 1,
         savedAt: now,
         networkHint: 'wifi:test',
-        candidateHostHash: candidateHostHash(['new-context.example']),
+        candidateHostHash: candidateHostHash(['new-context.test.bilivideo.com']),
         hosts: {
-            'new-context.example': {
-                host: 'new-context.example',
+            'new-context.test.bilivideo.com': {
+                host: 'new-context.test.bilivideo.com',
                 successes: 2,
                 failures: 0,
                 samples: 2,
@@ -969,7 +970,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     const newStatus = runtime.getCdnProbeStatus()
     assert.equal(newStatus.state, 'ready')
     assert.equal(newStatus.source, 'cache')
-    assert.deepEqual(newStatus.candidateHosts, ['new-context.example'])
+    assert.deepEqual(newStatus.candidateHosts, ['new-context.test.bilivideo.com'])
     assert.deepEqual(await runtime.probeCurrentPlayUrlCdn(), newStatus)
     await oldProbe
     assert.deepEqual(runtime.getCdnProbeStatus(), newStatus)
@@ -990,7 +991,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
 }
 
 {
-    const url = 'https://midflight-network.example/media.m4s?sig=old-network'
+    const url = 'https://midflight-network.test.bilivideo.com/media.m4s?sig=old-network'
     let networkHint = 'wifi:test'
     let resolveFetch
     const storage = new MemoryStorage()
@@ -1066,26 +1067,120 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     })
     runtime.applyCdnPolicy({ urls: [ipUrl] })
     const result = await runtime.probeCurrentPlayUrlCdn()
-    assert.equal(ipFetches, 1)
+    assert.equal(result.state, 'unprobeable')
+    assert.equal(ipFetches, 0)
     assert.deepEqual(result.candidateHosts, [ipHost])
+    assert.deepEqual(result.probedHosts, [])
+    assert.deepEqual(result.unprobeableHosts, [ipHost])
     assert.equal(storage.setCalls, 0)
 }
 
 {
-    let ipFetches = 0
-    const ipRuntime = makeRuntime({
+    const blockedUrls = [
+        'https://127.0.0.1:9443/media.m4s?sig=ipv4-loopback',
+        'https://10.0.0.1/media.m4s?sig=ipv4-private',
+        'https://172.16.0.1/media.m4s?sig=ipv4-private',
+        'https://169.254.169.254/latest/meta-data',
+        'https://192.168.1.1/media.m4s?sig=ipv4-private',
+        'https://8.8.8.8/media.m4s?sig=public-ip-literal',
+        'https://127.1/media.m4s?sig=short-ipv4',
+        'https://2130706433/media.m4s?sig=decimal-ipv4',
+        'https://0x7f000001/media.m4s?sig=hex-ipv4',
+        'https://0177.0.0.1/media.m4s?sig=octal-ipv4',
+        'https://[::1]/media.m4s?sig=ipv6-loopback',
+        'https://[fe80::1]/media.m4s?sig=ipv6-link-local',
+        'https://[fc00::1]/media.m4s?sig=ipv6-private',
+        'https://[2001:4860:4860::8888]/media.m4s?sig=public-ipv6-literal',
+        'https://[::ffff:127.0.0.1]/media.m4s?sig=mapped-ipv4',
+        'https://localhost/media.m4s?sig=localhost',
+        'https://localhost.:9443/media.m4s?sig=localhost-dot',
+        'https://media.localhost/media.m4s?sig=localhost-subdomain',
+        'https://router.local/media.m4s?sig=local-network',
+        'https://metadata.google.internal/computeMetadata/v1/',
+        'https://edge-pcdn-1.biliapi.net/media.m4s?sig=biliapi-pcdn',
+        'https://edge.szbdyd.com/media.m4s?sig=known-pcdn',
+        'https://other.akamaized.net/media.m4s?sig=non-bilibili-akamai',
+        'https://upos-sz-mirrorcos.bilivideo.com.evil.invalid/media.m4s?sig=suffix-confusion',
+        'https://upos-hz-mirrorakam.akamaized.net.evil.invalid/media.m4s?sig=akamai-suffix-confusion',
+        'https://upos-sz-mirrorcos.bilivideo.com@127.0.0.1/media.m4s?sig=userinfo-confusion',
+        'https://user@upos-sz-mirrorcos.bilivideo.com/media.m4s?sig=userinfo',
+        'https://cdn.example/media.m4s?sig=unknown-public-host',
+    ]
+    const originalPlayUrl = { urls: blockedUrls.slice() }
+    let blockedFetches = 0
+    const blockedRuntime = makeRuntime({
         fetch: async () => {
-            ipFetches += 1
+            blockedFetches += 1
+            return streamResponse([new Uint8Array(1)])
+        },
+        limits: { maxConcurrent: 2, maxStages: 1 },
+    })
+    assert.strictEqual(blockedRuntime.applyCdnPolicy(originalPlayUrl), originalPlayUrl)
+    assert.deepEqual(originalPlayUrl.urls, blockedUrls)
+    const blockedResult = await blockedRuntime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(blockedResult.state, 'unprobeable')
+    assert.equal(blockedFetches, 0)
+    assert.deepEqual(blockedResult.probedHosts, [])
+    assert.ok(blockedResult.candidateHosts.includes('127.0.0.1:9443'))
+    assert.ok(blockedResult.candidateHosts.includes('[::1]'))
+    assert.ok(blockedResult.candidateHosts.includes('localhost'))
+    assert.ok(blockedResult.candidateHosts.includes('upos-sz-mirrorcos.bilivideo.com'))
+    assert.deepEqual(blockedResult.unprobeableHosts, blockedResult.candidateHosts)
+
+    let spoofedMetadataFetches = 0
+    const spoofedMetadataRuntime = makeRuntime({
+        collectGroups: () => [{
+            key: 'spoofed',
+            kind: 'dash-video',
+            candidates: [{
+                url: 'https://127.0.0.1/private.m4s?sig=spoofed-host',
+                host: 'upos-sz-mirrorcos.bilivideo.com',
+                hostname: 'upos-sz-mirrorcos.bilivideo.com',
+                riskKinds: [],
+            }],
+        }],
+        fetch: async () => {
+            spoofedMetadataFetches += 1
             return streamResponse([new Uint8Array(1)])
         },
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
-    ipRuntime.applyCdnPolicy({ urls: ['https://127.0.0.1:9443/first.m4s?sig=first'] })
-    assert.equal((await ipRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
-    ipRuntime.applyCdnPolicy({ urls: ['https://127.0.0.1:9443/second.m4s?sig=second'] })
-    assert.equal(ipRuntime.getCdnProbeStatus().state, 'idle')
-    assert.equal((await ipRuntime.probeCurrentPlayUrlCdn()).state, 'ready')
-    assert.equal(ipFetches, 2)
+    spoofedMetadataRuntime.applyCdnPolicy({})
+    const spoofedMetadataResult = await spoofedMetadataRuntime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(spoofedMetadataResult.state, 'unprobeable')
+    assert.equal(spoofedMetadataFetches, 0)
+    assert.deepEqual(spoofedMetadataResult.candidateHosts, ['127.0.0.1'])
+}
+
+{
+    const trustedUrls = [
+        'https://upos-sz-mirrorcos.bilivideo.com:8443/media.m4s?sig=bilivideo-com',
+        'https://cn-hk-eq-bcache-01.bilivideo.com/media.m4s?sig=bcache',
+        'http://edge.mcdn.bilivideo.cn/media.m4s?sig=bilivideo-cn',
+        'https://edge.mcdn.bilivideo.net/media.m4s?sig=bilivideo-net',
+        'https://upos-hz-mirrorakam.akamaized.net/media.m4s?sig=akamai',
+        'https://upos-sz-mirrorcos.bilivideo.com./media.m4s?sig=absolute-dns-name',
+    ]
+    for (const url of trustedUrls) {
+        const storage = new MemoryStorage()
+        const requests = []
+        const trustedRuntime = makeRuntime({
+            storage,
+            fetch: async (requestUrl, init) => {
+                requests.push({ requestUrl, init })
+                return streamResponse([new Uint8Array(1)])
+            },
+            limits: { maxConcurrent: 1, maxStages: 1 },
+        })
+        trustedRuntime.applyCdnPolicy({ urls: [url] })
+        const result = await trustedRuntime.probeCurrentPlayUrlCdn({ force: true })
+        const host = new URL(url).host.toLowerCase()
+        assert.equal(result.state, 'ready', url)
+        assert.deepEqual(requests.map(request => request.requestUrl), [url], url)
+        assert.equal(requests[0].init.redirect, 'error', url)
+        assert.deepEqual(result.candidateHosts, [host], url)
+        assert.deepEqual(Object.keys(JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts), [host], url)
+    }
 
     let hostnameFetches = 0
     const hostnameRuntime = makeRuntime({
@@ -1095,11 +1190,52 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         },
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
-    hostnameRuntime.applyCdnPolicy({ urls: ['https://reusable.example/first.m4s?sig=first'] })
+    hostnameRuntime.applyCdnPolicy({ urls: ['https://reusable.test.bilivideo.com/first.m4s?sig=first'] })
     assert.equal((await hostnameRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
-    hostnameRuntime.applyCdnPolicy({ urls: ['https://reusable.example/second.m4s?sig=second'] })
+    hostnameRuntime.applyCdnPolicy({ urls: ['https://reusable.test.bilivideo.com/second.m4s?sig=second'] })
     assert.equal((await hostnameRuntime.probeCurrentPlayUrlCdn()).state, 'ready')
     assert.equal(hostnameFetches, 1)
+}
+
+{
+    const host = 'shared.test.bilivideo.com'
+    const allowedUrl = `https://${host}/allowed.m4s?sig=allowed`
+    const blockedUrl = `https://user@${host}/blocked.m4s?sig=userinfo`
+    const storage = new MemoryStorage()
+    const fetched = []
+    const runtime = makeRuntime({
+        storage,
+        fetch: async url => {
+            fetched.push(url)
+            return streamResponse([new Uint8Array(1)])
+        },
+        limits: { maxConcurrent: 1, maxStages: 1 },
+    })
+
+    runtime.applyCdnPolicy({ urls: [blockedUrl, allowedUrl] })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'ready')
+    assert.deepEqual(fetched, [allowedUrl])
+    assert.deepEqual(result.probedHosts, [host])
+    assert.deepEqual(result.healthyHosts, [host])
+    assert.deepEqual(result.unprobeableHosts, [])
+    assert.deepEqual(Object.keys(JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts), [host])
+
+    const nextAllowedUrl = `https://${host}/next-allowed.m4s?sig=allowed-next`
+    const nextBlockedUrl = `https://other@${host}/next-blocked.m4s?sig=userinfo-next`
+    runtime.applyCdnPolicy({ urls: [nextAllowedUrl, nextBlockedUrl] })
+    const reusedStatus = await runtime.probeCurrentPlayUrlCdn()
+    assert.equal(reusedStatus.state, 'ready')
+    assert.deepEqual(reusedStatus.healthyHosts, [host])
+    assert.deepEqual(reusedStatus.unprobeableHosts, [])
+    assert.deepEqual(fetched, [allowedUrl])
+
+    runtime.applyCdnPolicy({ urls: [nextBlockedUrl] })
+    assert.equal(runtime.getCdnProbeStatus().state, 'idle')
+    const blockedOnlyStatus = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(blockedOnlyStatus.state, 'unprobeable')
+    assert.deepEqual(blockedOnlyStatus.unprobeableHosts, [host])
+    assert.deepEqual(fetched, [allowedUrl])
 }
 
 {
@@ -1166,12 +1302,17 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         },
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
-    const first = { urls: ['https://auto-a.example/a?sig=1', 'https://auto-b.example/a?sig=2'] }
+    const first = {
+        urls: [
+            'https://auto-a.test.bilivideo.com/a?sig=1',
+            'https://auto-b.test.bilivideo.com/a?sig=2',
+        ],
+    }
     assert.strictEqual(runtime.applyCdnPolicy(first), first)
     assert.equal(fetched.length, 0)
     assert.equal(scheduled.length, 1)
 
-    const second = { urls: ['https://auto-c.example/a?sig=3'] }
+    const second = { urls: ['https://auto-c.test.bilivideo.com/a?sig=3'] }
     runtime.applyCdnPolicy(second)
     assert.equal(scheduled.length, 2)
     scheduled[0]()
@@ -1179,7 +1320,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     assert.equal(fetched.length, 0)
     scheduled[1]()
     await runtime.probeCurrentPlayUrlCdn()
-    assert.deepEqual(fetched, ['https://auto-c.example/a?sig=3'])
+    assert.deepEqual(fetched, ['https://auto-c.test.bilivideo.com/a?sig=3'])
 
     mode = 'safe'
     let oldSignal
@@ -1187,7 +1328,7 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     const generationRuntime = makeRuntime({
         getMode: () => mode,
         fetch: (url, init) => {
-            if (url.includes('old.example')) {
+            if (url.includes('old.test.bilivideo.com')) {
                 oldSignal = init.signal
                 return new Promise((_resolve, reject) => {
                     releaseOld = () => reject(new TypeError('aborted'))
@@ -1198,10 +1339,10 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
         },
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
-    generationRuntime.applyCdnPolicy({ urls: ['https://old.example/a?sig=old'] })
+    generationRuntime.applyCdnPolicy({ urls: ['https://old.test.bilivideo.com/a?sig=old'] })
     const oldProbe = generationRuntime.probeCurrentPlayUrlCdn({ force: true })
     await flushMicrotasks()
-    generationRuntime.applyCdnPolicy({ urls: ['https://new.example/a?sig=new'] })
+    generationRuntime.applyCdnPolicy({ urls: ['https://new.test.bilivideo.com/a?sig=new'] })
     assert.equal(oldSignal.aborted, true)
     assert.equal((await generationRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
     await oldProbe
@@ -1212,14 +1353,14 @@ const signedUrl = 'https://cdn-a.example:8443/video/segment.m4s?deadline=999&tok
     globalThis.fetch = async () => { throw new Error('BALH hook must not be used by the CDN probe') }
     const defaultPlayUrl = {
         dash: {
-            video: [{ base_url: 'https://captured.example/media.m4s?sig=private', backup_url: [] }],
+            video: [{ base_url: 'https://captured.test.bilivideo.com/media.m4s?sig=private', backup_url: [] }],
             audio: [],
         },
     }
     applyDefaultPolicy(defaultPlayUrl)
     await probeDefaultRuntime({ force: true })
     assert.equal(capturedFetchCalls.length, 2)
-    assert.equal(capturedFetchCalls[0].url, 'https://captured.example/media.m4s?sig=private')
+    assert.equal(capturedFetchCalls[0].url, 'https://captured.test.bilivideo.com/media.m4s?sig=private')
     globalThis.fetch = originalGlobalFetch
 }
 
