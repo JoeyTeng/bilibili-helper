@@ -25,6 +25,29 @@ key为`'balh_server'`，可选的`value`为：
 1. `undefined`：默认代理服务器
 2. `'https://www.your_server.com'`：自定义的代理服务器
 
+### CDN 选择模式
+
+`key`为`'balh_cdn_mode'`，可选的`value`为：
+
+1. `'safe'`：仅保守后移明显的 MCDN/PCDN 或其他已定义风险信号；
+2. `'auto'`：额外使用当前浏览器的有界后台测速与主机级缓存；
+3. `'original'`：保留平台原始候选顺序；
+4. `'manual'`：启用旧的 UPOS 主机替换。
+
+`balh_cdn_mode` 未设置或值无效时会解析为 `'safe'`；仅当检测到旧版 `balh_upos_server` 配置时迁移为 `'manual'`。迁移结果会写回 `balh_cdn_mode` cookie。
+
+主动测试当前视频 CDN：
+
+```javascript
+await bangumi_area_limit_hack.testCurrentVideoCdn({ force: true })
+```
+
+清除 CDN 健康缓存：
+
+```javascript
+bangumi_area_limit_hack.clearCdnHealthCache()
+```
+
 ### 登录/登出
 
 在控制台执行:

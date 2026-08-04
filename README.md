@@ -8,6 +8,7 @@
 - 本地生成脚本：`dist/unblock-area-limit.user.js`
 - 使用说明：`packages/unblock-area-limit/README.md`
 - 高级设置和测试页：`packages/unblock-area-limit/README.dev.md`
+- CDN 选择器设计：`docs/design/cdn-selection.md`
 
 ## 开发
 
@@ -34,6 +35,31 @@ pnpm run build
 ```bash
 pnpm run typecheck
 ```
+
+运行完整的本地确定性门禁（类型检查、既有回归、XHR/CDN 测试与构建）：
+
+```bash
+pnpm run check
+```
+
+只运行 CDN selector、runtime、迁移与 adapter 回归：
+
+```bash
+pnpm run test:cdn
+```
+
+XHR subclass 与异步 fallback 的组合兼容回归由 `pnpm run test:xhr-compat` 负责；
+它也包含在 `pnpm run check` 中。
+
+下载并验证当前支持的最新版 CDN Switcher：
+
+```bash
+pnpm run test:cdn-switcher:latest
+```
+
+当前已验证的 Bilibili Video CDN Switcher 版本为 `0.1.4`；完整范围和源文件校验值见[CDN Switcher 兼容性](packages/unblock-area-limit/README.md#cdn-switcher-兼容性)。
+
+该兼容测试应在创建稳定版 tag 前对 `dev` 的待发布提交显式运行。tag 触发的 release workflow 不下载可变的第三方 latest 源码，因此已冻结的 tag 不会因 CDN Switcher 后续发布而失去可重跑性。
 
 ## 分发
 

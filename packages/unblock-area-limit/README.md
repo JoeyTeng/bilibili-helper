@@ -85,11 +85,48 @@ Chrome 80+上有可能出现的问题，详见：https://github.com/ipcjs/bilibi
 
 ### 播放卡顿？
 
-#### “替换upos视频服务器”选项
+#### 视频 CDN 选择
+
+设置页的“视频 CDN”有四种模式：
+
+1. `safe`（默认）：保留 B 站返回的完整签名 URL，只稳定后移明显的 MCDN/PCDN 或[其他已定义风险信号](../../docs/design/cdn-selection.md#mcdnpcdn-是软分类)；如果全部候选都有风险，则保留原始顺序。
+2. `auto`：在 `safe` 基础上，以当前浏览器和当地网络为准做有预算的后台测速，结果仅用于之后的播放地址。这也是英国等海外地区推荐试用的模式。
+3. `original`：完全保留 B 站原始候选顺序。
+4. `manual`：保留旧的“替换 UPOS 视频服务器”功能，仅供显式手动选择。
+
+自动选择不会猜测或拼接 CDN 域名，不会修改 URL 的路径、查询参数或签名，也不会把不同清晰度、音轨或分段的候选混在一起。后台测速不携带凭据；持久化缓存只保存 host（hostname 加显式非默认 port）级别的聚合健康指标、schema/version、保存时间、粗粒度网络提示和候选 host 集合摘要，不保存完整视频 URL。
+
+即使没有配置自定义区域代理，只要没有显式选择“关闭脚本”，CDN 模式仍会处理平台已经返回的可播放地址；显式关闭脚本会同时禁用区域解锁与 CDN 选择。
+
+可以在设置页点击“测试当前视频 CDN”对本次候选做有界抽样（默认最多两个不同 host、每个两阶段）。浏览器无法证明请求可测时会保守记为“无法测量”，不会被当成 CDN 已失效的证据。
+
+#### CDN Switcher 兼容性
+
+| 项目 | 已验证版本 | 验证日期 | 范围 |
+| --- | --- | --- | --- |
+| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.4` | 2026-08-04 | Fetch/XHR，两种脚本加载顺序 |
+
+上游身份固定为 Greasy Fork script `500213`，latest 下载地址是
+`https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.user.js`。
+canonical latest metadata 地址是
+`https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.meta.js`；
+兼容测试要求 metadata 与源码中的身份和版本完全一致。
+userscript metadata 身份固定为 `@name Bilibili Video CDN Switcher` 与
+`@namespace mailto:1332019995@qq.com`。
+本次验证的 `0.1.4` 源文件 SHA-256 为
+`261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
+
+仓库只保证上表中“当前最新版”的自动兼容测试，不对 CDN Switcher 旧版本做兼容承诺。打稳定版 tag 前应显式运行下列命令：它会从 Greasy Fork 临时下载上游 latest 脚本，不在本仓库复制其源码；若 latest 版本或原始源码 bytes/SHA-256 变更，测试会要求先重新验证并更新此表。tag 触发的 release workflow 不再读取这个可变上游，避免已经冻结的 tag 因第三方后续更新而无法重跑。
+
+```bash
+pnpm run test:cdn-switcher:latest
+```
+
+#### “替换 UPOS 视频服务器”选项（手动模式）
 
 **目前似乎存在替换upos后加载不出视频的问题！设为“不替换”可关闭该功能。**
 
-在设置中有个“替换upos视频服务器”选项，针对大陆的视频有效果，可以试下。
+在 CDN 模式中选择 `manual` 后，才会使用“替换 UPOS 视频服务器”选项。该功能会修改主机名，只作为旧功能兼容保留。
 
 #### 改hosts
 

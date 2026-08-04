@@ -7,7 +7,7 @@ export namespace Objects {
             for (const item of obj) {
                 convertKeyToSnakeCase(item)
             }
-        } else if (typeof obj === 'object') {
+        } else if (obj !== null && typeof obj === 'object') {
             const o = obj as any;
             for (const key of Object.keys(o)) {
                 const value = o[key]

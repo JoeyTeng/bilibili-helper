@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Objects } from '../../util/objects'
-import { Converters, uposMap } from '../../util/converters';
+import { Converters } from '../../util/converters';
 import { _ } from '../../util/react'
 import { Async, Promise } from '../../util/async';
 import { r, _t } from '../../feature/r'
@@ -21,10 +21,44 @@ import space_account_info_map from '../../feature/bili/space_account_info_map'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
+import { applyCdnPolicyToPlayUrlResponse, findPlayUrlPayload } from './cdn_playurl';
 
 export const area_limit_xhr = (() => {
+    function injectCdnOnlyXhr() {
+        injectXhrImpl({
+            transformRequest: () => null,
+            transformResponse: ({ url, response, xhr }) => {
+                if (!isCdnPlayUrlUrl(url)) return null
+                try {
+                    const json = response !== null && typeof response === 'object'
+                        ? JSON.parse(JSON.stringify(response))
+                        : JSON.parse(xhr.responseText)
+                    if (!findPlayUrlPayload(json)) return null
+                    return applyCdnPolicyToPlayUrlResponse(json)
+                } catch (error) {
+                    util_warn('XHR playurl CDN-only selection failed', error)
+                    return null
+                }
+            },
+        })
+    }
+
+    function isCdnPlayUrlUrl(url) {
+        if (typeof url !== 'string') return false
+        return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
+            || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
+            || url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
+            || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl'))
+    }
+
     return function () {
-        if (isClosed()) return
+        if (isClosed()) {
+            if (!balh_config.is_closed && !balh_config.server_custom) {
+                injectFetch({ cdnOnly: true })
+                injectCdnOnlyXhr()
+            }
+            return
+        }
         injectFetch()
         function injectXhr() {
             injectXhrImpl({
@@ -198,13 +232,26 @@ export const area_limit_xhr = (() => {
                         return rewriteSubtitleBodyJson(json, url);
                     } else if (url.match(RegExps.url('api.bilibili.com/x/player/playurl'))) {
                         log('/x/player/playurl', 'origin', `block: ${container.__block_response}`, xhr.response)
+                        try {
+                            const json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                            return applyCdnPolicyToPlayUrlResponse(json)
+                        } catch (error) {
+                            util_warn('XHR playurl CDN selection failed', error)
+                            return null
+                        }
                         // todo      : 当前只实现了r.const.mode.REPLACE, 需要支持其他模式
                         // 2018-10-14: 等B站全面启用新版再说(;¬_¬)
-                    } else if (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl'))
+                    } else if ((url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl')))
                         && !Strings.getSearchParam(url, 'balh_ajax')) {
                         const reqUrl = new URL(url, document.location.href)
                         const isV1 = reqUrl.pathname === '/pgc/player/web/playurl'
-                        let json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                        let json
+                        try {
+                            json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                        } catch (error) {
+                            util_warn('XHR PGC playurl CDN selection failed', error)
+                            return null
+                        }
                         if (!container.__redirect || (!isV1 && isAreaLimitForPlayUrl(json.result))) { // 请求没有被重定向, 则需要检测结果是否有区域限制
                             if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json.result)) {
                                 areaLimit(true)
@@ -226,6 +273,7 @@ export const area_limit_xhr = (() => {
                                 areaLimit(false)
                             }
                         }
+                        return applyCdnPolicyToPlayUrlResponse(json)
                         // 同上
                     } else if (url.match(RegExps.url('api.bilibili.com/pgc/view/web/freya/season'))) {
                         /* 一起看放映室用这个api来识别区域限制 */
@@ -450,10 +498,10 @@ export const area_limit_xhr = (() => {
                             if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json)) {
                                 areaLimit(true)
                                 return one_api.asyncAjax(param.url)
-                                    .catch(e => json)
+                                    .catch(e => applyCdnPolicyToPlayUrlResponse(json))
                             } else {
                                 areaLimit(false)
-                                return json
+                                return applyCdnPolicyToPlayUrlResponse(json)
                             }
                         })
                     const oriDispatchResultTransformer = dispatchResultTransformer
@@ -479,7 +527,7 @@ export const area_limit_xhr = (() => {
                                     result: r
                                 }
                             }
-                            return r
+                            return applyCdnPolicyToPlayUrlResponse(r)
                         })
                         .compose(oriDispatchResultTransformer)
                 } else if (param.url.match(RegExps.url('interface.bilibili.com/player?'))) {
@@ -1141,11 +1189,7 @@ export const area_limit_xhr = (() => {
                                 // dash中的字段全部变成了类似C语言的下划线风格...
                                 Objects.convertKeyToSnakeCase(data.dash)
                             }
-                            // 替换后大多数bangumi下的视频都会报CROS错误
-                            if (!window.__balh_app_only__ && balh_config.upos_server) {
-                                return Converters.replaceUpos(data, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai)
-                            }
-                            return data
+                            return applyCdnPolicyToPlayUrlResponse(data)
                         })
                 }
             })

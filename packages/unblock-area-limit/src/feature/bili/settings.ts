@@ -8,6 +8,7 @@ import { r } from "../r"
 import { util_ui_msg } from '../../util/message'
 import { bilibili_login } from "./bilibili_login"
 import { createDiagnosticArtifacts, downloadDiagnosticReport } from "./diagnostics"
+import { clearCdnHealthCache, getCdnProbeStatus, probeCurrentPlayUrlCdn, subscribeCdnProbeStatus } from './cdn_runtime'
 import css from './settings.css'
 
 const balh_feature_runPing = function () {
@@ -50,6 +51,7 @@ const balh_feature_runPing = function () {
 }
 
 export function settings() {
+    const validUposServers = new Set(['ali', 'ks3', 'kodo', 'cos', 'bos', 'hw'])
     const floatingSettingsHiddenSelectors = [
         '.bpx-player-container[data-screen="web"]',
         '.bpx-player-container[data-screen="full"]',
@@ -266,6 +268,8 @@ export function settings() {
                 }
             }
         })
+        syncCdnSettingsControls()
+        renderCdnProbeStatus(getCdnProbeStatus())
         document.body.style.overflow = 'hidden';
     }
 
@@ -279,10 +283,6 @@ export function settings() {
         window.addEventListener('message', (event) => {
             if (event.data === 'balh-show-setting') {
                 _showSettings();
-                const uposServer = document.getElementById('upos-server') as HTMLSelectElement | null
-                if (uposServer) {
-                    uposServer.value = balh_config.upos_server || ''
-                }
             }
         })
     }
@@ -303,6 +303,7 @@ export function settings() {
     function onSettingsFormChange(e: Event) {
         const target = e.target as HTMLInputElement
         var name = target.name;
+        if (!name.startsWith('balh_')) return
         var value = target.type === 'checkbox' ? (target.checked ? r.const.TRUE : r.const.FALSE) : target.value.trim()
 
         if (name.startsWith('balh_server_custom')) {
@@ -319,6 +320,26 @@ export function settings() {
 
         balh_config[name.replace('balh_', '')] = value
         log(name, ' => ', value);
+        if (name === 'balh_cdn_mode') {
+            syncCdnSettingsControls()
+        }
+    }
+
+    function syncCdnSettingsControls() {
+        const cdnMode = settingsDOM.querySelector<HTMLSelectElement>('select[name="balh_cdn_mode"]')
+        const uposServer = settingsDOM.querySelector<HTMLSelectElement>('#upos-server')
+        const replaceAkamai = settingsDOM.querySelector<HTMLInputElement>('#balh-upos-replace-akamai')
+
+        if (cdnMode) {
+            cdnMode.value = balh_config.cdn_mode
+        }
+        if (uposServer) {
+            uposServer.value = balh_config.upos_server || ''
+        }
+        if (replaceAkamai) {
+            replaceAkamai.disabled = balh_config.cdn_mode !== 'manual'
+                || !validUposServers.has(balh_config.upos_server || '')
+        }
     }
 
     // On first click:
@@ -384,9 +405,40 @@ export function settings() {
     let customHKServerCheckText: HTMLElement
     let customCNServerCheckText: HTMLElement
     let customTHServerCheckText: HTMLElement
+    let cdnProbeStatusText: HTMLElement
+    const renderCdnProbeStatus = (status: any) => {
+        if (!cdnProbeStatusText) return
+        const messages: Record<string, string> = {
+            'Cached CDN health is ready.': '已载入 CDN 测速缓存。',
+            'CDN health probe completed.': 'CDN 测速已完成。',
+            'CDN health probe completed with partial results.': 'CDN 测速已完成，部分主机无法测量。',
+            'CDN health probe did not find a healthy host.': 'CDN 测速未找到可确认的健康主机。',
+            'CDN health could not be measured in this browser context.': '当前浏览器环境无法测量 CDN。',
+            'Testing current CDN hosts.': '正在测试当前视频 CDN…',
+            'No CDN candidates are available for probing.': '尚未捕获到可测试的当前视频 CDN。',
+            'CDN health cache cleared.': 'CDN 测速缓存已清除。',
+        }
+        const candidateHosts = Array.isArray(status?.candidateHosts) ? status.candidateHosts : []
+        const hosts = candidateHosts.length
+            ? ` ${candidateHosts.join(', ')}`
+            : ''
+        const message = messages[status?.message] || status?.message || status?.state || '尚未测试'
+        cdnProbeStatusText.textContent = `${message}${hosts}`
+    }
+    const testCurrentVideoCdn = () => {
+        renderCdnProbeStatus({ message: '正在测试当前视频 CDN…' })
+        probeCurrentPlayUrlCdn({ force: true })
+            .then(renderCdnProbeStatus)
+            .catch(() => renderCdnProbeStatus({ message: '测试失败，请查看控制台中的脱敏日志' }))
+    }
+    const clearCdnCache = () => {
+        clearCdnHealthCache()
+        renderCdnProbeStatus(getCdnProbeStatus())
+    }
+    subscribeCdnProbeStatus(renderCdnProbeStatus)
     var settingsDOM = _('div', { id: 'balh-settings', style: { position: 'fixed', top: 0, bottom: 0, left: 0, right: 0, background: 'rgba(0,0,0,.7)', animationName: 'balh-settings-bg', animationDuration: '.5s', zIndex: 10000, cursor: 'pointer' }, event: { click: function (e: any) { if (e.target === this) util_ui_msg.close(), document.body.style.overflow = '', (this as any).remove(); } } }, [
         _('style', {}, [_('text', css)]),
-        _('div', { style: { position: 'absolute', background: '#FFF', borderRadius: '10px', padding: '20px', top: '50%', left: '50%', width: '600px', transform: 'translate(-50%,-50%)', cursor: 'default' } }, [
+        _('div', { style: { position: 'absolute', background: '#FFF', borderRadius: '10px', padding: '20px', top: '50%', left: '50%', width: 'min(600px, calc(100vw - 48px))', maxHeight: 'calc(100vh - 48px)', overflowY: 'auto', transform: 'translate(-50%,-50%)', cursor: 'default' } }, [
             _('h1', {}, [_('text', `${GM_info.script.name} v${GM_info.script.version} 参数设置`)]),
             _('br'),
             _('h6', { style: { color: '#d01d00', display: balh_config.server_custom ? 'none' : '' } }, [_('text', 'BiliPlus已被屏蔽，请填写自定义代理服务, 详见: '), _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BB%A3%E7%90%86%E6%9C%8D%E5%8A%A1%E5%99%A8', target: '_blank' }, [_('text', '帮助>自定义代理服务器')])]),
@@ -467,8 +519,24 @@ export function settings() {
                 ]), _('br'),
 
                 _('div', { id: 'balh_server_ping', style: { whiteSpace: 'pre-wrap', overflow: 'auto' } }, []),
+                _('div', {}, [
+                    _('text', '视频 CDN：'),
+                    _('select', { name: 'balh_cdn_mode', title: '变更后切换清晰度或刷新生效' }, [
+                        _('option', { value: 'safe' }, [_('text', '安全排序（默认）')]),
+                        _('option', { value: 'auto' }, [_('text', '自动测速与排序')]),
+                        _('option', { value: 'original' }, [_('text', '保留 B 站原始顺序')]),
+                        _('option', { value: 'manual' }, [_('text', '手动替换 UPOS')]),
+                    ]),
+                    _('text', '　'),
+                    _('button', { type: 'button', event: { click: testCurrentVideoCdn } }, [_('text', '测试当前视频 CDN')]),
+                    _('text', '　'),
+                    _('a', { href: 'javascript:;', event: { click: clearCdnCache } }, [_('text', '清除测速缓存')]),
+                    _('br'),
+                    cdnProbeStatusText = _('span', { id: 'balh-cdn-probe-status', role: 'status', 'aria-live': 'polite', style: { color: '#666', fontSize: '12px' } }, [_('text', '尚未测试')]),
+                ]),
+                _('br'),
                 _('div', { style: { display: '' } }, [
-                    _('text', 'upos服务器：'), _('br'),
+                    _('text', 'UPOS 服务器（仅手动模式）：'), _('br'),
                     _('div', { style: { display: 'flex' } }, [
                         _('div', { title: '变更后 切换清晰度 或 刷新 生效', style: { flex: 1 } }, [
                             _('input', { style: { visibility: 'hidden' }, type: 'checkbox' }),
@@ -477,12 +545,17 @@ export function settings() {
                                 id: 'upos-server',
                                 event: {
                                     change: function (this: HTMLSelectElement) {
-                                        let server = this.value;
-                                        let message = window.$('#upos-server-message');
+                                        const server = this.value
 
-                                        balh_config.upos_server = server;
-                                        (document.getElementById('balh-upos-replace-akamai') as HTMLInputElement).disabled = !server;
-                                        message.text(`已保存`)
+                                        balh_config.upos_server = server
+                                        if (validUposServers.has(server)) {
+                                            balh_config.cdn_mode = 'manual'
+                                        }
+                                        syncCdnSettingsControls()
+                                        const message = settingsDOM.querySelector('#upos-server-message')
+                                        if (message) {
+                                            message.textContent = '已保存'
+                                        }
                                     }
                                 }
                             }, [
@@ -496,7 +569,7 @@ export function settings() {
                             ]),
                             _('span', { 'id': 'upos-server-message' })
                         ]),
-                        _('label', { style: { flex: 1 }, title: '开启upos替换时, 是否替换`akamaized.net`' }, [_('input', { id: 'balh-upos-replace-akamai', type: 'checkbox', name: 'balh_upos_replace_akamai', disabled: balh_config.upos_server ? undefined : 'true' }), _('text', '替换akamai'), _('a', { href: 'https://github.com/ipcjs/bilibili-helper/pull/762#discussion_r569911774' }, [_('text', '(？)')])]),
+                        _('label', { style: { flex: 1 }, title: '开启upos替换时, 是否替换`akamaized.net`' }, [_('input', { id: 'balh-upos-replace-akamai', type: 'checkbox', name: 'balh_upos_replace_akamai', disabled: 'true' }), _('text', '替换akamai'), _('a', { href: 'https://github.com/ipcjs/bilibili-helper/pull/762#discussion_r569911774' }, [_('text', '(？)')])]),
                     ]),
                     _('br'),
                 ]),

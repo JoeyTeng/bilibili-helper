@@ -19,10 +19,13 @@
     "dev:balh": "node scripts/build.mjs --watch",
     "serve:userscript": "node scripts/serve-userscript.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm run test:async && pnpm run test:subtitle && pnpm run test:diagnostics && pnpm run build",
+    "check": "pnpm run typecheck && pnpm run test:async && pnpm run test:subtitle && pnpm run test:diagnostics && pnpm run test:xhr-compat && pnpm run test:cdn && pnpm run build",
     "test:async": "node scripts/test-async-request.mjs",
     "test:diagnostics": "node scripts/test-diagnostics-report.mjs",
-    "test:subtitle": "node scripts/test-subtitle-web-view.mjs"
+    "test:subtitle": "node scripts/test-subtitle-web-view.mjs",
+    "test:xhr-compat": "node scripts/test-xhr-subclass-compat.mjs && node scripts/test-xhr-async-fallback.mjs",
+    "test:cdn": "node scripts/test-cdn-selection.mjs && node scripts/test-cdn-runtime.mjs && node scripts/test-cdn-config-migration.mjs && node scripts/test-playurl-integration.mjs && node scripts/test-fetch-response-compat.mjs && node scripts/test-vue-cdn-boundaries.mjs && node scripts/test-cdn-closed-mode-wiring.mjs",
+    "test:cdn-switcher:latest": "node scripts/test-cdn-switcher-latest.mjs --expect-version 0.1.4 --expect-sha256 261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4"
   },
   "repository": {
     "type": "git",
