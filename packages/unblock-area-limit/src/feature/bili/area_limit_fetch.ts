@@ -162,6 +162,7 @@ function isPgcPlayUrlUrl(url: string) {
 
 function isOtherPlayUrlUrl(url: string) {
     return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
+        || url.match(RegExps.url('api.bilibili.com/x/player/wbi/playurl'))
         || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
 }
 

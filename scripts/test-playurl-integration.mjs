@@ -43,6 +43,7 @@ await Promise.all([
                 export { injectFetch, jsonResponse } from './packages/unblock-area-limit/src/feature/bili/area_limit_fetch.ts'
                 export { fixThailandPlayUrlJson } from './packages/unblock-area-limit/src/api/biliplus.ts'
                 export { applyCdnPolicyToPlayUrlResponse } from './packages/unblock-area-limit/src/feature/bili/cdn_playurl.ts'
+                export { clearCdnHealthCache, getCdnProbeStatus } from './packages/unblock-area-limit/src/feature/bili/cdn_runtime.ts'
             `,
             resolveDir: rootDir,
             sourcefile: 'playurl-integration-entry.ts',
@@ -60,7 +61,15 @@ await Promise.all([
 const { injectXhr } = await import(pathToFileURL(xhrOutFile).href)
 await testXhrProxyRaces(injectXhr)
 
-const { applyCdnPolicyToPlayUrlResponse, fixThailandPlayUrlJson, injectFetch, jsonResponse } = await import(pathToFileURL(integrationOutFile).href)
+const {
+    applyCdnPolicyToPlayUrlResponse,
+    clearCdnHealthCache,
+    fixThailandPlayUrlJson,
+    getCdnProbeStatus,
+    injectFetch,
+    jsonResponse,
+} = await import(pathToFileURL(integrationOutFile).href)
+testWbiEnvelopeCandidateCapture(applyCdnPolicyToPlayUrlResponse, clearCdnHealthCache, getCdnProbeStatus)
 await testFetchPgcFallbackCdnPolicy(injectFetch)
 await testThailandUposMode(fixThailandPlayUrlJson, applyCdnPolicyToPlayUrlResponse)
 await testJsonResponseCloneMetadata(jsonResponse)
@@ -372,6 +381,27 @@ function createDeferred() {
 
 function flushPromises() {
     return new Promise(resolve => setTimeout(resolve, 0))
+}
+
+function testWbiEnvelopeCandidateCapture(applyPolicy, clearHealth, getStatus) {
+    config.cdn_mode = 'original'
+    clearHealth()
+    const signedUrl = 'https://wbi.test.bilivideo.com/media.m4s?w_rid=private&wts=1'
+    const response = {
+        code: 0,
+        message: '0',
+        ttl: 1,
+        data: {
+            dash: {
+                video: [{ base_url: signedUrl, backup_url: [] }],
+                audio: [],
+            },
+        },
+    }
+    const snapshot = structuredClone(response)
+    assert.strictEqual(applyPolicy(response), response)
+    assert.deepEqual(response, snapshot, 'original mode must preserve the WBI playurl envelope')
+    assert.deepEqual(getStatus().candidateHosts, ['wbi.test.bilivideo.com'])
 }
 
 async function testFetchPgcFallbackCdnPolicy(injectFetch) {

@@ -100,6 +100,12 @@ const endpointCases = [
         payload: value => value.data,
     },
     {
+        label: 'x/player WBI playurl',
+        url: 'https://api.bilibili.com/x/player/wbi/playurl?cid=1&w_rid=signed&wts=1',
+        response: { code: 0, message: '0', ttl: 1, data: { dash: { video: [] } } },
+        payload: value => value.data,
+    },
+    {
         label: 'interface v2 playurl',
         url: 'https://interface.bilibili.com/v2/playurl?cid=2',
         response: { dash: { video: [] } },
@@ -125,6 +131,8 @@ for (const endpoint of endpointCases) {
     assert.equal(endpoint.payload(delivery.response).__cdnApplied, true, `${endpoint.label}: CDN transform was not applied`)
     assert.notStrictEqual(delivery.response, endpoint.response, `${endpoint.label}: transformed response reused the native payload object`)
     assert.deepEqual(endpoint.response, nativeSnapshot, `${endpoint.label}: native response payload was mutated`)
+    assert.equal(delivery.native.url, endpoint.url, `${endpoint.label}: request URL was rewritten`)
+    assert.equal(delivery.native.method, 'POST', `${endpoint.label}: request method was rewritten`)
     assert.equal(delivery.native.requestBody, `${endpoint.label}:body`, `${endpoint.label}: request body was rewritten`)
 }
 
@@ -132,15 +140,28 @@ assert.equal(globalThis.__closedModeCdnTransforms.length, endpointCases.length)
 assert.equal(globalThis.__closedModeProxyCalls.length, 0, 'closed mode must not invoke any proxy request path')
 
 globalThis.__closedModeThrowFromCdn = true
-const failureResponse = { code: 0, data: { dash: { video: [{ id: 80 }] } } }
+const cdnOnlyFailureUrl = 'https://api.bilibili.com/x/player/wbi/playurl?cid=5&w_rid=cdn-only-failure&wts=2'
+const failureResponse = {
+    code: 0,
+    data: {
+        dash: {
+            video: [{
+                id: 80,
+                baseUrl: 'https://cdn-only-failure.test.bilivideo.com/video.m4s?token=preserve',
+            }],
+        },
+    },
+}
 const failureSnapshot = structuredClone(failureResponse)
 const failureDelivery = sendNativeRequest(
-    'https://api.bilibili.com/x/player/playurl?cid=5',
+    cdnOnlyFailureUrl,
     failureResponse,
     'failure-body',
 )
 assert.strictEqual(failureDelivery.response, failureResponse, 'CDN failure must expose the native response object')
 assert.deepEqual(failureResponse, failureSnapshot, 'CDN failure must not partially mutate the native response')
+assert.equal(failureDelivery.native.url, cdnOnlyFailureUrl, 'CDN-only WBI failure rewrote the signed URL')
+assert.equal(failureDelivery.native.method, 'POST', 'CDN-only WBI failure rewrote the request method')
 assert.equal(failureDelivery.native.requestBody, 'failure-body', 'CDN failure must not rewrite the request body')
 assert.equal(globalThis.__closedModeWarnings.length, 1, 'CDN failure should be reported once')
 globalThis.__closedModeThrowFromCdn = false
@@ -173,6 +194,66 @@ assert.equal(unrelatedDelivery.native.requestBody, 'unrelated-body', 'non-playur
 assert.equal(globalThis.__closedModeCdnTransforms.length, endpointCases.length + 1, 'only payload-bearing playurl envelopes should reach CDN selection')
 assert.equal(globalThis.__closedModeProxyCalls.length, 0, 'closed mode must remain proxy-free after failure fallbacks')
 assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'closed-mode XHR handling must remain isolated from area-unblock behavior')
+
+window.XMLHttpRequest = NativeXMLHttpRequest
+window.jQuery = undefined
+globalThis.__closedModeConfig.is_closed = ''
+globalThis.__closedModeConfig.server_custom = 'https://proxy.invalid'
+const proxyCallsBeforeFullMode = globalThis.__closedModeProxyCalls.length
+const { area_limit_xhr: fullAreaLimitXhr } = await import(`${moduleUrl}#full-mode`)
+fullAreaLimitXhr()
+const fullModeSignedMediaUrl = 'https://wbi-media.test.bilivideo.com/video.m4s?deadline=private&token=must-not-log'
+const fullModeWbiResponse = {
+    code: 0,
+    message: '0',
+    ttl: 1,
+    data: { dash: { video: [{ id: 80, baseUrl: fullModeSignedMediaUrl }] } },
+}
+const fullModeWbiSnapshot = structuredClone(fullModeWbiResponse)
+const fullModeWbiUrl = 'https://api.bilibili.com/x/player/wbi/playurl?cid=8&w_rid=signed&wts=1'
+const fullModeLogStart = globalThis.__closedModeFullPipelineCalls.length
+const fullModeWbiDelivery = sendNativeRequest(
+    fullModeWbiUrl,
+    fullModeWbiResponse,
+    'full-mode-wbi-body',
+)
+assert.equal(fullModeWbiDelivery.response.data.__cdnApplied, true, 'full-mode WBI response must reach CDN selection')
+assert.notStrictEqual(fullModeWbiDelivery.response, fullModeWbiResponse, 'full-mode WBI transform reused the native payload')
+assert.deepEqual(fullModeWbiResponse, fullModeWbiSnapshot, 'full-mode WBI transform mutated the native payload')
+assert.equal(
+    globalThis.__closedModeProxyCalls.length,
+    proxyCallsBeforeFullMode,
+    'full-mode WBI request must preserve the native signed request instead of invoking a proxy path',
+)
+assert.equal(fullModeWbiDelivery.native.url, fullModeWbiUrl, 'full-mode WBI request URL was rewritten')
+assert.equal(fullModeWbiDelivery.native.method, 'POST', 'full-mode WBI request method was rewritten')
+assert.equal(fullModeWbiDelivery.native.requestBody, 'full-mode-wbi-body', 'full-mode WBI request body was rewritten')
+assert.doesNotMatch(
+    JSON.stringify(globalThis.__closedModeFullPipelineCalls.slice(fullModeLogStart)),
+    /must-not-log|video\.m4s|deadline=private/,
+    'full-mode WBI logging exposed a signed media URL',
+)
+
+globalThis.__closedModeThrowFromCdn = true
+const fullModeFailureUrl = 'https://api.bilibili.com/x/player/wbi/playurl?cid=9&w_rid=failure-signed&wts=2'
+const fullModeFailureResponse = {
+    code: 0,
+    data: { dash: { video: [{ id: 80, baseUrl: fullModeSignedMediaUrl }] } },
+}
+const fullModeFailureSnapshot = structuredClone(fullModeFailureResponse)
+const warningsBeforeFullModeFailure = globalThis.__closedModeWarnings.length
+const fullModeFailureDelivery = sendNativeRequest(
+    fullModeFailureUrl,
+    fullModeFailureResponse,
+    'full-mode-failure-body',
+)
+assert.strictEqual(fullModeFailureDelivery.response, fullModeFailureResponse, 'full-mode WBI failure must expose the native response')
+assert.deepEqual(fullModeFailureResponse, fullModeFailureSnapshot, 'full-mode WBI failure partially mutated the native response')
+assert.equal(fullModeFailureDelivery.native.url, fullModeFailureUrl, 'failed full-mode WBI request URL was rewritten')
+assert.equal(fullModeFailureDelivery.native.method, 'POST', 'failed full-mode WBI request method was rewritten')
+assert.equal(fullModeFailureDelivery.native.requestBody, 'full-mode-failure-body', 'failed full-mode WBI request body was rewritten')
+assert.equal(globalThis.__closedModeWarnings.length, warningsBeforeFullModeFailure + 1, 'full-mode WBI failure should warn once')
+globalThis.__closedModeThrowFromCdn = false
 
 console.log('cdn closed-mode wiring tests passed')
 

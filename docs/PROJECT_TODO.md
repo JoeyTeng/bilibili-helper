@@ -1,8 +1,16 @@
 # Project TODO
 
-Last updated: 2026-06-05
+Last updated: 2026-08-06
 
 ## Backlog
+
+- [ ] 在独立后续 PR 中完成并合并 CDN selection Stage 3 stall recovery；约束与交付
+  状态见
+  [CDN Three-Stage Delivery](project_journal/2026/08/2026-08-05-cdn-three-stage-delivery-21b2.md)。
+- [ ] 三个阶段全部合并后，由 Joey 在 UK-local 环境执行人工播放验收。自动 live
+  E2E 不能替代该门禁。
+- [ ] **Blocked:** 在 Stage 3 合并及 Joey 人工验收完成前，不创建稳定版 tag、发布
+  稳定版或刷新 `main`。
 
 - [ ] Add a guided issue template link for diagnostic reports.
   - Keep the current report copy flow local-only, but prefill issue title/body only when the payload is small enough for a URL.

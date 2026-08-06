@@ -16,7 +16,7 @@ const capturedFetch = typeof globalThis.fetch === 'function'
     : undefined
 
 export const CDN_HEALTH_CACHE_KEY = 'balh_cdn_health_v1'
-export const CDN_HEALTH_CACHE_VERSION = 1
+export const CDN_HEALTH_CACHE_VERSION = 2
 export const CDN_HEALTH_CACHE_TTL_MS = 20 * 60 * 1000
 /** Avoid repeating browser-blocked probes immediately; this is memory-only and context-scoped. */
 export const CDN_UNPROBEABLE_RETRY_SUPPRESSION_MS = 60 * 1000
@@ -32,14 +32,33 @@ export interface CdnProbeStatus {
     healthyHosts: readonly string[]
     failedHosts: readonly string[]
     unprobeableHosts: readonly string[]
+    /** Eligible hosts omitted because their full two-stage reservation would exceed the round budget. */
+    budgetLimitedHosts: readonly string[]
+    /** Host-only measurements. No media URL components are exposed. */
+    hostDiagnostics: readonly CdnProbeHostDiagnostic[]
     completed: number
     total: number
     updatedAt?: number
 }
 
+export interface CdnProbeHostDiagnostic {
+    readonly host: string
+    readonly classification: 'healthy' | 'failed' | 'unprobeable' | 'budget-limited'
+    readonly stagesCompleted: number
+    readonly accountedBytes: number
+    readonly observedBytes: number
+    readonly throughputKbps?: number
+    readonly ttfbMs?: number
+    readonly bandwidthBps?: number
+    readonly bitrateMargin?: number
+}
+
 export interface CdnProbeLimits {
     maxConcurrent: number
     maxStages: number
+    /** First-stage scored prefix. */
+    initialBytesPerRequest: number
+    /** Second-stage and absolute per-request scored-prefix cap. */
     maxBytesPerRequest: number
     maxTotalBytes: number
     requestTimeoutMs: number
@@ -57,6 +76,7 @@ interface RuntimeCandidate {
     url: string
     host: string
     probeAllowed: boolean
+    bandwidthBps?: number
 }
 
 interface ProbeOutcome {
@@ -64,8 +84,15 @@ interface ProbeOutcome {
     kind: 'success' | 'failure' | 'unprobeable'
     /** Bytes admitted to health scoring, capped by the requested prefix. */
     bytes: number
-    /** Whole chunks delivered by the stream, used for conservative global budgeting. */
+    /** Whole chunks actually delivered to the reader before settlement. */
     observedBytes: number
+    /** Conservative budget charge; equals the reservation when cleanup cannot be proven. */
+    budgetBytes: number
+    /** False prevents another batch from starting while this request may still be live. */
+    safeToContinue: boolean
+    stage: 1 | 2
+    bandwidthBps?: number
+    bitrateMargin?: number
     ttfbMs?: number
     throughputKbps?: number
 }
@@ -108,8 +135,9 @@ export interface CdnRuntime {
 const DEFAULT_LIMITS: CdnProbeLimits = {
     maxConcurrent: 2,
     maxStages: 2,
-    maxBytesPerRequest: 64 * 1024,
-    maxTotalBytes: 192 * 1024,
+    initialBytesPerRequest: 64 * 1024,
+    maxBytesPerRequest: 512 * 1024,
+    maxTotalBytes: 2 * 1024 * 1024,
     requestTimeoutMs: 3_500,
     stageTimeoutMs: 4_000,
     totalTimeoutMs: 7_500,
@@ -158,10 +186,15 @@ function positiveInteger(value: unknown, fallback: number) {
 }
 
 function normalizeLimits(overrides: Partial<CdnProbeLimits> | undefined): CdnProbeLimits {
+    const maxBytesPerRequest = positiveInteger(overrides?.maxBytesPerRequest, DEFAULT_LIMITS.maxBytesPerRequest)
     return {
         maxConcurrent: Math.min(2, positiveInteger(overrides?.maxConcurrent, DEFAULT_LIMITS.maxConcurrent)),
-        maxStages: positiveInteger(overrides?.maxStages, DEFAULT_LIMITS.maxStages),
-        maxBytesPerRequest: positiveInteger(overrides?.maxBytesPerRequest, DEFAULT_LIMITS.maxBytesPerRequest),
+        maxStages: Math.min(2, positiveInteger(overrides?.maxStages, DEFAULT_LIMITS.maxStages)),
+        initialBytesPerRequest: Math.min(
+            maxBytesPerRequest,
+            positiveInteger(overrides?.initialBytesPerRequest, DEFAULT_LIMITS.initialBytesPerRequest),
+        ),
+        maxBytesPerRequest,
         maxTotalBytes: positiveInteger(overrides?.maxTotalBytes, DEFAULT_LIMITS.maxTotalBytes),
         requestTimeoutMs: positiveInteger(overrides?.requestTimeoutMs, DEFAULT_LIMITS.requestTimeoutMs),
         stageTimeoutMs: positiveInteger(overrides?.stageTimeoutMs, DEFAULT_LIMITS.stageTimeoutMs),
@@ -211,14 +244,26 @@ function parseRuntimeCandidate(url: unknown): RuntimeCandidate | undefined {
 
 function extractCandidates(groups: readonly CdnCandidateGroup[]) {
     const result: RuntimeCandidate[] = []
-    const seenUrls = new Set<string>()
+    const indexesByUrl = new Map<string, number>()
     for (const group of groups) {
         for (const candidate of group.candidates) {
-            if (seenUrls.has(candidate.url)) continue
+            const existingIndex = indexesByUrl.get(candidate.url)
+            if (existingIndex !== undefined) {
+                if (group.bandwidthBps !== undefined) {
+                    result[existingIndex].bandwidthBps = Math.max(
+                        result[existingIndex].bandwidthBps ?? 0,
+                        group.bandwidthBps,
+                    )
+                }
+                continue
+            }
             const parsed = parseRuntimeCandidate(candidate.url)
             if (!parsed) continue
-            seenUrls.add(parsed.url)
-            result.push(parsed)
+            indexesByUrl.set(parsed.url, result.length)
+            result.push({
+                ...parsed,
+                ...(group.bandwidthBps === undefined ? {} : { bandwidthBps: group.bandwidthBps }),
+            })
         }
     }
     return result
@@ -256,6 +301,8 @@ function cloneStatus(status: CdnProbeStatus): CdnProbeStatus {
         healthyHosts: [...status.healthyHosts],
         failedHosts: [...status.failedHosts],
         unprobeableHosts: [...status.unprobeableHosts],
+        budgetLimitedHosts: [...status.budgetLimitedHosts],
+        hostDiagnostics: status.hostDiagnostics.map(diagnostic => ({ ...diagnostic })),
     }
 }
 
@@ -271,9 +318,10 @@ function normalizeHealth(value: unknown, host: string): HostHealth | undefined {
     const samples = finiteMetric(input.samples)
     const throughputKbps = finiteMetric(input.throughputKbps)
     const ttfbMs = finiteMetric(input.ttfbMs)
+    const measuredBytes = finiteMetric(input.measuredBytes)
     if (successes === undefined && failures === undefined && samples === undefined
-        && throughputKbps === undefined && ttfbMs === undefined) return undefined
-    return { host, successes, failures, samples, throughputKbps, ttfbMs }
+        && throughputKbps === undefined && ttfbMs === undefined && measuredBytes === undefined) return undefined
+    return { host, successes, failures, samples, throughputKbps, ttfbMs, measuredBytes }
 }
 
 function replaceProtocolRelativeHosts(value: unknown, host: string, seen = new WeakSet<object>()): unknown {
@@ -382,13 +430,15 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     let status: CdnProbeStatus = emptyStatus()
     let generation = 0
     let inFlight: Promise<CdnProbeStatus> | undefined
+    let fencedProbe: Promise<CdnProbeStatus> | undefined
     let backgroundScheduled = false
     let backgroundScheduleId = 0
     let unprobeableGeneration = -1
     let unprobeableUntil = 0
     let suppressedUnprobeableStatus: CdnProbeStatus | undefined
     const activeControllers = new Set<AbortController>()
-    const exactOutcomes = new Map<string, ProbeOutcome>()
+    let activeControllerDrain: Promise<void> = Promise.resolve()
+    let resolveActiveControllerDrain: (() => void) | undefined
     const listeners = new Set<(status: CdnProbeStatus) => void>()
 
     function emptyStatus(message?: string): CdnProbeStatus {
@@ -400,6 +450,8 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             healthyHosts: [],
             failedHosts: [],
             unprobeableHosts: [],
+            budgetLimitedHosts: [],
+            hostDiagnostics: [],
             completed: 0,
             total: 0,
         }
@@ -443,7 +495,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         cancel: () => void | PromiseLike<void>,
         controller: AbortController,
         requestTimeoutMs: number,
-    ) {
+    ): Promise<{ completedWithinBudget: boolean; settled: Promise<boolean> }> {
         const cleanupTimeoutMs = Math.max(1, Math.min(250, requestTimeoutMs))
         let cleanupTimer = 0
         const cancellation = Promise.resolve()
@@ -465,6 +517,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                 // The cleanup path is best-effort after its strict wait budget.
             }
         }
+        return { completedWithinBudget: completed, settled: cancellation }
     }
 
     function readMatchingCache(candidateHostHash: string, networkHint: string) {
@@ -540,10 +593,47 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             .filter(([, health]) => (health.successes ?? 0) === 0 && (health.failures ?? 0) > 0)
             .map(([host]) => host)
             .sort()
+        const measuredHosts = new Set(healthEntries.map(([host]) => host))
+        const unprobeableHosts = candidateHosts.filter(host => !measuredHosts.has(host))
         const healthState: CdnProbeState = healthyHosts.length
-            ? (failedHosts.length ? 'partial' : 'ready')
-            : (failedHosts.length ? 'failed' : 'unprobeable')
+            ? (failedHosts.length || unprobeableHosts.length ? 'partial' : 'ready')
+            : (failedHosts.length && !unprobeableHosts.length ? 'failed' : 'unprobeable')
         const prefix = source === 'cache' ? 'Cached CDN health' : 'CDN health'
+        const bandwidthByHost = new Map<string, number>()
+        for (const candidate of currentCandidates) {
+            if (candidate.bandwidthBps === undefined) continue
+            bandwidthByHost.set(candidate.host, Math.max(
+                bandwidthByHost.get(candidate.host) ?? 0,
+                candidate.bandwidthBps,
+            ))
+        }
+        const hostDiagnostics: CdnProbeHostDiagnostic[] = candidateHosts.map(host => {
+            const health = healthByHost[host]
+            const bandwidthBps = bandwidthByHost.get(host)
+            const throughputKbps = finiteMetric(health?.throughputKbps)
+            const ttfbMs = finiteMetric(health?.ttfbMs)
+            const classification = healthyHosts.includes(host)
+                ? 'healthy'
+                : failedHosts.includes(host)
+                    ? 'failed'
+                    : 'unprobeable'
+            return {
+                host,
+                classification,
+                stagesCompleted: Math.floor(finiteMetric(health?.samples) ?? 0),
+                accountedBytes: Math.floor(finiteMetric(health?.measuredBytes) ?? 0),
+                observedBytes: Math.floor(finiteMetric(health?.measuredBytes) ?? 0),
+                ...(throughputKbps === undefined ? {} : { throughputKbps }),
+                ...(ttfbMs === undefined ? {} : { ttfbMs }),
+                ...(bandwidthBps === undefined ? {} : { bandwidthBps }),
+                ...(throughputKbps === undefined || bandwidthBps === undefined
+                    ? {}
+                    : { bitrateMargin: throughputKbps / (bandwidthBps / 1000) }),
+            }
+        })
+        const cachedAttempts = healthEntries.reduce((sum, [, health]) => (
+            sum + Math.floor(finiteMetric(health.samples) ?? 0)
+        ), 0)
         publish({
             state: healthState,
             message: healthState === 'ready'
@@ -558,9 +648,11 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             probedHosts: healthEntries.map(([host]) => host).sort(),
             healthyHosts,
             failedHosts,
-            unprobeableHosts: [],
-            completed: healthEntries.length,
-            total: candidateHosts.length,
+            unprobeableHosts,
+            budgetLimitedHosts: [],
+            hostDiagnostics,
+            completed: cachedAttempts,
+            total: cachedAttempts,
             updatedAt: dependencies.now(),
         })
     }
@@ -574,7 +666,6 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             inFlight = undefined
             backgroundScheduled = false
             backgroundScheduleId += 1
-            exactOutcomes.clear()
             healthHostHash = ''
             healthValidUntil = 0
             healthByHost = Object.create(null)
@@ -593,12 +684,27 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
 
     function abortActiveProbes() {
         for (const controller of activeControllers) controller.abort()
-        activeControllers.clear()
+    }
+
+    function trackActiveController(controller: AbortController) {
+        if (activeControllers.size === 0) {
+            activeControllerDrain = new Promise<void>(resolve => {
+                resolveActiveControllerDrain = resolve
+            })
+        }
+        activeControllers.add(controller)
+    }
+
+    function releaseActiveController(controller: AbortController) {
+        if (!activeControllers.delete(controller) || activeControllers.size > 0) return
+        const resolve = resolveActiveControllerDrain
+        resolveActiveControllerDrain = undefined
+        resolve?.()
     }
 
     function updateCurrentCandidates(next: RuntimeCandidate[]) {
         const canonical = (candidates: RuntimeCandidate[]) => candidates
-            .map(candidate => `${candidate.host}\0${candidate.url}`)
+            .map(candidate => `${candidate.host}\0${candidate.url}\0${candidate.bandwidthBps ?? ''}`)
             .sort()
         const previousCanonical = canonical(currentCandidates)
         const nextCanonical = canonical(next)
@@ -613,7 +719,6 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         inFlight = undefined
         backgroundScheduled = false
         backgroundScheduleId += 1
-        exactOutcomes.clear()
         clearUnprobeableSuppression()
         currentCandidates = next
         currentHostHash = hashCandidateHosts(next.map(candidate => candidate.host))
@@ -691,27 +796,47 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     }
 
     function selectProbeTargets() {
-        const seenHosts = new Set<string>()
+        const indexesByHost = new Map<string, number>()
         const targets: RuntimeCandidate[] = []
-        // Keep the candidate set to two hosts, then sample each host once per stage.
-        const limit = limits.maxConcurrent
         for (const candidate of currentCandidates) {
             if (!candidate.probeAllowed) continue
-            if (seenHosts.has(candidate.host)) continue
-            seenHosts.add(candidate.host)
-            targets.push(candidate)
-            if (targets.length >= limit) break
+            const existingIndex = indexesByHost.get(candidate.host)
+            if (existingIndex === undefined) {
+                indexesByHost.set(candidate.host, targets.length)
+                targets.push({ ...candidate })
+                continue
+            }
+            if (candidate.bandwidthBps !== undefined) {
+                targets[existingIndex].bandwidthBps = Math.max(
+                    targets[existingIndex].bandwidthBps ?? 0,
+                    candidate.bandwidthBps,
+                )
+            }
         }
         return targets
     }
 
-    async function probeCandidate(candidate: RuntimeCandidate, byteCap: number, timeoutMs: number): Promise<ProbeOutcome> {
+    async function probeCandidate(
+        candidate: RuntimeCandidate,
+        byteCap: number,
+        timeoutMs: number,
+        stage: 1 | 2,
+    ): Promise<ProbeOutcome> {
         const fetchImpl = dependencies.fetch
         if (!candidate.probeAllowed || !fetchImpl || byteCap <= 0) {
-            return { host: candidate.host, kind: 'unprobeable', bytes: 0, observedBytes: 0 }
+            return {
+                host: candidate.host,
+                kind: 'unprobeable',
+                bytes: 0,
+                observedBytes: 0,
+                budgetBytes: 0,
+                safeToContinue: true,
+                stage,
+                ...(candidate.bandwidthBps === undefined ? {} : { bandwidthBps: candidate.bandwidthBps }),
+            }
         }
         const controller = dependencies.createAbortController()
-        activeControllers.add(controller)
+        trackActiveController(controller)
         const startedAt = dependencies.now()
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
         let responseBody: ReadableStream<Uint8Array> | null | undefined
@@ -722,9 +847,25 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         let accountedBytes = 0
         let observedBytes = 0
         let timerHandle = 0
-        let readerCleanup: Promise<void> | undefined
-        let bodyCleanup: Promise<void> | undefined
+        let readerCleanup: Promise<boolean> | undefined
+        let bodyCleanup: Promise<boolean> | undefined
         let readerLockReleased = false
+        let cleanupProven = true
+        let lateCleanupSucceeded = false
+        let requestSettled = false
+
+        const observeCleanup = (
+            cleanup: { completedWithinBudget: boolean; settled: Promise<boolean> },
+        ) => {
+            cleanupProven &&= cleanup.completedWithinBudget
+            if (!cleanup.completedWithinBudget) {
+                void cleanup.settled.then(succeeded => {
+                    lateCleanupSucceeded ||= succeeded
+                    if (succeeded && requestSettled) releaseActiveController(controller)
+                })
+            }
+            return cleanup.completedWithinBudget
+        }
 
         const releaseReaderLock = () => {
             if (!reader || readerLockReleased) return
@@ -736,25 +877,30 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             }
         }
         const cleanupReader = () => {
-            if (!reader) return Promise.resolve()
+            if (!reader) return Promise.resolve(true)
             if (!readerCleanup) {
                 readerCleanup = (async () => {
+                    let completed = true
                     try {
                         if (!streamDone) {
-                            await cancelWithBudget(() => reader!.cancel(), controller, timeoutMs)
+                            completed = observeCleanup(
+                                await cancelWithBudget(() => reader!.cancel(), controller, timeoutMs),
+                            )
                         }
                     } finally {
                         releaseReaderLock()
                     }
+                    return completed
                 })()
             }
             return readerCleanup
         }
         const cleanupAvailableResource = () => {
             if (reader) return cleanupReader()
-            if (!responseBody) return Promise.resolve()
+            if (!responseBody) return Promise.resolve(true)
             if (!bodyCleanup) {
                 bodyCleanup = cancelWithBudget(() => responseBody!.cancel(), controller, timeoutMs)
+                    .then(observeCleanup)
             }
             return bodyCleanup
         }
@@ -763,6 +909,10 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             kind,
             bytes: accountedBytes,
             observedBytes,
+            budgetBytes: Math.max(accountedBytes, observedBytes),
+            safeToContinue: true,
+            stage,
+            ...(candidate.bandwidthBps === undefined ? {} : { bandwidthBps: candidate.bandwidthBps }),
         })
 
         const timeoutToken = Symbol('timeout')
@@ -831,10 +981,14 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                 const elapsedMs = Math.max(1, endedAt - (firstByteAt ?? startedAt))
                 requestOutcomeChosen = true
                 if (accountedBytes === 0) return snapshot('unprobeable')
+                const throughputKbps = accountedBytes > 0 ? accountedBytes * 8 / elapsedMs : undefined
                 return {
                     ...snapshot('success'),
                     ttfbMs: Math.max(0, (firstByteAt ?? endedAt) - startedAt),
-                    throughputKbps: accountedBytes > 0 ? accountedBytes * 8 / elapsedMs : undefined,
+                    throughputKbps,
+                    ...(throughputKbps === undefined || candidate.bandwidthBps === undefined
+                        ? {}
+                        : { bitrateMargin: throughputKbps / (candidate.bandwidthBps / 1000) }),
                 }
             } finally {
                 if (reader) {
@@ -843,7 +997,10 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                     releaseReaderLock()
                 }
             }
-        })()
+        })().finally(() => {
+            requestSettled = true
+            if (cleanupProven || lateCleanupSucceeded) releaseActiveController(controller)
+        })
         let outcome: ProbeOutcome
         try {
             const winner = await Promise.race([requestResult, timeoutResult, abortResult])
@@ -858,13 +1015,21 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             dependencies.clearTimeout(timerHandle)
             if (cleanupRequested) {
                 await cleanupAvailableResource()
-                // Let a canceled read publish its final observed/accounted counters.
+                // Let a standards-compliant canceled read settle before deciding whether another batch is safe.
+                await Promise.resolve()
                 await Promise.resolve()
             }
-            activeControllers.delete(controller)
             controller.signal.removeEventListener('abort', onAbort)
         }
-        return timedOut ? snapshot('failure') : outcome
+        const finalOutcome = timedOut ? snapshot('failure') : outcome
+        const safeToContinue = requestSettled && cleanupProven
+        return {
+            ...finalOutcome,
+            budgetBytes: safeToContinue
+                ? Math.max(finalOutcome.bytes, finalOutcome.observedBytes)
+                : Math.max(byteCap, finalOutcome.observedBytes),
+            safeToContinue,
+        }
     }
 
     function updateHealth(outcome: ProbeOutcome) {
@@ -882,6 +1047,9 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             return
         }
         const nextSuccesses = previousSuccesses + 1
+        const previousMeasuredBytes = previous.measuredBytes ?? 0
+        const sampleBytes = outcome.bytes
+        const measuredBytes = previousMeasuredBytes + sampleBytes
         healthByHost[outcome.host] = {
             ...previous,
             successes: nextSuccesses,
@@ -889,26 +1057,91 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             samples: previousSamples + 1,
             throughputKbps: outcome.throughputKbps === undefined
                 ? previous.throughputKbps
-                : ((previous.throughputKbps ?? outcome.throughputKbps) * previousSuccesses + outcome.throughputKbps) / nextSuccesses,
+                : previous.throughputKbps === undefined || previousMeasuredBytes === 0
+                    ? outcome.throughputKbps
+                    : (previous.throughputKbps * previousMeasuredBytes + outcome.throughputKbps * sampleBytes)
+                        / Math.max(1, measuredBytes),
             ttfbMs: outcome.ttfbMs === undefined
                 ? previous.ttfbMs
                 : ((previous.ttfbMs ?? outcome.ttfbMs) * previousSuccesses + outcome.ttfbMs) / nextSuccesses,
+            measuredBytes,
         }
     }
 
-    function statusFromOutcomes(outcomes: readonly ProbeOutcome[], total: number): CdnProbeStatus {
-        const healthyHosts = uniqueSorted(outcomes.filter(outcome => outcome.kind === 'success').map(outcome => outcome.host))
-        const failedHosts = uniqueSorted(outcomes.filter(outcome => outcome.kind === 'failure').map(outcome => outcome.host))
-        const unprobeableHosts = uniqueSorted([
-            ...outcomes.filter(outcome => outcome.kind === 'unprobeable').map(outcome => outcome.host),
-            ...policyBlockedHosts(currentCandidates),
-        ])
+    function statusFromOutcomes(
+        outcomes: readonly ProbeOutcome[],
+        total: number,
+        budgetLimitedHosts: readonly string[],
+        incomplete = false,
+    ): CdnProbeStatus {
+        const byHost = new Map<string, ProbeOutcome[]>()
+        for (const outcome of outcomes) {
+            const hostOutcomes = byHost.get(outcome.host) ?? []
+            hostOutcomes.push(outcome)
+            byHost.set(outcome.host, hostOutcomes)
+        }
+        const healthyHosts: string[] = []
+        const failedHosts: string[] = []
+        const unprobeableHosts = policyBlockedHosts(currentCandidates)
+        for (const [host, hostOutcomes] of byHost) {
+            if (hostOutcomes.some(outcome => outcome.kind === 'success')) healthyHosts.push(host)
+            else if (hostOutcomes.some(outcome => outcome.kind === 'failure')) failedHosts.push(host)
+            else unprobeableHosts.push(host)
+        }
+        healthyHosts.sort()
+        failedHosts.sort()
+        const sortedUnprobeableHosts = uniqueSorted(unprobeableHosts)
+        const sortedBudgetLimitedHosts = uniqueSorted(budgetLimitedHosts)
+        const hostDiagnostics: CdnProbeHostDiagnostic[] = []
+        for (const [host, hostOutcomes] of byHost) {
+            const successful = hostOutcomes.filter(outcome => outcome.kind === 'success')
+            const representative = successful[successful.length - 1] ?? hostOutcomes[hostOutcomes.length - 1]
+            const classification = successful.length
+                ? 'healthy'
+                : hostOutcomes.some(outcome => outcome.kind === 'failure')
+                    ? 'failed'
+                    : 'unprobeable'
+            hostDiagnostics.push({
+                host,
+                classification,
+                stagesCompleted: hostOutcomes.length,
+                accountedBytes: hostOutcomes.reduce((sum, outcome) => sum + outcome.bytes, 0),
+                observedBytes: hostOutcomes.reduce((sum, outcome) => sum + outcome.observedBytes, 0),
+                ...(representative.throughputKbps === undefined ? {} : { throughputKbps: representative.throughputKbps }),
+                ...(representative.ttfbMs === undefined ? {} : { ttfbMs: representative.ttfbMs }),
+                ...(representative.bandwidthBps === undefined ? {} : { bandwidthBps: representative.bandwidthBps }),
+                ...(representative.bitrateMargin === undefined ? {} : { bitrateMargin: representative.bitrateMargin }),
+            })
+        }
+        for (const host of policyBlockedHosts(currentCandidates)) {
+            if (byHost.has(host)) continue
+            hostDiagnostics.push({
+                host,
+                classification: 'unprobeable',
+                stagesCompleted: 0,
+                accountedBytes: 0,
+                observedBytes: 0,
+            })
+        }
+        for (const host of sortedBudgetLimitedHosts) {
+            hostDiagnostics.push({
+                host,
+                classification: 'budget-limited',
+                stagesCompleted: 0,
+                accountedBytes: 0,
+                observedBytes: 0,
+            })
+        }
+        hostDiagnostics.sort((left, right) => left.host.localeCompare(right.host))
         let state: CdnProbeState
         let message: string
-        if (healthyHosts.length && outcomes.length === total && !failedHosts.length && !unprobeableHosts.length) {
+        const complete = outcomes.length === total && !incomplete
+        if (healthyHosts.length && complete && !failedHosts.length
+            && !sortedUnprobeableHosts.length && !sortedBudgetLimitedHosts.length) {
             state = 'ready'
             message = 'CDN health probe completed.'
-        } else if (healthyHosts.length) {
+        } else if (!complete || sortedBudgetLimitedHosts.length
+            || [healthyHosts.length, failedHosts.length, sortedUnprobeableHosts.length].filter(Boolean).length > 1) {
             state = 'partial'
             message = 'CDN health probe completed with partial results.'
         } else if (failedHosts.length) {
@@ -926,17 +1159,40 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             probedHosts: uniqueSorted(outcomes.map(outcome => outcome.host)),
             healthyHosts,
             failedHosts,
-            unprobeableHosts,
+            unprobeableHosts: sortedUnprobeableHosts,
+            budgetLimitedHosts: sortedBudgetLimitedHosts,
+            hostDiagnostics,
             completed: outcomes.length,
             total,
             updatedAt: dependencies.now(),
         }
     }
 
+    function compareProbeRank(left: ProbeOutcome, right: ProbeOutcome) {
+        const leftThroughputKnown = left.throughputKbps !== undefined
+        const rightThroughputKnown = right.throughputKbps !== undefined
+        if (leftThroughputKnown !== rightThroughputKnown) return leftThroughputKnown ? -1 : 1
+        if (left.throughputKbps !== right.throughputKbps) {
+            return (right.throughputKbps ?? 0) - (left.throughputKbps ?? 0)
+        }
+
+        const leftMarginKnown = left.bitrateMargin !== undefined
+        const rightMarginKnown = right.bitrateMargin !== undefined
+        if (leftMarginKnown !== rightMarginKnown) return leftMarginKnown ? -1 : 1
+        if (left.bitrateMargin !== right.bitrateMargin) {
+            return (right.bitrateMargin ?? 0) - (left.bitrateMargin ?? 0)
+        }
+
+        const leftTtfbKnown = left.ttfbMs !== undefined
+        const rightTtfbKnown = right.ttfbMs !== undefined
+        if (leftTtfbKnown !== rightTtfbKnown) return leftTtfbKnown ? -1 : 1
+        return (left.ttfbMs ?? Number.MAX_SAFE_INTEGER) - (right.ttfbMs ?? Number.MAX_SAFE_INTEGER)
+    }
+
     async function runProbe(runGeneration: number) {
         const runNetworkHint = currentNetworkHint()
-        const stageTargets = selectProbeTargets()
-        if (!stageTargets.length) {
+        const allTargets = selectProbeTargets()
+        if (!allTargets.length) {
             const candidateHosts = uniqueSorted(currentCandidates.map(candidate => candidate.host))
             const next: CdnProbeStatus = candidateHosts.length
                 ? {
@@ -947,6 +1203,14 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                     healthyHosts: [],
                     failedHosts: [],
                     unprobeableHosts: candidateHosts,
+                    budgetLimitedHosts: [],
+                    hostDiagnostics: candidateHosts.map(host => ({
+                        host,
+                        classification: 'unprobeable',
+                        stagesCompleted: 0,
+                        accountedBytes: 0,
+                        observedBytes: 0,
+                    })),
                     completed: 0,
                     total: 0,
                     updatedAt: dependencies.now(),
@@ -956,6 +1220,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             if (next.state === 'unprobeable') rememberUnprobeable(next, runGeneration)
             return cloneStatus(next)
         }
+        const budgetLimitedHosts = new Set<string>()
         const candidateHosts = uniqueSorted(currentCandidates.map(candidate => candidate.host))
         publish({
             state: 'probing',
@@ -966,69 +1231,188 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             healthyHosts: [],
             failedHosts: [],
             unprobeableHosts: policyBlockedHosts(currentCandidates),
+            budgetLimitedHosts: [],
+            hostDiagnostics: policyBlockedHosts(currentCandidates).map(host => ({
+                host,
+                classification: 'unprobeable' as const,
+                stagesCompleted: 0,
+                accountedBytes: 0,
+                observedBytes: 0,
+            })),
             completed: 0,
-            total: stageTargets.length * limits.maxStages,
+            total: allTargets.length,
             updatedAt: dependencies.now(),
         })
         const outcomes: ProbeOutcome[] = []
         const totalStartedAt = dependencies.now()
-        let remainingBytes = limits.maxTotalBytes
-        const totalAttempts = stageTargets.length * limits.maxStages
-        for (let stage = 0; stage < limits.maxStages; stage += 1) {
-            if (currentNetworkHint() !== runNetworkHint) {
-                ensureHealthForCurrentHosts()
-                break
+        let accountedRemaining = limits.maxTotalBytes
+        let observedRemaining = limits.maxTotalBytes
+        let totalAttempts = allTargets.length
+        let contextValid = true
+        let cleanupSafe = true
+
+        const probeStage = async (
+            targets: readonly RuntimeCandidate[],
+            requestedCap: number,
+            stage: 1 | 2,
+        ) => {
+            const stageOutcomes: ProbeOutcome[] = []
+            const stageStartedAt = dependencies.now()
+            let offset = 0
+            while (offset < targets.length) {
+                if (currentNetworkHint() !== runNetworkHint || runGeneration !== generation) {
+                    contextValid = false
+                    break
+                }
+                const totalRemainingMs = limits.totalTimeoutMs
+                    - Math.max(0, dependencies.now() - totalStartedAt)
+                const stageRemainingMs = limits.stageTimeoutMs
+                    - Math.max(0, dependencies.now() - stageStartedAt)
+                if (totalRemainingMs <= 0 || stageRemainingMs <= 0 || !cleanupSafe) break
+                const batch = targets.slice(offset, offset + limits.maxConcurrent)
+                const availableBytes = Math.min(accountedRemaining, Math.max(0, observedRemaining))
+                let caps: number[]
+                if (stage === 1) {
+                    const runnableCount = Math.min(batch.length, Math.floor(availableBytes / requestedCap))
+                    if (runnableCount === 0) {
+                        targets.slice(offset).forEach(target => budgetLimitedHosts.add(target.host))
+                        break
+                    }
+                    caps = Array.from({ length: runnableCount }, () => requestedCap)
+                } else {
+                    const batchBudget = Math.min(availableBytes, requestedCap * batch.length)
+                    const baseCap = Math.floor(batchBudget / batch.length)
+                    const extraBytes = batchBudget % batch.length
+                    caps = batch.map((_, index) => Math.min(
+                        requestedCap,
+                        baseCap + (index < extraBytes ? 1 : 0),
+                    ))
+                }
+                const runnable = batch
+                    .slice(0, caps.length)
+                    .map((candidate, index) => ({ candidate, cap: caps[index] }))
+                    .filter(entry => entry.cap > 0)
+                if (!runnable.length) break
+                const reservedBytes = runnable.reduce((sum, entry) => sum + entry.cap, 0)
+                accountedRemaining -= reservedBytes
+                const timeoutMs = Math.max(1, Math.min(
+                    limits.requestTimeoutMs,
+                    stageRemainingMs,
+                    totalRemainingMs,
+                ))
+                const batchOutcomes = await Promise.all(runnable.map(entry => (
+                    probeCandidate(entry.candidate, entry.cap, timeoutMs, stage)
+                )))
+                if (currentNetworkHint() !== runNetworkHint || runGeneration !== generation) {
+                    contextValid = false
+                    break
+                }
+                let accountedCharge = 0
+                let observedCharge = 0
+                for (let index = 0; index < batchOutcomes.length; index += 1) {
+                    const outcome = batchOutcomes[index]
+                    accountedCharge += outcome.safeToContinue ? outcome.bytes : runnable[index].cap
+                    observedCharge += outcome.budgetBytes
+                    cleanupSafe &&= outcome.safeToContinue
+                    outcomes.push(outcome)
+                    stageOutcomes.push(outcome)
+                    updateHealth(outcome)
+                }
+                accountedRemaining += Math.max(0, reservedBytes - accountedCharge)
+                observedRemaining -= observedCharge
+                offset += runnable.length
+                publish({
+                    ...statusFromOutcomes(outcomes, totalAttempts, [...budgetLimitedHosts], !cleanupSafe),
+                    state: 'probing',
+                    message: 'Testing current CDN hosts.',
+                })
             }
-            const elapsed = Math.max(0, dependencies.now() - totalStartedAt)
-            const totalRemainingMs = limits.totalTimeoutMs - elapsed
-            if (totalRemainingMs <= 0 || remainingBytes <= 0 || runGeneration !== generation) break
-            const baseTargetCap = Math.floor(remainingBytes / stageTargets.length)
-            const extraBytes = remainingBytes % stageTargets.length
-            const targetCaps = stageTargets.map((_, index) => Math.min(
-                limits.maxBytesPerRequest,
-                baseTargetCap + (index < extraBytes ? 1 : 0),
-            ))
-            const timeoutMs = Math.max(1, Math.min(
-                limits.requestTimeoutMs,
-                limits.stageTimeoutMs,
-                totalRemainingMs,
-            ))
-            const currentStageOutcomes = await Promise.all(
-                stageTargets.map((candidate, index) => probeCandidate(candidate, targetCaps[index], timeoutMs)),
-            )
-            if (currentNetworkHint() !== runNetworkHint) {
-                ensureHealthForCurrentHosts()
-                break
-            }
-            if (runGeneration !== generation) break
-            for (let index = 0; index < currentStageOutcomes.length; index += 1) {
-                const outcome = currentStageOutcomes[index]
-                outcomes.push(outcome)
-                remainingBytes = Math.max(0, remainingBytes - Math.max(outcome.bytes, outcome.observedBytes))
-                exactOutcomes.set(stageTargets[index].url, outcome)
-                updateHealth(outcome)
-            }
-            publish({
-                ...statusFromOutcomes(outcomes, totalAttempts),
-                state: 'probing',
-                message: 'Testing current CDN hosts.',
-            })
+            return stageOutcomes
         }
-        if (runGeneration !== generation) return cloneStatus(status)
-        healthHostHash = currentHostHash
+
+        const initialOutcomes = await probeStage(allTargets, limits.initialBytesPerRequest, 1)
+        const targetOrder = new Map(allTargets.map((target, index) => [target.host, index]))
+        const initialStageComplete = contextValid && cleanupSafe
+            && initialOutcomes.length === allTargets.length
+        const followupTargets = limits.maxStages < 2 || !initialStageComplete
+            ? []
+            : initialOutcomes
+                .map(outcome => ({ outcome, index: targetOrder.get(outcome.host) ?? Number.MAX_SAFE_INTEGER }))
+                .filter(entry => entry.outcome.kind === 'success')
+                .sort((left, right) => (
+                    compareProbeRank(left.outcome, right.outcome) || left.index - right.index
+                ))
+                .slice(0, 2)
+                .map(entry => allTargets[entry.index])
+        totalAttempts += followupTargets.length
+        if (followupTargets.length) {
+            await probeStage(followupTargets, limits.maxBytesPerRequest, 2)
+        }
+        if (!contextValid || runGeneration !== generation) {
+            ensureHealthForCurrentHosts()
+            return cloneStatus(status)
+        }
+        const cacheableRound = cleanupSafe
+            && budgetLimitedHosts.size === 0
+            && policyBlockedHosts(currentCandidates).length === 0
+            && initialOutcomes.length === allTargets.length
+            && outcomes.length === totalAttempts
+            && !outcomes.some(outcome => outcome.kind === 'unprobeable')
         healthNetworkHint = runNetworkHint
-        healthValidUntil = dependencies.now() + CDN_HEALTH_CACHE_TTL_MS
-        writeCache()
-        const next = statusFromOutcomes(outcomes, totalAttempts)
+        if (cacheableRound) {
+            healthHostHash = currentHostHash
+            healthValidUntil = dependencies.now() + CDN_HEALTH_CACHE_TTL_MS
+            writeCache()
+        } else {
+            healthHostHash = ''
+            healthValidUntil = 0
+            try {
+                dependencies.storage?.removeItem(CDN_HEALTH_CACHE_KEY)
+            } catch {
+                dependencies.log('cdn-health-cache-discard-failed')
+            }
+        }
+        const next = statusFromOutcomes(outcomes, totalAttempts, [...budgetLimitedHosts], !cleanupSafe)
         publish(next)
         if (next.state === 'unprobeable') rememberUnprobeable(next, runGeneration)
         else clearUnprobeableSuppression()
         return cloneStatus(next)
     }
 
+    function startProbe(runGeneration: number) {
+        const promise = runProbe(runGeneration).finally(() => {
+            if (inFlight === promise) inFlight = undefined
+        })
+        inFlight = promise
+        return promise
+    }
+
+    async function runForcedProbeAfterFence() {
+        while (true) {
+            if (activeControllers.size > 0) await activeControllerDrain
+            ensureHealthForCurrentHosts()
+            if (activeControllers.size > 0) continue
+            const runGeneration = generation
+            const result = await (inFlight ?? startProbe(runGeneration))
+            const terminal = result.state !== 'probing'
+                && (result.state !== 'idle' || result.candidateHosts.length === 0)
+            if (runGeneration === generation && terminal) return cloneStatus(result)
+        }
+    }
+
     function probeCurrentPlayUrlCdn(options: { force?: boolean } = {}) {
         ensureHealthForCurrentHosts()
+        if (options.force && fencedProbe) return fencedProbe
         if (inFlight) return inFlight
+        if (activeControllers.size > 0) {
+            if (!options.force) return Promise.resolve(cloneStatus(status))
+            if (fencedProbe) return fencedProbe
+            const promise = runForcedProbeAfterFence().finally(() => {
+                if (fencedProbe === promise) fencedProbe = undefined
+            })
+            fencedProbe = promise
+            return promise
+        }
         if (!options.force && unprobeableGeneration === generation
             && dependencies.now() < unprobeableUntil && suppressedUnprobeableStatus) {
             return Promise.resolve(cloneStatus(suppressedUnprobeableStatus))
@@ -1037,12 +1421,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             && dependencies.now() < healthValidUntil && Object.keys(healthByHost).length) {
             return Promise.resolve(cloneStatus(status))
         }
-        const runGeneration = generation
-        const promise = runProbe(runGeneration).finally(() => {
-            if (inFlight === promise) inFlight = undefined
-        })
-        inFlight = promise
-        return promise
+        return startProbe(generation)
     }
 
     function clearCdnHealthCache() {
@@ -1051,7 +1430,6 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         inFlight = undefined
         backgroundScheduled = false
         backgroundScheduleId += 1
-        exactOutcomes.clear()
         healthByHost = Object.create(null)
         healthHostHash = ''
         healthNetworkHint = ''

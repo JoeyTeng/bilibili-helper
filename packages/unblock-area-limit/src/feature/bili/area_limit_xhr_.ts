@@ -45,10 +45,15 @@ export const area_limit_xhr = (() => {
 
     function isCdnPlayUrlUrl(url) {
         if (typeof url !== 'string') return false
-        return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
+        return isWebPlayUrlUrl(url)
             || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
             || url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
             || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl'))
+    }
+
+    function isWebPlayUrlUrl(url) {
+        return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
+            || url.match(RegExps.url('api.bilibili.com/x/player/wbi/playurl'))
     }
 
     return function () {
@@ -230,10 +235,12 @@ export const area_limit_xhr = (() => {
                         log('/subtitle', url);
                         const json = JSON.parse(xhr.responseText);
                         return rewriteSubtitleBodyJson(json, url);
-                    } else if (url.match(RegExps.url('api.bilibili.com/x/player/playurl'))) {
-                        log('/x/player/playurl', 'origin', `block: ${container.__block_response}`, xhr.response)
+                    } else if (isWebPlayUrlUrl(url)) {
+                        log(new URL(url, document.location.href).pathname, 'origin', `block: ${container.__block_response}`)
                         try {
-                            const json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                            const json = xhr.response !== null && typeof xhr.response === 'object'
+                                ? JSON.parse(JSON.stringify(xhr.response))
+                                : JSON.parse(xhr.responseText)
                             return applyCdnPolicyToPlayUrlResponse(json)
                         } catch (error) {
                             util_warn('XHR playurl CDN selection failed', error)

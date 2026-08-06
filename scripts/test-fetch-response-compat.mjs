@@ -68,6 +68,7 @@ const { injectFetch, jsonResponse } = await import(pathToFileURL(outFile).href)
 await testJsonResponseCompatibility(jsonResponse)
 await testBinarySubtitleResponseCompatibility(injectFetch)
 await testCdnOnlyIsolation(injectFetch)
+await testWbiFetchModes(injectFetch)
 
 console.log('fetch response compatibility tests passed')
 
@@ -316,17 +317,25 @@ async function testCdnOnlyIsolation(injectFetch) {
         const url = String(input)
         let response
         if (url.includes('/playurl')) {
+            const playUrlEnvelope = url.includes('/x/player/wbi/playurl')
+                ? {
+                    code: 0,
+                    message: '0',
+                    ttl: 1,
+                    data: { dash: { video: [], audio: [] } },
+                }
+                : {
+                    code: 0,
+                    result: {
+                        video_info: {
+                            dash: { video: [], audio: [] },
+                        },
+                    },
+                }
             response = responseWithMetadata(
                 url.includes('malformed=1')
                     ? '{"code":0,"result":'
-                    : JSON.stringify({
-                        code: 0,
-                        result: {
-                            video_info: {
-                                dash: { video: [], audio: [] },
-                            },
-                        },
-                    }), {
+                    : JSON.stringify(playUrlEnvelope), {
                     url,
                     redirected: false,
                     type: 'cors',
@@ -343,15 +352,25 @@ async function testCdnOnlyIsolation(injectFetch) {
     }
     injectFetch({ cdnOnly: true })
 
-    for (const url of [
-        'https://api.bilibili.com/pgc/player/web/playurl?ep_id=1',
-        'https://api.bilibili.com/x/player/playurl?cid=1',
+    for (const { url, payload } of [
+        {
+            url: 'https://api.bilibili.com/pgc/player/web/playurl?ep_id=1',
+            payload: json => json.result.video_info,
+        },
+        {
+            url: 'https://api.bilibili.com/x/player/playurl?cid=1',
+            payload: json => json.result.video_info,
+        },
+        {
+            url: 'https://api.bilibili.com/x/player/wbi/playurl?cid=1&w_rid=signed&wts=1',
+            payload: json => json.data,
+        },
     ]) {
         const response = await window.fetch.call(receiver, url)
         const json = await response.json()
-        assert.equal(json.result.video_info.cdnApplied, true, `${url}: CDN transform should run`)
+        assert.equal(payload(json).cdnApplied, true, `${url}: CDN transform should run`)
     }
-    assert.equal(state.cdnCalls, 2)
+    assert.equal(state.cdnCalls, 3)
     assert.equal(state.proxyCalls, 0, 'CDN-only fetch must not attempt a PGC proxy')
 
     const malformedUrl = 'https://api.bilibili.com/x/player/playurl?cid=2&malformed=1'
@@ -372,7 +391,7 @@ async function testCdnOnlyIsolation(injectFetch) {
         },
     }, 'CDN policy failure must not partially mutate the predecessor body')
     state.throwFromCdn = false
-    assert.equal(state.cdnCalls, 3)
+    assert.equal(state.cdnCalls, 4)
 
     const subtitleUrl = 'https://api.bilibili.com/x/v2/subtitle/web/view?aid=1&cid=2'
     const subtitleResponse = await window.fetch.call(receiver, subtitleUrl)
@@ -383,6 +402,76 @@ async function testCdnOnlyIsolation(injectFetch) {
     assert.equal(accountResponse, responses.at(-1), 'CDN-only account response should retain native identity')
     assert.equal(state.binaryRewriteCalls, 0, 'CDN-only fetch must not rewrite subtitle bodies')
     assert.equal(state.metadataRewriteCalls, 0, 'CDN-only fetch must not rewrite subtitle request URLs')
+}
+
+async function testWbiFetchModes(injectFetch) {
+    for (const mode of [
+        { label: 'full', options: undefined },
+        { label: 'CDN-only', options: { cdnOnly: true } },
+    ]) {
+        resetState()
+        const receiver = { name: `${mode.label} WBI receiver` }
+        const calls = []
+        const responses = []
+        const signedMediaUrl = 'https://fetch-wbi.test.bilivideo.com/video.m4s?deadline=private&token=preserve'
+        window.fetch = async function (input, init) {
+            assert.equal(this, receiver, `${mode.label}: predecessor receiver changed`)
+            calls.push({ input, init })
+            const envelope = {
+                code: 0,
+                message: '0',
+                ttl: 1,
+                data: { dash: { video: [{ id: 80, baseUrl: signedMediaUrl }], audio: [] } },
+            }
+            const response = responseWithMetadata(JSON.stringify(envelope), {
+                url: String(input),
+                redirected: false,
+                type: 'cors',
+            }, 'application/json')
+            responses.push(response)
+            return response
+        }
+        injectFetch(mode.options)
+
+        const successUrl = 'https://api.bilibili.com/x/player/wbi/playurl?cid=11&w_rid=success-signed&wts=101'
+        const successInit = {
+            method: 'POST',
+            body: 'signed-request-body',
+            headers: { 'x-request-fixture': 'preserve' },
+        }
+        const successResponse = await window.fetch.call(receiver, successUrl, successInit)
+        assert.equal(calls[0].input, successUrl, `${mode.label}: WBI URL changed`)
+        assert.strictEqual(calls[0].init, successInit, `${mode.label}: WBI init changed`)
+        assert.notStrictEqual(successResponse, responses[0], `${mode.label}: successful WBI response was not rebuilt`)
+        const successJson = await successResponse.json()
+        assert.equal(successJson.data.cdnApplied, true, `${mode.label}: WBI CDN transform did not run`)
+        assert.equal(successJson.data.dash.video[0].baseUrl, signedMediaUrl, `${mode.label}: signed media URL changed`)
+
+        state.throwFromCdn = true
+        const failureUrl = 'https://api.bilibili.com/x/player/wbi/playurl?cid=12&w_rid=failure-signed&wts=102'
+        const failureInit = {
+            method: 'POST',
+            body: 'failure-request-body',
+            headers: { 'x-request-fixture': 'preserve-failure' },
+        }
+        const failureResponse = await window.fetch.call(receiver, failureUrl, failureInit)
+        assert.equal(calls[1].input, failureUrl, `${mode.label}: failed WBI URL changed`)
+        assert.strictEqual(calls[1].init, failureInit, `${mode.label}: failed WBI init changed`)
+        assert.strictEqual(failureResponse, responses[1], `${mode.label}: WBI failure did not return the predecessor response`)
+        assert.deepEqual(await failureResponse.json(), {
+            code: 0,
+            message: '0',
+            ttl: 1,
+            data: {
+                dash: {
+                    video: [{ id: 80, baseUrl: signedMediaUrl }],
+                    audio: [],
+                },
+            },
+        }, `${mode.label}: WBI failure partially mutated the predecessor body`)
+        assert.equal(state.cdnCalls, 2, `${mode.label}: unexpected WBI CDN transform count`)
+        assert.equal(state.proxyCalls, 0, `${mode.label}: signed WBI request entered a proxy path`)
+    }
 }
 
 function responseWithMetadata(body, metadata, contentType) {

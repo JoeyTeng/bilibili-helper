@@ -16,6 +16,8 @@ export interface HostHealth {
     samples?: number
     throughputKbps?: number
     ttfbMs?: number
+    /** Bytes represented by the weighted throughput sample. */
+    measuredBytes?: number
 }
 
 export type HostHealthCollection =
@@ -49,6 +51,8 @@ export interface CdnCandidateGroup {
     /** A structural key. It never contains a media URL or query string. */
     readonly key: string
     readonly kind: CdnCandidateGroupKind
+    /** DASH Representation@bandwidth in bits per second, when reliably declared. */
+    readonly bandwidthBps?: number
     /** Ordered, exact response URLs for this stream or durl segment only. */
     readonly candidates: readonly CdnCandidate[]
 }
@@ -63,6 +67,8 @@ export type CdnSelectionReason =
 export interface CdnHostDiagnostic {
     readonly host: string
     readonly riskKinds: readonly CdnRiskKind[]
+    readonly throughputKbps: number | null
+    readonly bitrateMargin: number | null
 }
 
 export interface CdnSelectionDiagnostic {
@@ -72,6 +78,7 @@ export interface CdnSelectionDiagnostic {
     readonly reason: CdnSelectionReason
     readonly originalHost: string | null
     readonly selectedHost: string | null
+    readonly bandwidthBps: number | null
     readonly candidates: readonly CdnHostDiagnostic[]
 }
 
@@ -239,6 +246,7 @@ export function optimizePlayUrlCdn(
 ): OptimizePlayUrlCdnResult {
     const bindings = collectMutableGroups(playUrl)
     const diagnostics: CdnSelectionDiagnostic[] = []
+    const health = options.hostHealth ? createHealthLookup(options.hostHealth) : new Map<string, HostHealth>()
     let changed = false
 
     for (const binding of bindings) {
@@ -269,10 +277,22 @@ export function optimizePlayUrlCdn(
             reason,
             originalHost: original[0]?.host ?? null,
             selectedHost: selected[0]?.host ?? null,
-            candidates: original.map(candidate => ({
-                host: candidate.host,
-                riskKinds: candidate.riskKinds,
-            })),
+            bandwidthBps: binding.group.bandwidthBps ?? null,
+            candidates: original.map(candidate => {
+                const normalized = normalizeHealth(findHealth(health, candidate) ?? {})
+                const throughputKbps = normalized.throughputKbps
+                const bitrateKbps = binding.group.bandwidthBps === undefined
+                    ? null
+                    : binding.group.bandwidthBps / 1000
+                return {
+                    host: candidate.host,
+                    riskKinds: candidate.riskKinds,
+                    throughputKbps,
+                    bitrateMargin: throughputKbps !== null && bitrateKbps !== null
+                        ? throughputKbps / bitrateKbps
+                        : null,
+                }
+            }),
         })
     }
 
@@ -351,8 +371,15 @@ function createMutableGroup(
         .filter((candidate): candidate is CdnCandidate => candidate !== null)
     if (candidates.length === 0) return null
 
+    const bandwidthBps = kind === 'durl' ? undefined : positiveFinite(stream.bandwidth)
+
     return {
-        group: { key, kind, candidates },
+        group: {
+            key,
+            kind,
+            candidates,
+            ...(bandwidthBps === undefined ? {} : { bandwidthBps }),
+        },
         apply(nextUrls) {
             if (mainSlots.length === 0 || nextUrls.length === 0) return false
             return applyCandidateOccurrences(mainSlots, backupSlotGroups, nextUrls)
@@ -560,6 +587,12 @@ function normalizeMinSamples(value: number | undefined): number {
 
 function nonNegativeFinite(value: number | undefined): number | null {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function positiveFinite(value: unknown): number | undefined {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+    const integer = Math.floor(value)
+    return integer > 0 ? integer : undefined
 }
 
 function parseCompleteUrl(value: unknown): URL | null {

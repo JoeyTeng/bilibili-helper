@@ -231,6 +231,45 @@ assert.equal(nullShapes.dash.dolby.audio, null)
 assert.equal(nullShapes.dash.flac.audio, null)
 assert.equal(nullShapes.durl, null)
 
+{
+    const bandwidthPlayUrl = {
+        dash: {
+            video: [{
+                bandwidth: 1_500_000,
+                base_url: safeOv,
+                backup_url: [safeAkamai],
+            }],
+            audio: [{ bandwidth: '192000', base_url: safePlain }],
+            dolby: { audio: { bandwidth: 640_000, baseUrl: safeBcache } },
+            flac: { audio: [{ bandwidth: Number.POSITIVE_INFINITY, base_url: safeAkamai }] },
+        },
+        durl: [{ url: safePlain, size: 1_000_000, length: 5_000 }],
+    }
+    const groups = collectPlayUrlCdnGroups(bandwidthPlayUrl)
+    assert.equal(groups.find(group => group.key === 'dash.video[0]').bandwidthBps, 1_500_000)
+    assert.equal(groups.find(group => group.key === 'dash.audio[0]').bandwidthBps, undefined)
+    assert.equal(groups.find(group => group.key === 'dash.dolby.audio').bandwidthBps, 640_000)
+    assert.equal(groups.find(group => group.key === 'dash.flac.audio[0]').bandwidthBps, undefined)
+    assert.equal(groups.find(group => group.key === 'durl[0]').bandwidthBps, undefined)
+
+    const result = optimizePlayUrlCdn(bandwidthPlayUrl, {
+        mode: 'auto',
+        hostHealth: {
+            [classifyCdnUrl(safeOv).host]: {
+                samples: 2,
+                successes: 2,
+                throughputKbps: 3_000,
+            },
+        },
+    })
+    const videoDiagnostic = result.diagnostics.find(item => item.group === 'dash.video[0]')
+    assert.equal(videoDiagnostic.bandwidthBps, 1_500_000)
+    assert.equal(videoDiagnostic.candidates[0].throughputKbps, 3_000)
+    assert.equal(videoDiagnostic.candidates[0].bitrateMargin, 2)
+    assert.equal(result.diagnostics.find(item => item.group === 'durl[0]').bandwidthBps, null)
+    assert.doesNotMatch(JSON.stringify(result), /\/media\/|token=|https?:/)
+}
+
 for (const mode of ['original', 'manual']) {
     const untouched = {
         dash: { video: [{ base_url: riskyMcdn, backup_url: [safeOv] }] },

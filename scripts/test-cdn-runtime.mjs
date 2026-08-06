@@ -69,6 +69,7 @@ globalThis.window.document = globalThis.document
 const runtimeModule = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
 const {
     CDN_HEALTH_CACHE_KEY,
+    CDN_HEALTH_CACHE_VERSION,
     CDN_HEALTH_CACHE_TTL_MS,
     CDN_UNPROBEABLE_RETRY_SUPPRESSION_MS,
     createCdnRuntime,
@@ -81,6 +82,7 @@ function candidateGroups(playUrl) {
     return [{
         key: 'test',
         kind: 'dash-video',
+        ...(playUrl.bandwidthBps === undefined ? {} : { bandwidthBps: playUrl.bandwidthBps }),
         candidates: playUrl.urls.map(url => {
             const parsed = new URL(url)
             const ipLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsed.hostname)
@@ -269,7 +271,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.doesNotMatch(cacheText, /deadline|token|segment\.m4s/)
     const cache = JSON.parse(cacheText)
     assert.deepEqual(Object.keys(cache.hosts), ['cdn-a.test.bilivideo.com:8443'])
-    assert.equal(cache.version, 1)
+    assert.equal(cache.version, CDN_HEALTH_CACHE_VERSION)
     assert.equal(cache.networkHint, 'wifi:test')
     assert.equal(typeof cache.candidateHostHash, 'string')
     assert.doesNotMatch(JSON.stringify(logs), /deadline|token|segment\.m4s/)
@@ -399,7 +401,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(timerCallbacks.size, 1)
     ;[...timerCallbacks.values()][0]()
     const result = await pending
-    assert.equal(result.state, 'failed')
+    assert.equal(result.state, 'partial')
     assert.equal(aborted, 1)
     assert.equal(cancelled, 1)
     assert.equal(released, 1)
@@ -432,7 +434,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const pending = runtime.probeCurrentPlayUrlCdn({ force: true })
     await flushMicrotasks()
     ;[...timerCallbacks.values()][0]()
-    assert.equal((await pending).state, 'failed')
+    assert.equal((await pending).state, 'partial')
     assert.equal(requestSignal.aborted, true)
     const settledStatus = JSON.stringify(runtime.getCdnProbeStatus())
     resolveFetch({
@@ -459,13 +461,66 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
 }
 
 {
+    let fetches = 0
+    let resolveOldRead
+    let oldSignal
+    const runtime = makeRuntime({
+        fetch: async (_url, init) => {
+            fetches += 1
+            if (fetches > 1) return streamResponse([new Uint8Array(4)])
+            oldSignal = init.signal
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            read() { return new Promise(resolve => { resolveOldRead = resolve }) },
+                            cancel() { return Promise.resolve() },
+                            releaseLock() { },
+                        }
+                    },
+                },
+            }
+        },
+        limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 4 },
+    })
+    runtime.applyCdnPolicy({ urls: [signedUrl] })
+    const oldProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    await flushMicrotasks()
+    assert.equal(fetches, 1)
+
+    runtime.clearCdnHealthCache()
+    assert.equal(oldSignal.aborted, true)
+    let forcedSettled = false
+    const forcedA = runtime.probeCurrentPlayUrlCdn({ force: true })
+    const forcedB = runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.strictEqual(forcedA, forcedB)
+    void forcedA.then(() => { forcedSettled = true })
+    await flushMicrotasks(10)
+    assert.equal(forcedSettled, false)
+    assert.equal(fetches, 1)
+
+    resolveOldRead({ done: true, value: undefined })
+    for (let index = 0; index < 20 && fetches < 2; index += 1) await flushMicrotasks()
+    assert.equal(fetches, 2)
+    const result = await forcedA
+    assert.equal(result.state, 'ready')
+    assert.equal(forcedSettled, true)
+    await oldProbe
+}
+
+{
     const timerCallbacks = new Map()
     let nextTimer = 0
     let resolveRead
     let reads = 0
     let cancels = 0
+    let fetches = 0
     const runtime = makeRuntime({
-        fetch: async () => ({
+        fetch: async () => {
+            fetches += 1
+            return ({
             ok: true,
             type: 'basic',
             body: {
@@ -483,7 +538,8 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
                     }
                 },
             },
-        }),
+            })
+        },
         setTimeout(callback) {
             const id = ++nextTimer
             timerCallbacks.set(id, callback)
@@ -494,17 +550,25 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
         },
         limits: { maxConcurrent: 1, maxStages: 1, requestTimeoutMs: 10, stageTimeoutMs: 10, totalTimeoutMs: 10 },
     })
-    runtime.applyCdnPolicy({ urls: [signedUrl] })
+    runtime.applyCdnPolicy({ urls: [
+        signedUrl,
+        'https://late-next.test.bilivideo.com/media.m4s?sig=must-not-start',
+    ] })
     const pending = runtime.probeCurrentPlayUrlCdn({ force: true })
     await flushMicrotasks()
     assert.equal(reads, 1)
     ;[...timerCallbacks.values()][0]()
-    assert.equal((await pending).state, 'failed')
+    const result = await pending
+    assert.equal(result.state, 'partial')
+    assert.equal(result.completed, 1)
+    assert.equal(result.total, 2)
+    assert.equal(fetches, 1)
     assert.equal(cancels, 1)
     const settledStatus = JSON.stringify(runtime.getCdnProbeStatus())
     resolveRead({ done: false, value: new Uint8Array(2) })
     await flushMicrotasks(10)
     assert.equal(reads, 1)
+    assert.equal(fetches, 1)
     assert.equal(JSON.stringify(runtime.getCdnProbeStatus()), settledStatus)
 }
 
@@ -515,8 +579,11 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     let resolveCancel
     let released = 0
     let settled = false
+    let requestSignal
     const runtime = makeRuntime({
-        fetch: async () => ({
+        fetch: async (_url, init) => {
+            requestSignal = init.signal
+            return ({
             ok: true,
             type: 'basic',
             body: {
@@ -537,7 +604,8 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
                     }
                 },
             },
-        }),
+            })
+        },
         setTimeout(callback) {
             const id = ++nextTimer
             timerCallbacks.set(id, callback)
@@ -558,10 +626,72 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(settled, false)
     assert.equal(released, 0)
     assert.equal(typeof resolveCancel, 'function')
-    resolveCancel()
-    assert.equal((await pending).state, 'ready')
+    assert.equal(timerCallbacks.size, 2)
+    timerCallbacks.get(Math.max(...timerCallbacks.keys()))()
+    assert.equal((await pending).state, 'partial')
+    assert.equal(settled, true)
     assert.equal(released, 1)
+    assert.equal(requestSignal.aborted, true)
     assert.deepEqual([...cleared].sort(), [1, 2])
+}
+
+{
+    const timerCallbacks = new Map()
+    let nextTimer = 0
+    let resolveCancel
+    let fetches = 0
+    const runtime = makeRuntime({
+        fetch: async () => {
+            fetches += 1
+            if (fetches > 1) return streamResponse([new Uint8Array(4)])
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            async read() { return { done: false, value: new Uint8Array(16) } },
+                            cancel() {
+                                return new Promise(resolve => { resolveCancel = resolve })
+                            },
+                            releaseLock() { },
+                        }
+                    },
+                },
+            }
+        },
+        setTimeout(callback) {
+            const id = ++nextTimer
+            timerCallbacks.set(id, callback)
+            return id
+        },
+        clearTimeout(id) {
+            timerCallbacks.delete(id)
+        },
+        limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 4 },
+    })
+    runtime.applyCdnPolicy({ urls: [signedUrl] })
+    const firstProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    await flushMicrotasks()
+    assert.equal(typeof resolveCancel, 'function')
+    timerCallbacks.get(Math.max(...timerCallbacks.keys()))()
+    assert.equal((await firstProbe).state, 'partial')
+    assert.equal(fetches, 1)
+
+    let forcedSettled = false
+    const forcedA = runtime.probeCurrentPlayUrlCdn({ force: true })
+    const forcedB = runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.strictEqual(forcedA, forcedB)
+    void forcedA.then(() => { forcedSettled = true })
+    await flushMicrotasks(10)
+    assert.equal(forcedSettled, false)
+    assert.equal(fetches, 1)
+
+    resolveCancel()
+    for (let index = 0; index < 20 && fetches < 2; index += 1) await flushMicrotasks()
+    assert.equal(fetches, 2)
+    assert.equal((await forcedA).state, 'ready')
+    assert.equal(forcedSettled, true)
 }
 
 {
@@ -593,7 +723,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
         limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 4 },
     })
     rejectingReaderRuntime.applyCdnPolicy({ urls: [signedUrl] })
-    assert.equal((await rejectingReaderRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
+    assert.equal((await rejectingReaderRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'partial')
     assert.equal(readerCancelCalls, 1)
     assert.equal(readerReleaseCalls, 1)
     assert.equal(readerSignal.aborted, true)
@@ -617,7 +747,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
         limits: { maxConcurrent: 1, maxStages: 1 },
     })
     nonOkRuntime.applyCdnPolicy({ urls: [signedUrl] })
-    assert.equal((await nonOkRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'failed')
+    assert.equal((await nonOkRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'partial')
     assert.equal(responseCancelCalls, 1)
     assert.equal(responseSignal.aborted, true)
 }
@@ -626,31 +756,13 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const timerCallbacks = new Map()
     let nextTimer = 0
     let requestIndex = 0
-    let secondStageReads = 0
     const storage = new MemoryStorage()
     const runtime = makeRuntime({
         storage,
         fetch: async () => {
             requestIndex += 1
             if (requestIndex === 1) {
-                let reads = 0
-                return {
-                    ok: true,
-                    type: 'basic',
-                    body: {
-                        getReader() {
-                            return {
-                                read() {
-                                    reads += 1
-                                    if (reads === 1) return Promise.resolve({ done: false, value: new Uint8Array(6) })
-                                    return new Promise(() => { })
-                                },
-                                cancel() { return Promise.resolve() },
-                                releaseLock() { },
-                            }
-                        },
-                    },
-                }
+                return streamResponse([new Uint8Array(8)])
             }
             return {
                 ok: true,
@@ -658,11 +770,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
                 body: {
                     getReader() {
                         return {
-                            async read() {
-                                secondStageReads += 1
-                                if (secondStageReads === 1) return { done: false, value: new Uint8Array(5) }
-                                throw new Error('second stage exceeded its remaining byte budget')
-                            },
+                            read() { return new Promise(() => { }) },
                             cancel() { return Promise.resolve() },
                             releaseLock() { },
                         }
@@ -682,7 +790,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
             maxConcurrent: 1,
             maxStages: 2,
             maxBytesPerRequest: 8,
-            maxTotalBytes: 10,
+            maxTotalBytes: 16,
             requestTimeoutMs: 10,
             stageTimeoutMs: 10,
             totalTimeoutMs: 20,
@@ -690,18 +798,20 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     })
     runtime.applyCdnPolicy({ urls: [signedUrl] })
     const pending = runtime.probeCurrentPlayUrlCdn({ force: true })
-    await flushMicrotasks()
-    assert.equal(requestIndex, 1)
-    ;[...timerCallbacks.values()][0]()
     for (let index = 0; index < 20 && requestIndex < 2; index += 1) await flushMicrotasks()
+    assert.equal(requestIndex, 2)
+    ;[...timerCallbacks.values()][0]()
     const result = await pending
     assert.equal(result.state, 'partial')
     assert.equal(requestIndex, 2)
-    assert.equal(secondStageReads, 1)
-    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.test.bilivideo.com:8443']
-    assert.equal(health.samples, 2)
-    assert.equal(health.failures, 1)
-    assert.equal(health.successes, 1)
+    assert.deepEqual(result.healthyHosts, ['cdn-a.test.bilivideo.com:8443'])
+    assert.deepEqual(result.failedHosts, [])
+    assert.deepEqual(result.unprobeableHosts, [])
+    assert.equal(result.completed, 2)
+    assert.equal(result.total, 2)
+    assert.equal(result.hostDiagnostics[0].classification, 'healthy')
+    assert.equal(result.hostDiagnostics[0].stagesCompleted, 2)
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
 }
 
 {
@@ -725,9 +835,10 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
     assert.equal(result.state, 'partial')
     assert.equal(fetches, 1)
-    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts['cdn-a.test.bilivideo.com:8443']
-    assert.equal(health.samples, 1)
-    assert.equal(health.throughputKbps, 32)
+    assert.equal(result.hostDiagnostics[0].accountedBytes, 4)
+    assert.equal(result.hostDiagnostics[0].observedBytes, 16)
+    assert.equal(result.hostDiagnostics[0].throughputKbps, 32)
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
 }
 
 {
@@ -739,22 +850,36 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     ]
     const storage = new MemoryStorage()
     const pendingFetches = []
+    const requestedHosts = []
+    const callsByHost = new Map()
+    const firstStageSizes = new Map([
+        ['one.test.bilivideo.com', 4],
+        ['two.test.bilivideo.com', 3],
+        ['three.test.bilivideo.com', 2],
+        ['four.test.bilivideo.com', 1],
+    ])
     let active = 0
     let maxActive = 0
     const runtime = makeRuntime({
         storage,
+        now: () => 50_000,
         fetch(url) {
+            const host = new URL(url).host
+            const call = (callsByHost.get(host) ?? 0) + 1
+            callsByHost.set(host, call)
+            requestedHosts.push(host)
             active += 1
             maxActive = Math.max(maxActive, active)
             return new Promise(resolve => pendingFetches.push({
                 url,
                 resolve() {
                     active -= 1
-                    resolve(streamResponse([new Uint8Array(4)]))
+                    const bytes = call === 1 ? firstStageSizes.get(host) : 4
+                    resolve(streamResponse([new Uint8Array(bytes)]))
                 },
             }))
         },
-        limits: { maxConcurrent: 99, maxStages: 2, maxBytesPerRequest: 4, maxTotalBytes: 16 },
+        limits: { maxConcurrent: 99, maxStages: 2, maxBytesPerRequest: 4, maxTotalBytes: 24 },
     })
     runtime.applyCdnPolicy({ urls })
     const pendingProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
@@ -767,13 +892,287 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(active, 2)
     assert.equal(pendingFetches.length, 2)
     pendingFetches.splice(0).forEach(request => request.resolve())
+    for (let index = 0; index < 20 && pendingFetches.length < 2; index += 1) await flushMicrotasks()
+    assert.equal(active, 2)
+    assert.equal(pendingFetches.length, 2)
+    pendingFetches.splice(0).forEach(request => request.resolve())
     const result = await pendingProbe
     assert.equal(maxActive, 2)
-    assert.equal(result.total, 4)
+    assert.equal(result.total, 6)
+    assert.equal(result.completed, 6)
+    assert.deepEqual(requestedHosts.slice(0, 4), [
+        'one.test.bilivideo.com',
+        'two.test.bilivideo.com',
+        'three.test.bilivideo.com',
+        'four.test.bilivideo.com',
+    ])
+    assert.deepEqual(requestedHosts.slice(4), [
+        'one.test.bilivideo.com',
+        'two.test.bilivideo.com',
+    ])
     const cache = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY))
     assert.equal(cache.hosts['one.test.bilivideo.com'].samples, 2)
     assert.equal(cache.hosts['two.test.bilivideo.com'].samples, 2)
-    assert.equal(cache.hosts['three.test.bilivideo.com'], undefined)
+    assert.equal(cache.hosts['three.test.bilivideo.com'].samples, 1)
+    assert.equal(cache.hosts['four.test.bilivideo.com'].samples, 1)
+}
+
+{
+    const rankedUrls = [
+        'https://rank-known-high.test.bilivideo.com/a?sig=known-high',
+        'https://rank-unknown.test.bilivideo.com/a?sig=unknown',
+        'https://rank-known-low.test.bilivideo.com/a?sig=known-low',
+    ]
+    const storage = new MemoryStorage()
+    const requestedHosts = []
+    const runtime = makeRuntime({
+        storage,
+        now: () => 50_000,
+        collectGroups: () => rankedUrls.map((url, index) => ({
+            ...candidateGroups({
+                urls: [url],
+                ...(index === 0 ? { bandwidthBps: 1_000_000 } : {}),
+                ...(index === 2 ? { bandwidthBps: 2_000_000 } : {}),
+            })[0],
+            key: `rank[${index}]`,
+        })),
+        fetch: async url => {
+            requestedHosts.push(new URL(url).host)
+            return streamResponse([new Uint8Array(4)])
+        },
+        limits: { maxConcurrent: 2, maxStages: 2, maxBytesPerRequest: 4, maxTotalBytes: 20 },
+    })
+    runtime.applyCdnPolicy({})
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'ready')
+    assert.deepEqual(requestedHosts.slice(3), [
+        'rank-known-high.test.bilivideo.com',
+        'rank-known-low.test.bilivideo.com',
+    ])
+}
+
+{
+    const urls = [
+        'https://stage-timeout-a.test.bilivideo.com/a?sig=a',
+        'https://stage-timeout-b.test.bilivideo.com/a?sig=b',
+        'https://stage-timeout-c.test.bilivideo.com/a?sig=c',
+    ]
+    const storage = new MemoryStorage()
+    const requestedHosts = []
+    let now = 0
+    const runtime = makeRuntime({
+        storage,
+        now: () => now,
+        fetch: async url => {
+            requestedHosts.push(new URL(url).host)
+            let delivered = false
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            async read() {
+                                if (delivered) return { done: true, value: undefined }
+                                delivered = true
+                                now += 6
+                                return { done: false, value: new Uint8Array(4) }
+                            },
+                            cancel() { return Promise.resolve() },
+                            releaseLock() { },
+                        }
+                    },
+                },
+            }
+        },
+        limits: {
+            maxConcurrent: 1,
+            maxStages: 2,
+            maxBytesPerRequest: 4,
+            maxTotalBytes: 20,
+            stageTimeoutMs: 5,
+            totalTimeoutMs: 100,
+        },
+    })
+    runtime.applyCdnPolicy({ urls })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'partial')
+    assert.equal(result.completed, 1)
+    assert.equal(result.total, 3)
+    assert.deepEqual(requestedHosts, ['stage-timeout-a.test.bilivideo.com'])
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
+}
+
+{
+    const urls = [
+        'https://cache-incomplete-a.test.bilivideo.com/a?sig=a',
+        'https://cache-incomplete-b.test.bilivideo.com/a?sig=b',
+        'https://cache-incomplete-c.test.bilivideo.com/a?sig=c',
+    ]
+    const storage = new MemoryStorage()
+    const incompleteRuntime = makeRuntime({
+        storage,
+        fetch: async () => streamResponse([new Uint8Array(4)]),
+        limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 4 },
+    })
+    incompleteRuntime.applyCdnPolicy({ urls })
+    const incomplete = await incompleteRuntime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(incomplete.state, 'partial')
+    assert.equal(incomplete.completed, 1)
+    assert.equal(incomplete.total, 3)
+    assert.deepEqual(incomplete.budgetLimitedHosts, [
+        'cache-incomplete-b.test.bilivideo.com',
+        'cache-incomplete-c.test.bilivideo.com',
+    ])
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
+
+    let reloadFetches = 0
+    const reloadRuntime = makeRuntime({
+        storage,
+        fetch: async () => {
+            reloadFetches += 1
+            return streamResponse([new Uint8Array(4)])
+        },
+        limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 12 },
+    })
+    reloadRuntime.applyCdnPolicy({ urls })
+    const reloaded = await reloadRuntime.probeCurrentPlayUrlCdn()
+    assert.equal(reloaded.state, 'ready')
+    assert.equal(reloadFetches, 3)
+    assert.deepEqual(reloaded.budgetLimitedHosts, [])
+}
+
+{
+    const host = 'bandwidth.test.bilivideo.com'
+    const url = `https://${host}/media.m4s?sig=bandwidth-private`
+    const storage = new MemoryStorage()
+    const trackers = []
+    let fetches = 0
+    const runtime = makeRuntime({
+        storage,
+        now: () => 75_000,
+        fetch: async () => {
+            fetches += 1
+            const tracker = {}
+            trackers.push(tracker)
+            return fetches === 1
+                ? streamResponse([new Uint8Array(64 * 1024)], tracker)
+                : streamResponse(Array.from({ length: 4 }, () => new Uint8Array(128 * 1024)), tracker)
+        },
+    })
+    runtime.applyCdnPolicy({ urls: [url], bandwidthBps: 1_000_000 })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(fetches, 2)
+    assert.equal(trackers[0].reads, 1)
+    assert.equal(trackers[1].reads, 4)
+    assert.equal(result.state, 'ready')
+    assert.equal(result.hostDiagnostics[0].accountedBytes, 576 * 1024)
+    assert.equal(result.hostDiagnostics[0].observedBytes, 576 * 1024)
+    assert.equal(result.hostDiagnostics[0].bandwidthBps, 1_000_000)
+    assert.equal(
+        result.hostDiagnostics[0].bitrateMargin,
+        result.hostDiagnostics[0].throughputKbps / 1_000,
+    )
+    const health = JSON.parse(storage.getItem(CDN_HEALTH_CACHE_KEY)).hosts[host]
+    assert.equal(health.measuredBytes, 576 * 1024)
+}
+
+{
+    const urls = Array.from({ length: 17 }, (_, index) => (
+        `https://h${String(index + 1).padStart(2, '0')}.test.bilivideo.com/media.m4s?sig=budget-${index + 1}`
+    ))
+    const storage = new MemoryStorage()
+    const callsByHost = new Map()
+    let fetches = 0
+    const runtime = makeRuntime({
+        storage,
+        now: () => 80_000,
+        fetch: async url => {
+            fetches += 1
+            const host = new URL(url).host
+            const call = (callsByHost.get(host) ?? 0) + 1
+            callsByHost.set(host, call)
+            if (host === 'h01.test.bilivideo.com' && call === 1) {
+                return { ok: false, type: 'basic', body: { cancel: () => Promise.resolve() } }
+            }
+            return streamResponse([new Uint8Array(call === 1 ? 64 * 1024 : 512 * 1024)])
+        },
+    })
+    runtime.applyCdnPolicy({ urls })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'partial')
+    assert.equal(fetches, 19)
+    assert.equal(result.completed, 19)
+    assert.equal(result.total, 19)
+    assert.deepEqual(result.budgetLimitedHosts, [])
+    assert.equal(result.probedHosts.includes('h17.test.bilivideo.com'), true)
+    assert.equal(result.healthyHosts.includes('h17.test.bilivideo.com'), true)
+    assert.deepEqual(result.failedHosts, ['h01.test.bilivideo.com'])
+    assert.equal(result.unprobeableHosts.includes('h17.test.bilivideo.com'), false)
+    assert.equal(
+        result.hostDiagnostics.reduce((sum, diagnostic) => sum + diagnostic.accountedBytes, 0),
+        2 * 1024 * 1024,
+    )
+    assert.equal(
+        result.hostDiagnostics.reduce((sum, diagnostic) => sum + diagnostic.observedBytes, 0),
+        2 * 1024 * 1024,
+    )
+    assert.equal(
+        result.hostDiagnostics.find(diagnostic => diagnostic.host === 'h17.test.bilivideo.com').classification,
+        'healthy',
+    )
+    const cacheText = storage.getItem(CDN_HEALTH_CACHE_KEY)
+    assert.doesNotMatch(cacheText, /media\.m4s|sig=budget/)
+    assert.equal(Object.keys(JSON.parse(cacheText).hosts).length, 17)
+}
+
+{
+    const urls = [
+        'https://good-fast.test.bilivideo.com/a?sig=good-fast',
+        'https://failed.test.bilivideo.com/a?sig=failed',
+        'https://unprobeable.test.bilivideo.com/a?sig=unprobeable',
+        'https://good-slow.test.bilivideo.com/a?sig=good-slow',
+    ]
+    const storage = new MemoryStorage()
+    const requestedHosts = []
+    const callsByHost = new Map()
+    const runtime = makeRuntime({
+        storage,
+        fetch: async url => {
+            const host = new URL(url).host
+            requestedHosts.push(host)
+            callsByHost.set(host, (callsByHost.get(host) ?? 0) + 1)
+            if (host.startsWith('failed.')) {
+                return { ok: false, type: 'basic', body: { cancel: () => Promise.resolve() } }
+            }
+            if (host.startsWith('unprobeable.')) throw new TypeError('CORS blocked')
+            return streamResponse([new Uint8Array(host.startsWith('good-fast.') ? 4 : 2)])
+        },
+        limits: { maxConcurrent: 2, maxStages: 2, maxBytesPerRequest: 4, maxTotalBytes: 24 },
+    })
+    runtime.applyCdnPolicy({ urls })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'partial')
+    assert.deepEqual(result.healthyHosts, [
+        'good-fast.test.bilivideo.com',
+        'good-slow.test.bilivideo.com',
+    ])
+    assert.deepEqual(result.failedHosts, ['failed.test.bilivideo.com'])
+    assert.deepEqual(result.unprobeableHosts, ['unprobeable.test.bilivideo.com'])
+    assert.equal(callsByHost.get('failed.test.bilivideo.com'), 1)
+    assert.equal(callsByHost.get('unprobeable.test.bilivideo.com'), 1)
+    assert.deepEqual(requestedHosts.slice(4).sort(), [
+        'good-fast.test.bilivideo.com',
+        'good-slow.test.bilivideo.com',
+    ])
+    const classifiedHosts = [
+        ...result.healthyHosts,
+        ...result.failedHosts,
+        ...result.unprobeableHosts,
+        ...result.budgetLimitedHosts,
+    ]
+    assert.equal(new Set(classifiedHosts).size, classifiedHosts.length)
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
 }
 
 {
@@ -900,7 +1299,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const host = 'network.test.bilivideo.com'
     let networkHint = 'wifi:test'
     const cacheFor = (hint, health) => JSON.stringify({
-        version: 1,
+        version: CDN_HEALTH_CACHE_VERSION,
         savedAt: now,
         networkHint: hint,
         candidateHostHash: candidateHostHash([host]),
@@ -952,7 +1351,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     await flushMicrotasks()
     assert.equal(runtime.getCdnProbeStatus().state, 'probing')
     storage.setItem(CDN_HEALTH_CACHE_KEY, JSON.stringify({
-        version: 1,
+        version: CDN_HEALTH_CACHE_VERSION,
         savedAt: now,
         networkHint: 'wifi:test',
         candidateHostHash: candidateHostHash(['new-context.test.bilivideo.com']),
@@ -1046,7 +1445,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const ipHost = '127.0.0.1:9443'
     const storage = new MemoryStorage({
         [CDN_HEALTH_CACHE_KEY]: JSON.stringify({
-            version: 1,
+            version: CDN_HEALTH_CACHE_VERSION,
             savedAt: now,
             networkHint: 'wifi:test',
             candidateHostHash: candidateHostHash([ipHost]),
@@ -1150,6 +1549,28 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(spoofedMetadataResult.state, 'unprobeable')
     assert.equal(spoofedMetadataFetches, 0)
     assert.deepEqual(spoofedMetadataResult.candidateHosts, ['127.0.0.1'])
+}
+
+{
+    const storage = new MemoryStorage()
+    const allowedUrl = 'https://mixed-allowed.test.bilivideo.com/media.m4s?sig=allowed'
+    const blockedUrl = 'https://unknown-public.example/media.m4s?sig=blocked'
+    const fetched = []
+    const runtime = makeRuntime({
+        storage,
+        fetch: async url => {
+            fetched.push(url)
+            return streamResponse([new Uint8Array(1)])
+        },
+        limits: { maxConcurrent: 1, maxStages: 1 },
+    })
+    runtime.applyCdnPolicy({ urls: [allowedUrl, blockedUrl] })
+    const result = await runtime.probeCurrentPlayUrlCdn({ force: true })
+    assert.equal(result.state, 'partial')
+    assert.deepEqual(fetched, [allowedUrl])
+    assert.deepEqual(result.healthyHosts, ['mixed-allowed.test.bilivideo.com'])
+    assert.deepEqual(result.unprobeableHosts, ['unknown-public.example'])
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null)
 }
 
 {
@@ -1344,6 +1765,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     await flushMicrotasks()
     generationRuntime.applyCdnPolicy({ urls: ['https://new.test.bilivideo.com/a?sig=new'] })
     assert.equal(oldSignal.aborted, true)
+    await flushMicrotasks()
     assert.equal((await generationRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
     await oldProbe
 }
