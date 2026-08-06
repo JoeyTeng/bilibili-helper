@@ -23,6 +23,7 @@ globalThis.__vueBoundaryConfig = vueConfig
 globalThis.__vueBoundaryRequests = []
 globalThis.__vueBoundaryPolicyCalls = []
 globalThis.__vueBoundaryPolicyThrows = false
+globalThis.__vueBoundaryWarnings = []
 installBrowserGlobals()
 
 const [vueBundle, thaiBundle] = await Promise.all([
@@ -65,8 +66,12 @@ const { applyCdnPolicyToPlayUrlResponse, fixThailandPlayUrlJson } = await import
 await testStaleResultsAndRawCache(area_limit_for_vue)
 await testProxyFailureFailOpen(area_limit_for_vue)
 await testMissingProxyCdnDelivery(area_limit_for_vue)
+await testLateMissingProxyCdnDelivery(area_limit_for_vue)
+await testAccessorMissingProxyCdnDelivery(area_limit_for_vue)
+await testCloneFailureMissingProxyCdnDelivery(area_limit_for_vue)
 await testCdnPolicyFailureFailOpen(area_limit_for_vue)
 await testExplicitlyDisabledMode(area_limit_for_vue)
+await testNonConfigurableMissingProxyFailOpen(area_limit_for_vue)
 await testThailandManualAkamaiGate(fixThailandPlayUrlJson, applyCdnPolicyToPlayUrlResponse)
 
 console.log('vue CDN boundary tests passed')
@@ -143,6 +148,95 @@ async function testMissingProxyCdnDelivery(areaLimitForVue) {
     vueConfig.server_custom = serverCustom
 }
 
+async function testLateMissingProxyCdnDelivery(areaLimitForVue) {
+    const serverCustom = vueConfig.server_custom
+    vueConfig.server_custom = ''
+    vueConfig.cdn_mode = 'manual'
+    vueConfig.upos_server = 'ali'
+    resetVuePage(undefined, { hydration: undefined })
+    const requestCount = globalThis.__vueBoundaryRequests.length
+
+    areaLimitForVue()
+    await flushPromises()
+
+    const latePlayInfo = createPlayablePlayInfo('https://late-playinfo.example/video.m4s')
+    const lateHydration = createPlayablePlayInfo('https://late-hydration.example/video.m4s')
+    const expectedLatePlayInfo = structuredClone(latePlayInfo)
+    const expectedLateHydration = structuredClone(lateHydration)
+    window.__playinfo__ = latePlayInfo
+    window.__PLAYURL_HYDRATE_DATA__ = lateHydration
+    await flushPromises()
+
+    assert.equal(hostname(window.__playinfo__), 'upos-sz-mirrorali.bilivideo.com')
+    assert.equal(hostname(window.__PLAYURL_HYDRATE_DATA__), 'upos-sz-mirrorali.bilivideo.com')
+    assert.equal(hostname(latePlayInfo), 'late-playinfo.example', 'late playinfo source object was mutated')
+    assert.equal(hostname(lateHydration), 'late-hydration.example', 'late hydration source object was mutated')
+    assert.deepEqual(latePlayInfo, expectedLatePlayInfo)
+    assert.deepEqual(lateHydration, expectedLateHydration)
+    assert.equal(globalThis.__vueBoundaryRequests.length, requestCount, 'late CDN-only delivery entered the proxy path')
+    vueConfig.server_custom = serverCustom
+}
+
+async function testAccessorMissingProxyCdnDelivery(areaLimitForVue) {
+    const serverCustom = vueConfig.server_custom
+    vueConfig.server_custom = ''
+    vueConfig.cdn_mode = 'manual'
+    vueConfig.upos_server = 'ali'
+    resetVuePage(undefined, { hydration: undefined })
+    let backing = createPlayablePlayInfo('https://accessor-one.example/video.m4s')
+    let setterCalls = 0
+    Object.defineProperty(window, '__playinfo__', {
+        configurable: true,
+        enumerable: true,
+        get() { return backing },
+        set(value) {
+            setterCalls += 1
+            backing = value
+        },
+    })
+    const requestCount = globalThis.__vueBoundaryRequests.length
+
+    areaLimitForVue()
+
+    assert.equal(hostname(window.__playinfo__), 'upos-sz-mirrorali.bilivideo.com')
+    backing.result.video_info.dash.video[0].base_url = 'https://accessor-two.example/updated.m4s?sig=two'
+    const expectedBacking = structuredClone(backing)
+    const updatedDelivery = window.__playinfo__
+    assert.equal(hostname(updatedDelivery), 'upos-sz-mirrorali.bilivideo.com')
+    assert.equal(new URL(updatedDelivery.result.video_info.dash.video[0].base_url).pathname, '/updated.m4s')
+    assert.equal(hostname(backing), 'accessor-two.example', 'accessor backing object was mutated')
+    assert.deepEqual(backing, expectedBacking)
+
+    const assigned = createPlayablePlayInfo('https://accessor-three.example/assigned.m4s?sig=three')
+    const expectedAssigned = structuredClone(assigned)
+    window.__playinfo__ = assigned
+    assert.equal(setterCalls, 1, 'original accessor setter was not preserved')
+    const assignedDelivery = window.__playinfo__
+    assert.equal(hostname(assignedDelivery), 'upos-sz-mirrorali.bilivideo.com')
+    assert.equal(new URL(assignedDelivery.result.video_info.dash.video[0].base_url).pathname, '/assigned.m4s')
+    assert.equal(hostname(assigned), 'accessor-three.example', 'accessor assignment source was mutated')
+    assert.deepEqual(assigned, expectedAssigned)
+    assert.equal(globalThis.__vueBoundaryRequests.length, requestCount, 'accessor CDN-only delivery entered the proxy path')
+    vueConfig.server_custom = serverCustom
+}
+
+async function testCloneFailureMissingProxyCdnDelivery(areaLimitForVue) {
+    const serverCustom = vueConfig.server_custom
+    vueConfig.server_custom = ''
+    resetVuePage(undefined, { hydration: undefined })
+    const circular = createPlayablePlayInfo('https://circular.example/video.m4s')
+    circular.self = circular
+    const requestCount = globalThis.__vueBoundaryRequests.length
+
+    areaLimitForVue()
+
+    assert.doesNotThrow(() => { window.__playinfo__ = circular })
+    assert.strictEqual(window.__playinfo__, circular, 'clone failure did not fail open to the source value')
+    assert.equal(hostname(window.__playinfo__), 'circular.example')
+    assert.equal(globalThis.__vueBoundaryRequests.length, requestCount, 'clone failure entered the proxy path')
+    vueConfig.server_custom = serverCustom
+}
+
 async function testProxyFailureFailOpen(areaLimitForVue) {
     const cases = [
         { label: 'rejected proxy', settle: request => request.reject({ code: 400, message: 'rejected' }) },
@@ -197,6 +291,33 @@ async function testExplicitlyDisabledMode(areaLimitForVue) {
     assert.equal(globalThis.__vueBoundaryPolicyCalls.length, 0, 'explicitly disabled mode applied CDN policy')
     assert.equal(globalThis.__vueBoundaryRequests.length, requestCount, 'explicitly disabled mode entered the proxy path')
     vueConfig.is_closed = false
+}
+
+async function testNonConfigurableMissingProxyFailOpen(areaLimitForVue) {
+    const serverCustom = vueConfig.server_custom
+    vueConfig.server_custom = ''
+    resetVuePage(undefined, { hydration: undefined })
+    Object.defineProperty(window, '__playinfo__', {
+        configurable: false,
+        enumerable: true,
+        writable: true,
+        value: undefined,
+    })
+    globalThis.__vueBoundaryWarnings.length = 0
+    const requestCount = globalThis.__vueBoundaryRequests.length
+
+    areaLimitForVue()
+
+    assert.ok(globalThis.__vueBoundaryWarnings.some(args => (
+        args.includes('cannot watch non-configurable CDN-only playinfo; transformed current value only')
+        && args.includes('__playinfo__')
+    )))
+    const lateValue = createPlayablePlayInfo('https://non-configurable.example/video.m4s')
+    window.__playinfo__ = lateValue
+    assert.strictEqual(window.__playinfo__, lateValue, 'non-configurable fallback did not fail open')
+    assert.equal(hostname(window.__playinfo__), 'non-configurable.example')
+    assert.equal(globalThis.__vueBoundaryRequests.length, requestCount, 'non-configurable fallback entered the proxy path')
+    vueConfig.server_custom = serverCustom
 }
 
 async function testThailandManualAkamaiGate(fixThailandPlayUrlJson, applyCdnPolicyToPlayUrlResponse) {
@@ -407,7 +528,10 @@ function vueBoundaryStubPlugin() {
         ['../../util/converters', `export const Converters = { aid2bv: String }`],
         ['../../util/cookie', `export const cookieStorage = { get: () => '', set() {} }`],
         ['../../util/initiator', `export function util_init() {}`],
-        ['../../util/log', `export function log() {} export function util_warn() {}`],
+        ['../../util/log', `
+            export function log() {}
+            export function util_warn(...args) { globalThis.__vueBoundaryWarnings.push(args) }
+        `],
         ['../../util/objects', `export const Objects = { convertKeyToSnakeCase() {}, stringify: JSON.stringify }`],
         ['../../util/react', `export function _() { return {} }`],
         ['../../util/strings', `export const Strings = { escapeSpecialChars: String, replaceTemplate: String }`],

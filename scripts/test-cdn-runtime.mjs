@@ -698,8 +698,14 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     let readerCancelCalls = 0
     let readerReleaseCalls = 0
     let readerSignal
+    let readerFetches = 0
+    const readerStorage = new MemoryStorage()
+    readerStorage.values.set(CDN_HEALTH_CACHE_KEY, '{"stale":true}')
     const rejectingReaderRuntime = makeRuntime({
+        storage: readerStorage,
         fetch: async (_url, init) => {
+            readerFetches += 1
+            if (readerFetches > 1) return streamResponse([new Uint8Array(4)])
             readerSignal = init.signal
             return {
                 ok: true,
@@ -707,7 +713,7 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
                 body: {
                     getReader() {
                         return {
-                            async read() { return { done: false, value: new Uint8Array(16) } },
+                            async read() { return { done: false, value: new Uint8Array(4) } },
                             cancel() {
                                 readerCancelCalls += 1
                                 return Promise.reject(new Error('cancel rejected'))
@@ -720,18 +726,30 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
                 },
             }
         },
-        limits: { maxConcurrent: 1, maxStages: 1, maxBytesPerRequest: 4, maxTotalBytes: 4 },
+        limits: {
+            maxConcurrent: 1,
+            maxStages: 2,
+            initialBytesPerRequest: 4,
+            maxBytesPerRequest: 4,
+            maxTotalBytes: 8,
+        },
     })
     rejectingReaderRuntime.applyCdnPolicy({ urls: [signedUrl] })
     assert.equal((await rejectingReaderRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'partial')
+    assert.equal(readerFetches, 1, 'cleanup-unsafe successful sample started Stage 2')
+    assert.equal(readerStorage.getItem(CDN_HEALTH_CACHE_KEY), null, 'cleanup-unsafe successful sample retained cache')
     assert.equal(readerCancelCalls, 1)
     assert.equal(readerReleaseCalls, 1)
     assert.equal(readerSignal.aborted, true)
+    assert.equal((await rejectingReaderRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
+    assert.equal(readerFetches, 3)
 
     let responseCancelCalls = 0
     let responseSignal
+    let responseFetches = 0
     const nonOkRuntime = makeRuntime({
         fetch: async (_url, init) => {
+            responseFetches += 1
             responseSignal = init.signal
             return {
                 ok: false,
@@ -750,6 +768,85 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal((await nonOkRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'partial')
     assert.equal(responseCancelCalls, 1)
     assert.equal(responseSignal.aborted, true)
+    assert.equal((await nonOkRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'partial')
+    assert.equal(responseFetches, 2)
+}
+
+{
+    const timerCallbacks = new Map()
+    const storage = new MemoryStorage()
+    storage.values.set(CDN_HEALTH_CACHE_KEY, '{"stale":true}')
+    let nextTimer = 0
+    let resolveRead
+    let rejectCancel
+    let releases = 0
+    let fetches = 0
+    const runtime = makeRuntime({
+        storage,
+        fetch: async () => {
+            fetches += 1
+            if (fetches > 1) return streamResponse([new Uint8Array(4)])
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            read() { return new Promise(resolve => { resolveRead = resolve }) },
+                            cancel() {
+                                return new Promise((_resolve, reject) => { rejectCancel = reject })
+                            },
+                            releaseLock() { releases += 1 },
+                        }
+                    },
+                },
+            }
+        },
+        setTimeout(callback) {
+            const id = ++nextTimer
+            timerCallbacks.set(id, callback)
+            return id
+        },
+        clearTimeout(id) {
+            timerCallbacks.delete(id)
+        },
+        limits: {
+            maxConcurrent: 1,
+            maxStages: 2,
+            initialBytesPerRequest: 4,
+            maxBytesPerRequest: 4,
+            maxTotalBytes: 8,
+            requestTimeoutMs: 10,
+            stageTimeoutMs: 20,
+            totalTimeoutMs: 30,
+        },
+    })
+    runtime.applyCdnPolicy({ urls: [signedUrl] })
+    const firstProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    await flushMicrotasks()
+    assert.equal(typeof resolveRead, 'function')
+    assert.equal(timerCallbacks.size, 1)
+    ;[...timerCallbacks.values()][0]()
+    for (let index = 0; index < 20 && typeof rejectCancel !== 'function'; index += 1) await flushMicrotasks()
+    assert.equal(typeof rejectCancel, 'function')
+    rejectCancel(new Error('delayed cancel rejection'))
+    assert.equal((await firstProbe).state, 'partial')
+    assert.equal(fetches, 1, 'cleanup-unsafe round started Stage 2')
+    assert.equal(storage.getItem(CDN_HEALTH_CACHE_KEY), null, 'cleanup-unsafe round retained a cache envelope')
+
+    let forcedSettled = false
+    const forcedProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    void forcedProbe.then(() => { forcedSettled = true })
+    await flushMicrotasks(10)
+    assert.equal(forcedSettled, false, 'cancel rejection released the fence before the request settled')
+    assert.equal(fetches, 1)
+
+    resolveRead({ done: true, value: undefined })
+    for (let index = 0; index < 20 && fetches < 2; index += 1) await flushMicrotasks()
+    assert.equal(fetches, 2, 'settled request did not release the forced-probe fence')
+    assert.equal((await forcedProbe).state, 'ready')
+    assert.equal(fetches, 3, 'forced retry did not complete both probe stages')
+    assert.equal(releases, 1)
 }
 
 {
@@ -1768,6 +1865,143 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     await flushMicrotasks()
     assert.equal((await generationRuntime.probeCurrentPlayUrlCdn({ force: true })).state, 'ready')
     await oldProbe
+}
+
+{
+    const scheduled = []
+    const fetched = []
+    const finishOldCancels = []
+    const runtime = makeRuntime({
+        getMode: () => 'auto',
+        fetch: async (url, init) => {
+            fetched.push(url)
+            if (!url.includes('draining-old-')) {
+                return streamResponse([new Uint8Array(1)])
+            }
+            let resolveOldRead
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            read() { return new Promise(resolve => { resolveOldRead = resolve }) },
+                            cancel() {
+                                return new Promise(resolve => {
+                                    finishOldCancels.push(() => {
+                                        resolveOldRead({ done: true, value: undefined })
+                                        resolve()
+                                    })
+                                })
+                            },
+                            releaseLock() { },
+                        }
+                    },
+                },
+            }
+        },
+        scheduleBackground(callback) {
+            scheduled.push(callback)
+        },
+        limits: { maxConcurrent: 2, maxStages: 1 },
+    })
+    const oldUrls = [
+        'https://draining-old-a.test.bilivideo.com/a?sig=old-a',
+        'https://draining-old-b.test.bilivideo.com/a?sig=old-b',
+    ]
+    const newUrl = 'https://draining-new.test.bilivideo.com/a?sig=new'
+    const newestUrl = 'https://draining-new.test.bilivideo.com/b?sig=newest'
+    runtime.applyCdnPolicy({ urls: oldUrls })
+    const oldProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    await flushMicrotasks()
+    assert.deepEqual(fetched, oldUrls)
+
+    runtime.applyCdnPolicy({ urls: [newUrl] })
+    assert.equal(scheduled.length, 2)
+    scheduled[1]()
+    await flushMicrotasks(10)
+    assert.deepEqual(fetched, oldUrls, 'new generation probed before old cleanup drained')
+    assert.equal(finishOldCancels.length, 2)
+
+    runtime.applyCdnPolicy({ urls: [newestUrl] })
+    assert.equal(scheduled.length, 3)
+    scheduled[2]()
+    await flushMicrotasks(10)
+    assert.deepEqual(fetched, oldUrls, 'newest generation probed before old cleanup drained')
+
+    finishOldCancels[0]()
+    await flushMicrotasks(10)
+    assert.equal(scheduled.length, 3, 'drain resolved before every old controller settled')
+    finishOldCancels[1]()
+    for (let index = 0; index < 20 && scheduled.length < 4; index += 1) await flushMicrotasks()
+    assert.equal(scheduled.length, 4, 'newest auto probe was not rescheduled after cleanup drain')
+    scheduled[3]()
+    assert.deepEqual(fetched, [...oldUrls, newestUrl], 'drain callback did not start the newest auto probe')
+    const result = await runtime.probeCurrentPlayUrlCdn()
+    assert.equal(result.state, 'ready')
+    assert.deepEqual(fetched, [...oldUrls, newestUrl])
+    await oldProbe
+}
+
+{
+    const scheduled = []
+    const fetched = []
+    let networkHint = 'wifi:a'
+    let resolveOldRead
+    let finishOldCancel
+    const runtime = makeRuntime({
+        getMode: () => 'auto',
+        getNetworkHint: () => networkHint,
+        fetch: async url => {
+            fetched.push(url)
+            if (!url.includes('network-old.test.bilivideo.com')) {
+                return streamResponse([new Uint8Array(1)])
+            }
+            return {
+                ok: true,
+                type: 'basic',
+                body: {
+                    getReader() {
+                        return {
+                            read() { return new Promise(resolve => { resolveOldRead = resolve }) },
+                            cancel() {
+                                return new Promise(resolve => {
+                                    finishOldCancel = () => {
+                                        resolveOldRead({ done: true, value: undefined })
+                                        resolve()
+                                    }
+                                })
+                            },
+                            releaseLock() { },
+                        }
+                    },
+                },
+            }
+        },
+        scheduleBackground(callback) {
+            scheduled.push(callback)
+        },
+        limits: { maxConcurrent: 1, maxStages: 1 },
+    })
+    const oldUrl = 'https://network-old.test.bilivideo.com/a?sig=old'
+    const newUrl = 'https://network-new.test.bilivideo.com/a?sig=new'
+    runtime.applyCdnPolicy({ urls: [oldUrl] })
+    const oldProbe = runtime.probeCurrentPlayUrlCdn({ force: true })
+    await flushMicrotasks()
+    runtime.applyCdnPolicy({ urls: [newUrl] })
+    scheduled[1]()
+    await flushMicrotasks(10)
+    assert.deepEqual(fetched, [oldUrl])
+
+    networkHint = 'wifi:b'
+    finishOldCancel()
+    await oldProbe
+    await flushMicrotasks(20)
+    const postDrainCallbacks = scheduled.slice(2)
+    assert.ok(postDrainCallbacks.length > 0, 'network generation change lost the auto-probe continuation')
+    for (const callback of postDrainCallbacks) callback()
+    assert.deepEqual(fetched, [oldUrl, newUrl], 'latest network generation did not start an auto probe')
+    assert.equal((await runtime.probeCurrentPlayUrlCdn()).state, 'ready')
 }
 
 {

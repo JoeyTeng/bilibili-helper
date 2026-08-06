@@ -29,6 +29,9 @@ superseded_by:
 - Vue、Fetch、XHR 与 WBI response adapter 共用选择核心。WBI
   `/x/player/wbi/playurl` 只处理响应；BALH 绝不 proxy、重发或重新签署请求的
   `w_rid` / `wts`。
+- 无自定义区域代理时，CDN-only Vue 交付边界会处理 `__playinfo__` 与
+  `__PLAYURL_HYDRATE_DATA__` 的已有值和之后可拦截的赋值；对克隆应用
+  CDN policy，不改写 source object，也不发起区域代理请求。
 - 风险排序只降级 MCDN/PCDN，并始终把它们保留为最后兜底。只有用户显式选择
   `manual` 才运行 legacy host rewrite。
 
@@ -47,6 +50,11 @@ superseded_by:
 - Host-only cache schema `v2` 的 TTL 是 `20 min`，candidate-set 或粗粒度网络变化即
   失效。不完整、budget-limited、unprobeable 或清理不安全的轮次不持久化。Signed
   URL 永不进入持久化 cache 或日志。
+- 新 candidate generation 在旧 controller drain 期间到达时，每个 drain 只保留一个
+  continuation，并将其 generation/host-hash 意图更新为最新上下文；旧清理不会
+  与新 probe 重叠，最新候选或网络 generation 也不会被丢失。
+  cancel 终止但 reject 时可解除调度 fence，但该轮仍保持 cleanup-unsafe 且
+  不可缓存；永不 settle 的 cleanup 仍保持 fence。
 
 ### Stage 3：Stall recovery — planned follow-up PR
 

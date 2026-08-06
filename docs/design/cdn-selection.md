@@ -270,8 +270,9 @@ Akamai、`mirrorov` 与 `bcache` 本身都不是 MCDN/PCDN 风险信号。旧版
 - 只有实际 URL（不能依赖候选旁路 metadata）的 hostname 命中受信任公开 Bilibili
   媒体域名准入规则时才能主动探测。IPv4/IPv6 literal、`localhost`、私网/链路本地
   风格地址与未知域名不进入探测 target；它们仍保留在原始候选和安全排序回退中。
-- 同一 host 的并发探测应合并；完成、取消与超时都必须释放 reader、timer 和
-  `AbortController`。
+- 同一 host 的并发探测应合并；完成、取消与超时都必须释放 reader 和 timer。
+  `AbortController` 只在对应 request 与应用层 cancel 尝试均已终止时移出跨轮
+  fence；永不 settle 的 cancel 会被有意保留在 fence 中，不得让新 probe 与它重叠。
 
 具体数值属于共享 runtime 的可测试配置，不应散落在 Vue、Fetch、XHR 或 WBI
 response adapter 中。Stage 2 的生产默认值为：
@@ -323,7 +324,9 @@ const init: RequestInit = {
    支持不一致；未来只有在独立能力检测和测试证明安全后才能作为显式扩展。
 5. 读取 `ReadableStream` 的有限前缀，达到字节上限后调用 `reader.cancel()`，并在
    必要时中止请求。请求或阶段的默认时间边界约为 `2–4 s`；取消后的 reader/
-   controller 清理最多另给 `250 ms`，未证明清理完成时不得继续下一批探测。
+   controller 清理最多另给 `250 ms`。只要 cancel 尝试仍未终止，active-controller
+   fence 就必须阻止下一批探测；若 cancel 最终 reject，且 abort 已请求、当前
+   request 已 settle，可解除调度 fence，但该轮仍是 cleanup-unsafe 且不可缓存。
 6. 记录有限的 TTFB、读取字节、耗时与吞吐量；不保留响应正文。
 7. `no-cors` 不可作为回退，因为 opaque response 无法区分正常内容与快速 403。
 8. CORS 拒绝、缺少可读 body 或浏览器无法进一步区分的 Fetch/readability 错误，
@@ -356,7 +359,14 @@ Stage 1 按原候选顺序遍历所有可准入的不同 host；只有动态剩�
 拒绝、部分网络策略错误和缺少可读 body，因此这些情况保守合并为
 `unprobeable`，不产生负面信誉；HTTP 非成功响应与超时合并为 `failure`。媒体
 上下文或网络变化触发的主动取消会丢弃整次旧 generation 结果，不进入排名或缓存。
-排序函数必须是纯函数；评分或缓存语义变化时必须提升统一 cache version。
+若新 candidate generation 的自动回调在旧 controller drain 前到达，runtime 会为该
+drain 只注册一个 continuation，并把其意图更新为最新 generation 与 candidate-host
+hash。只在旧 controller 全部终止后重新交给 background scheduler 排队；执行前再
+确认 generation、host hash 与 `auto` mode 仍匹配。旧 run 结束附近发生的网络
+generation 变化也必须为最新上下文重排，不得因失效旧 callback 而丢失。
+这同时保证两个性质：不重叠 probe，也不丢失最新候选的自动探测。排序函数
+必须是纯函数；评分或缓存语义
+变化时必须提升统一 cache version。
 
 ```ts
 type ProbeOutcome = "success" | "failure" | "unprobeable"
@@ -426,6 +436,11 @@ type HostProbeCacheEntry = {
   处理、没有 `budget-limited` 或 `unprobeable` 结果且所有计划 Stage 2 请求完成的
   整轮结果才可持久化。不完整、预算受限、不可测或清理不安全的轮次必须删除旧
   envelope，不得把部分 host 信誉留到下一次播放。
+- active-controller fence 保护的是“未终止的应用层清理不与新 probe 重叠”，
+  不是“只有 cancel 成功才能再调度”。cancel 在 abort 和 request settlement 后最终
+  reject 是可观察的终态：它解除调度 fence，但不把 `safeToContinue` 改为 true，不恢复
+  Stage 2，也不允许写 cache。永不 settle 的 cancel 仍保留 fence，因为实现无法证明
+  该清理已终止。
 - `unprobeable` 只在当前 candidate/network generation 内存中抑制 `60 s` 的重复
   非强制探测；`force` 绕过该抑制，且它不会持久化为跨长周期负面信誉。
 - host 分数只在同一风险层内排序，不能覆盖当前完整 URL 的 port/query/host 风险
@@ -489,7 +504,7 @@ legacy replacement。后续入口不得在共享核心前后继续叠加旧重�
 - 若 source 与 proxy 都经过某个共享对象，重复选择必须是幂等的，不能来回翻转
   顺序或再次替换手动 host。
 - 显式 `balh_config.is_closed` 表示整个脚本关闭，不安装 CDN adapter；仅缺少
-  `server_custom` 时，区域代理路径保持禁用，但 CDN-only Fetch/XHR 与已有
+  `server_custom` 时，区域代理路径保持禁用，但 CDN-only Fetch/XHR 与
   hydration playinfo 仍可调用共享选择核心，且不得触发任何区域代理请求。
 
 `https://api.bilibili.com/x/player/wbi/playurl` 是明确的 response-only CDN 边界：
@@ -519,6 +534,15 @@ snake_case/形状归一化之后、写入 Vue player config、
 保证模式或手动 host 变化后不会复用旧的改写结果。过期 request/episode 必须在
 策略、runtime 候选更新、cache 写入或共享对象变更前拒绝。既有 proxy fallback
 顺序保持不变。
+
+在无自定义区域代理的 CDN-only 路径，userscript 会在 document-start 等价阶段为
+`__playinfo__` 和 `__PLAYURL_HYDRATE_DATA__` 安装仅作用于交付的 property watcher。
+它既处理安装时已有的值，也处理之后可拦截的页面赋值；交付前先克隆 raw
+playinfo，再对克隆运行 CDN policy，不改写页面持有的 source object，也不进入区域
+proxy 请求链。已存在的 configurable accessor 保留原 getter/setter 语义，并在每次
+getter 读取时从当前 raw value 重建 delivery，不按对象 identity 复用可能过期的克隆；对无法
+安装 watcher 的 non-configurable descriptor 只能按其当前能力 best-effort 处理并 fail-open。
+显式 `balh_config.is_closed` 时不安装 watcher。
 
 `main.ts` 当前先安装 Vue/hydration 路径，再由 XHR 初始化过程安装 Fetch/XHR
 拦截。共享核心必须对该启动顺序无感，不能依赖某个 hook 一定先看到 payload。
@@ -620,6 +644,8 @@ BALH 源码与兼容记录，不再下载第三方 latest。
 | IP literal、localhost、私网/链路本地风格或未知 host | 不发主动请求、不使用 health cache；候选保留为原始播放/排序回退 |
 | 准入 host 返回 redirect | Fetch 以 `redirect: "error"` 拒绝跟随；按不可测失败路径保留候选 |
 | 探测超时或明确的 HTTP/network failure | 记录有限失败样本；候选保留且失败/无分数项维持稳定顺序 |
+| reader/body cancel reject | 该轮标记 cleanup-unsafe、停止后续阶段且不写 cache；在 request 与 cancel 均 settle 后解除跨轮 fence |
+| reader/body cancel 永不 settle | 保留 active-controller fence；新的 forced/auto probe 不得与它重叠 |
 | 所有普通候选不可用 | MCDN/PCDN 仍保留在末尾供下游播放器 fallback |
 | 所有探测结果不可用 | `safe`，最终可回到 `original` |
 | `manual` host 无效 | 原样返回整个 playurl payload |
@@ -685,8 +711,13 @@ fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才�
 
 - Stage 1 在动态预算允许完整 `64 KiB` 时覆盖每个可准入不同 host，Stage 2 只为
   稳定前两名成功 host 分配剩余 follow-up，每个不超过 `512 KiB`，并发不超过 `2`。
-- 有界前缀读取达到上限后 cancel；请求/阶段维持约 `2–4 s` 的默认边界，清理最多
-  `250 ms`，timeout 或媒体/网络 generation 失效后无遗留任务。
+- 有界前缀读取达到上限后 cancel；请求/阶段维持约 `2–4 s` 的默认边界。
+  `250 ms` 只限制当前轮证明 cleanup 安全的等待预算；覆盖 cancel 成功、reject
+  和永不 settle 三种结果。reject 仅在 abort/
+  request 已终止后解除调度 fence，但本轮仍是 cleanup-unsafe 且不写 cache。
+- 新 candidate generation 的自动回调先于旧 controller drain 时，没有重叠 probe，
+  并在 drain 后以单 continuation 的最新 generation/host-hash 意图重排自动探测；
+  同时覆盖旧 run 收尾时的网络 generation 变化。
 - 验证整轮 accounted prefix 硬上限 `2 MiB`；当前 batch 可能多交付完整 chunk，
   raw JavaScript/transport receipt 可以 overshoot，但计分 prefix 必须 clip 到剩余
   预算并阻止后续请求。
@@ -699,6 +730,8 @@ fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才�
 - Vue、Fetch、XHR adapter 各自覆盖 source success、proxy success、解析失败和
   fail-open。WBI 单独覆盖 response-only success/fail-open，并证明 proxy 调用为零、
   请求 URL/body 及 `w_rid` / `wts` 均未改变。
+- CDN-only Vue 覆盖“先安装、后赋值”的两个 hydration global，证明交付克隆
+  已应用 CDN policy、source object 未变且区域 proxy 请求为零。
 - 页面上下文变化取消过期探测，host-only 缓存不含 path/query/ID/signature。
 
 ### Compatibility and acceptance

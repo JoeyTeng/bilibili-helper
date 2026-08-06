@@ -459,21 +459,85 @@ function createPlayInfoDelivery<T>(rawValue: T): T {
         }
         return delivery
     }
-    const delivery = cloneWithPlayInfoAliases()
+    let delivery: T
+    try {
+        delivery = cloneWithPlayInfoAliases()
+    } catch (error) {
+        util_warn('clone playinfo delivery failed', error)
+        return rawValue
+    }
     try {
         applyCdnPolicyToPlayUrlResponse(delivery)
         return delivery
     } catch (error) {
         util_warn('apply CDN policy to playinfo failed', error)
-        return cloneWithPlayInfoAliases()
+        try {
+            return cloneWithPlayInfoAliases()
+        } catch (cloneError) {
+            util_warn('clone fail-open playinfo failed', cloneError)
+            return rawValue
+        }
     }
+}
+
+const cdnOnlyDeliveryAccessors = new WeakSet<Function>()
+
+function installCdnOnlyPlayInfoDelivery(property: '__playinfo__' | '__PLAYURL_HYDRATE_DATA__') {
+    const target = window as any
+    const descriptor = Object.getOwnPropertyDescriptor(target, property)
+    if ((descriptor?.get && cdnOnlyDeliveryAccessors.has(descriptor.get))
+        || (descriptor?.set && cdnOnlyDeliveryAccessors.has(descriptor.set))) return
+
+    if (descriptor && !descriptor.configurable) {
+        if ('value' in descriptor && descriptor.writable) {
+            target[property] = createPlayInfoDelivery(descriptor.value)
+            util_warn('cannot watch non-configurable CDN-only playinfo; transformed current value only', property)
+        } else {
+            util_warn('cannot watch non-configurable CDN-only playinfo', property)
+        }
+        return
+    }
+
+    if (descriptor && !('value' in descriptor)) {
+        const getter = descriptor.get
+            ? function (this: any) { return createPlayInfoDelivery(descriptor.get!.call(this)) }
+            : undefined
+        const setter = descriptor.set
+            ? function (this: any, value: any) {
+                descriptor.set!.call(this, value)
+            }
+            : undefined
+        if (getter) cdnOnlyDeliveryAccessors.add(getter)
+        if (setter) cdnOnlyDeliveryAccessors.add(setter)
+        Object.defineProperty(target, property, {
+            configurable: true,
+            enumerable: descriptor.enumerable,
+            get: getter,
+            set: setter,
+        })
+        return
+    }
+
+    let delivery = createPlayInfoDelivery(descriptor?.value)
+    const getter = () => delivery
+    const setter = descriptor?.writable === false
+        ? undefined
+        : (value: any) => { delivery = createPlayInfoDelivery(value) }
+    cdnOnlyDeliveryAccessors.add(getter)
+    if (setter) cdnOnlyDeliveryAccessors.add(setter)
+    Object.defineProperty(target, property, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        get: getter,
+        set: setter,
+    })
 }
 
 export function area_limit_for_vue() {
     if (balh_config.is_closed) return
     if (isClosed()) {
-        window.__playinfo__ = createPlayInfoDelivery(window.__playinfo__)
-        ;(window as any).__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery((window as any).__PLAYURL_HYDRATE_DATA__)
+        installCdnOnlyPlayInfoDelivery('__playinfo__')
+        installCdnOnlyPlayInfoDelivery('__PLAYURL_HYDRATE_DATA__')
         return
     }
 

@@ -44,8 +44,12 @@ superseded_by:
   `250 ms`。不完整、预算受限、不可测或清理不安全的轮次不持久化。
 - 新配置键缺失或非法时，只有既有 legacy UPOS 配置会迁移到 `manual`；其他情况
   默认 `safe`。旧 UPOS/Akamai 设置只在有效 `manual` 模式下生效。
-- 无自定义区域代理但脚本未显式关闭时，仍安装 CDN-only Fetch/XHR，并处理现有
-  hydration 数据；显式“关闭脚本”保持完全关闭。
+- 无自定义区域代理但脚本未显式关闭时，仍安装 CDN-only Fetch/XHR；Vue
+  路径同时 watch `__playinfo__` 与 `__PLAYURL_HYDRATE_DATA__`，因而能处理
+  document-start 之后可拦截的赋值。交付时克隆 raw playinfo 再应用 CDN policy，
+  configurable accessor 每次从当前 raw value 重建 delivery；不改写 source object，也不
+  触发区域代理。Non-configurable descriptor 按当前能力 best-effort 处理、告警并
+  fail-open；显式“关闭脚本”保持完全关闭。
 - Vue session cache 只保存未应用 CDN 策略的规范化 playurl，每次交付克隆后使用
   当前配置；过期 episode/request 结果不会更新 runtime、缓存或共享对象，策略部分
   修改后抛错也会从 raw playurl 重新克隆并 fail-open。
@@ -64,6 +68,13 @@ superseded_by:
   version 和 SHA-256，并在真实浏览器 context 测试两种加载顺序。
 - `/x/player/wbi/playurl` 只在已返回的 Fetch/XHR response 上运行共享 CDN adapter；
   BALH 不 proxy、重发或重新签署请求的 `w_rid` / `wts`。
+- 候选变化会中止旧 generation；若新自动回调在旧 controller drain 前到达，
+  runtime 每个 drain 只保留一个 continuation，并将意图更新为最新 generation/
+  candidate-host hash。drain 后重新交给 background scheduler，不重叠 probe，也不
+  静默丢失最新候选；旧 run 收尾时发现网络 generation 改变也会重排。
+- Active-controller fence 只保护未终止的应用层清理。cancel 最终 reject 且
+  abort/request 已终止时会解除调度 fence，但该轮仍是 cleanup-unsafe、停止
+  后续阶段并且不写 cache；永不 settle 的 cancel 继续阻断新 probe。
 
 ## Decisions
 

@@ -88,7 +88,7 @@ interface ProbeOutcome {
     observedBytes: number
     /** Conservative budget charge; equals the reservation when cleanup cannot be proven. */
     budgetBytes: number
-    /** False prevents another batch from starting while this request may still be live. */
+    /** False stops later batches when bounded successful cleanup was not proven. */
     safeToContinue: boolean
     stage: 1 | 2
     bandwidthBps?: number
@@ -439,6 +439,9 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     const activeControllers = new Set<AbortController>()
     let activeControllerDrain: Promise<void> = Promise.resolve()
     let resolveActiveControllerDrain: (() => void) | undefined
+    let pendingAutoProbeDrain: Promise<void> | undefined
+    let pendingAutoProbeDrainGeneration = -1
+    let pendingAutoProbeDrainHostHash = ''
     const listeners = new Set<(status: CdnProbeStatus) => void>()
 
     function emptyStatus(message?: string): CdnProbeStatus {
@@ -759,6 +762,31 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         })
     }
 
+    function scheduleAutoProbeAfterActiveDrain() {
+        const drain = activeControllerDrain
+        const runGeneration = generation
+        const runHostHash = currentHostHash
+        if (pendingAutoProbeDrain === drain) {
+            pendingAutoProbeDrainGeneration = runGeneration
+            pendingAutoProbeDrainHostHash = runHostHash
+            return
+        }
+        pendingAutoProbeDrain = drain
+        pendingAutoProbeDrainGeneration = runGeneration
+        pendingAutoProbeDrainHostHash = runHostHash
+        void drain.then(() => {
+            if (pendingAutoProbeDrain !== drain) return
+            const latestGeneration = pendingAutoProbeDrainGeneration
+            const latestHostHash = pendingAutoProbeDrainHostHash
+            pendingAutoProbeDrain = undefined
+            pendingAutoProbeDrainGeneration = -1
+            pendingAutoProbeDrainHostHash = ''
+            if (latestGeneration !== generation || latestHostHash !== currentHostHash
+                || normalizeMode(dependencies.getMode()) !== 'auto') return
+            scheduleAutoProbe()
+        })
+    }
+
     function applyCdnPolicy<T>(playUrl: T): T {
         if (!playUrl || typeof playUrl !== 'object') return playUrl
         const mode = normalizeMode(dependencies.getMode())
@@ -851,7 +879,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         let bodyCleanup: Promise<boolean> | undefined
         let readerLockReleased = false
         let cleanupProven = true
-        let lateCleanupSucceeded = false
+        let lateCleanupSettled = false
         let requestSettled = false
 
         const observeCleanup = (
@@ -859,9 +887,9 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         ) => {
             cleanupProven &&= cleanup.completedWithinBudget
             if (!cleanup.completedWithinBudget) {
-                void cleanup.settled.then(succeeded => {
-                    lateCleanupSucceeded ||= succeeded
-                    if (succeeded && requestSettled) releaseActiveController(controller)
+                void cleanup.settled.then(() => {
+                    lateCleanupSettled = true
+                    if (requestSettled) releaseActiveController(controller)
                 })
             }
             return cleanup.completedWithinBudget
@@ -999,7 +1027,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             }
         })().finally(() => {
             requestSettled = true
-            if (cleanupProven || lateCleanupSucceeded) releaseActiveController(controller)
+            if (cleanupProven || lateCleanupSettled) releaseActiveController(controller)
         })
         let outcome: ProbeOutcome
         try {
@@ -1382,6 +1410,10 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     function startProbe(runGeneration: number) {
         const promise = runProbe(runGeneration).finally(() => {
             if (inFlight === promise) inFlight = undefined
+            if (runGeneration !== generation && normalizeMode(dependencies.getMode()) === 'auto') {
+                if (activeControllers.size > 0) scheduleAutoProbeAfterActiveDrain()
+                else scheduleAutoProbe()
+            }
         })
         inFlight = promise
         return promise
@@ -1405,7 +1437,12 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         if (options.force && fencedProbe) return fencedProbe
         if (inFlight) return inFlight
         if (activeControllers.size > 0) {
-            if (!options.force) return Promise.resolve(cloneStatus(status))
+            if (!options.force) {
+                if (normalizeMode(dependencies.getMode()) === 'auto') {
+                    scheduleAutoProbeAfterActiveDrain()
+                }
+                return Promise.resolve(cloneStatus(status))
+            }
             if (fencedProbe) return fencedProbe
             const promise = runForcedProbeAfterFence().finally(() => {
                 if (fencedProbe === promise) fencedProbe = undefined
