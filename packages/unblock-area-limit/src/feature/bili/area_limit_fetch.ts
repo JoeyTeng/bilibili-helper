@@ -7,6 +7,7 @@ import { RegExps } from "../../util/regexps"
 import { Strings } from "../../util/strings"
 import { balh_config } from "../config"
 import { r } from "../r"
+import { prepareCdnRecoveryRequestUrl } from "./cdn_recovery_browser"
 import { applyCdnPolicyToPlayUrlResponse } from "./cdn_playurl"
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
@@ -23,7 +24,16 @@ export function injectFetch({ cdnOnly = false }: { cdnOnly?: boolean } = {}) {
         const request = cdnOnly
             ? { input, init, url: getFetchUrl(input) }
             : rewriteSubtitleMetadataFetchInput(input, init)
-        const originResponse = await originFetch.call(this, request.input, request.init)
+        const routed = prepareCdnRecoveryFetchInput(request.input, request.init)
+        let originResult: Promise<Response>
+        try {
+            originResult = originFetch.call(this, routed.input, request.init)
+        } catch (error) {
+            routed.discard()
+            throw error
+        }
+        routed.commit()
+        const originResponse = await originResult
         const url = request.url
         if (url) {
             if (cdnOnly) {
@@ -79,6 +89,57 @@ export function injectFetch({ cdnOnly = false }: { cdnOnly?: boolean } = {}) {
         }
         return originResponse
     }
+}
+
+function prepareCdnRecoveryFetchInput(input: RequestInfo | URL, init?: RequestInit) {
+    const unchanged = {
+        input,
+        commit() { },
+        discard() { },
+    }
+    let prepared: ReturnType<typeof prepareCdnRecoveryRequestUrl> | undefined
+    try {
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+        if (!isGetMethod(method)) return unchanged
+
+        const url = getFetchUrl(input)
+        if (!url) return unchanged
+
+        prepared = prepareCdnRecoveryRequestUrl(url, method)
+        const decision = prepared.decision
+        let routedInput: RequestInfo | URL = input
+        if (decision.routed && typeof decision.url === 'string' && decision.url !== url) {
+            if (typeof input === 'string') routedInput = decision.url
+            else if (input instanceof URL) routedInput = new URL(decision.url, document.location.href)
+            else if (input instanceof Request) routedInput = new Request(decision.url, input)
+            else {
+                prepared.discard()
+                return unchanged
+            }
+        }
+
+        return {
+            input: routedInput,
+            commit: () => prepared!.commit(),
+            discard: () => prepared!.discard(),
+        }
+    } catch (_) {
+        try {
+            prepared?.discard()
+        } catch {
+            // The original predecessor call remains authoritative.
+        }
+        // Recovery routing is best-effort; the predecessor retains native Fetch behavior.
+    }
+    return unchanged
+}
+
+function isGetMethod(method: unknown): method is string {
+    return typeof method === 'string'
+        && method.length === 3
+        && (method[0] === 'G' || method[0] === 'g')
+        && (method[1] === 'E' || method[1] === 'e')
+        && (method[2] === 'T' || method[2] === 't')
 }
 
 function rewriteSubtitleMetadataFetchInput(input: RequestInfo | URL, init?: RequestInit) {

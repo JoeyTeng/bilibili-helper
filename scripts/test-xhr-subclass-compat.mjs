@@ -62,9 +62,11 @@ class NativeXMLHttpRequest {
         return getNativeState(this).responseText
     }
 
-    open(method, url) {
+    open(method, url, ...rest) {
         const state = getNativeState(this)
         lifecycle.push('native:open')
+        state.openCalls = (state.openCalls ?? 0) + 1
+        state.openArgs = [method, url, ...rest]
         state.method = method
         state.url = url
         state.readyState = 1
@@ -126,9 +128,15 @@ globalThis.GM_info = {
 
 const { injectXhr } = await import(pathToFileURL(outFile).href)
 
+const openUrlCalls = []
 const requestCalls = []
 const responseCalls = []
 injectXhr({
+    transformOpenUrl(url) {
+        lifecycle.push('balh:transformOpenUrl')
+        openUrlCalls.push(url)
+        return url === '/media/original' ? '/media/routed' : null
+    },
     transformRequest({ url, container }) {
         lifecycle.push('balh:transformRequest')
         requestCalls.push({
@@ -236,5 +244,55 @@ assert.deepEqual(getterCalls, [
     'outer:responseText',
     'native:responseText',
 ])
+assert.deepEqual(openUrlCalls, [], 'POST must bypass the pre-open URL mapper')
+
+lifecycle.length = 0
+getterCalls.length = 0
+requestCalls.length = 0
+responseCalls.length = 0
+
+const routedXhr = new XMLHttpRequest()
+assert.equal(Object.getPrototypeOf(routedXhr), XMLHttpRequest.prototype)
+assert.equal(routedXhr instanceof XMLHttpRequest, true)
+assert.equal(routedXhr instanceof BALHWrappedXHR, true)
+assert.equal(routedXhr instanceof NativeXMLHttpRequest, true)
+assert.equal(nativeInstances.has(routedXhr), true)
+assert.equal(outerState.has(routedXhr), true)
+assert.equal(routedXhr.privateState(), 'outer-private:outer-weak')
+
+routedXhr.open('gEt', '/media/original', false, 'media-user', 'media-password')
+routedXhr.send('media-body')
+
+const routedNativeState = nativeState.get(routedXhr)
+assert.equal(routedNativeState.openCalls, 1, 'routing must call native open exactly once')
+assert.deepEqual(routedNativeState.openArgs, [
+    'gEt',
+    '/media/routed',
+    false,
+    'media-user',
+    'media-password',
+])
+assert.equal(routedNativeState.requestBody, 'media-body')
+assert.deepEqual(openUrlCalls, ['/media/original'])
+assert.deepEqual(requestCalls, [{
+    url: '/media/routed',
+    method: 'gEt',
+}])
+assert.deepEqual(responseCalls, [{
+    url: 'https://www.bilibili.com/media/routed',
+    response: 'outer-private:outer-weak:native-response:complete',
+    responseText: 'outer-private:outer-weak:native-response-text:complete',
+    isOuterSubclass: true,
+}])
+assert.deepEqual(lifecycle, [
+    'balh:transformOpenUrl',
+    'native:open',
+    'native:send',
+    'balh:transformRequest',
+    'balh:transformResponse',
+])
+assert.equal(routedXhr.privateState(), 'outer-private:outer-weak')
+assert.equal(nativeInstances.has(routedXhr), true)
+assert.equal(outerState.has(routedXhr), true)
 
 console.log('xhr-subclass-compat tests passed')

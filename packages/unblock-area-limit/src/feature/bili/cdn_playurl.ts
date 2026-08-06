@@ -1,4 +1,8 @@
-import { applyCdnPolicy } from './cdn_runtime'
+import {
+    applyCdnPolicy,
+    beginFinalCdnDelivery,
+    observeFinalCdnDelivery,
+} from './cdn_runtime'
 
 function isPlayUrlPayload(value: any) {
     return !!value && typeof value === 'object' && (!!value.dash || !!value.durl)
@@ -24,6 +28,19 @@ export function applyCdnPolicyToPlayUrlResponse<T>(value: T): T {
     const playUrl = findPlayUrlPayload(value)
     if (playUrl) {
         applyCdnPolicy(playUrl)
+    }
+    return value
+}
+
+/** Observe, but never mutate, the playurl payload finally delivered to page code. */
+export function beginFinalCdnPlayUrlDelivery() {
+    return beginFinalCdnDelivery()
+}
+
+export function observeFinalCdnPlayUrlResponse<T>(value: T, deliveryOrder?: number): T {
+    const playUrl = findPlayUrlPayload(value)
+    if (playUrl) {
+        observeFinalCdnDelivery(playUrl, deliveryOrder)
     }
     return value
 }

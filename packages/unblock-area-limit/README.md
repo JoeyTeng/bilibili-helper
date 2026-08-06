@@ -104,7 +104,18 @@ host-only 持久化 cache 使用 `v2` schema 和 `20 min` TTL，并在候选 hos
 
 即使没有配置自定义区域代理，只要没有显式选择“关闭脚本”，CDN 模式仍会处理平台已经返回的可播放地址；显式关闭脚本会同时禁用区域解锁与 CDN 选择。
 
-可以在设置页点击“测试当前视频 CDN”运行上述有界两阶段 probe。Stage 1/2 已完成，但当前版本还不会在已开始的媒体请求卡顿时即时换路；Stage 3 将由独立后续 PR 实现经 low-buffer grace 确认后的 stall recovery，只重路由未来 Fetch/XHR 媒体请求，绝不 abort 或 reload 当前请求，并使用 cooldown/backoff 防止来回切换。MCDN/PCDN 始终是最后兜底；静态 candidate pool 只允许作为非默认实验性排序提示，并且只能引用当前完整签名候选组中已经存在的 URL。
+可以在设置页点击“测试当前视频 CDN”运行上述有界两阶段 probe。在 `auto` 模式下，
+Stage 3 还会为页面 Fetch/XHR 能看到的 exact media `GET` 监测播放停顿：只有页面可见、
+未暂停或 seek、buffer 不超过 `0.5 s`，并连续 `3 s` 缺少有效播放推进时，才为之后的
+请求切到同一候选组的下一个完整签名 URL。它绝不 abort、reload、reopen 或重放当前
+请求；最小 `15 s` cooldown 和有上限的指数 backoff 防止来回切换。浏览器原生 media
+loader 绕过 Fetch/XHR 时不在自动恢复范围内。MCDN/PCDN 始终是最后兜底；静态
+candidate pool 不属于当前交付。
+
+当兼容的第三方脚本在 BALH 之后继续变换 playurl response 时，BALH 会在页面收到响应
+前透明观察最终 payload，并仅用其中的完整 exact candidates 刷新恢复 registry；不会
+再次排序、替换 `Response` / XHR 对象或拼接 URL。最新版 CDN Switcher 的两种加载顺序
+均由下列固定 snapshot gate 覆盖。
 
 仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。全部三个阶段合并且该人工验收完成前，不得创建稳定版 tag、发布稳定版或刷新 `main`；精确 live E2E 命令由仓库根 README 维护。
 
@@ -112,7 +123,7 @@ host-only 持久化 cache 使用 `v2` schema 和 `20 min` TTL，并在候选 hos
 
 | 项目 | 已验证版本 | 验证日期 | 范围 |
 | --- | --- | --- | --- |
-| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.4` | 2026-08-06 | 当前 latest；Fetch/XHR，两种脚本加载顺序 |
+| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.4` | 2026-08-06 | 当前 latest；Fetch/XHR、两种脚本加载顺序与 future-route recovery |
 
 上游身份固定为 Greasy Fork script `500213`，latest 下载地址是
 `https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.user.js`。

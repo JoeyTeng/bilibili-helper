@@ -4,7 +4,7 @@ title: CDN Three-Stage Delivery
 status: active
 created: 2026-08-05
 updated: 2026-08-06
-branch: wip/cdn-selection-integration
+branch: wip/cdn-stall-recovery
 pr:
 supersedes: []
 superseded_by:
@@ -14,8 +14,9 @@ superseded_by:
 
 ## Summary
 
-- CDN selection 按三个阶段交付。Stage 1 与 Stage 2 的实现范围已经完成；Stage 3
-  仍由独立后续 PR 评审和合并。
+- CDN selection 按三个阶段交付。Stage 1 与 Stage 2 的实现范围已经完成并由
+  [PR #13](https://github.com/JoeyTeng/bilibili-helper/pull/13) 交付；Stage 3 在独立
+  WIP 分支实现、评审和合并。
 - 三个阶段全部合并且 Joey 在 UK-local 环境完成人工播放验收前，整体状态保持
   `active`。
 - 两项条件同时满足前，不得创建稳定版 tag、发布稳定版或刷新 `main`。
@@ -56,7 +57,7 @@ superseded_by:
   cancel 终止但 reject 时可解除调度 fence，但该轮仍保持 cleanup-unsafe 且
   不可缓存；永不 settle 的 cleanup 仍保持 fence。
 
-### Stage 3：Stall recovery — planned follow-up PR
+### Stage 3：Stall recovery — completed
 
 - 只有页面可见、播放器未暂停、未 seeking，并且经过 grace period 后 low buffer 仍存在，
   才能确认 stall。
@@ -66,14 +67,40 @@ superseded_by:
   MCDN/PCDN 为最后兜底。
 - 静态 candidate pool 只允许作为显式、非默认实验性排序提示，并且只能引用当前
   exact signed candidate group 已有 URL；不得引入外部 host/URL。
+- 设计门禁已经完成并记录在 `docs/design/cdn-stall-recovery.md`：每个被唯一请求命中
+  的 exact group 独立运行状态机；low buffer threshold 为 `0.5 s`，grace 为
+  `3,000 ms`，最小 cooldown 为 `15,000 ms`，指数 backoff 从 `5,000 ms` 增长且
+  封顶 `60,000 ms`。
+- Fetch 只在 predecessor 前映射未来 `GET` input；XHR 只在唯一 native `open()` 前
+  映射 primitive string `GET` URL。歧义、DOM 不可读、构造失败、wrapper 异常或
+  native media loader 绕过都 fail-open；浏览器 gate 必须区分 `PASS`、`FAIL`、
+  `UNSUPPORTED` 与 `INCONCLUSIVE`。
+- CDN Switcher 等兼容 response transformer 可能在 BALH policy adapter 之后继续变换
+  candidates。assignment-aware 最终响应观察器会把后来赋值的 Fetch/XHR wrapper 放在
+  透明观察层之内，并在页面拿到响应前重新发布 downstream final exact groups；它不
+  二次运行 selector、不替换 `Response` / XHR identity，也不合成 URL。这样两种加载
+  顺序都以页面实际收到的候选作为 Stage 2/3 权威输入。
+- playurl Fetch/XHR 在 predecessor 开始前取得 monotonic delivery token。新请求先完成
+  后，旧 response 晚到只会触发恢复最近接受的 immutable final-group snapshot，不能
+  覆盖当前 candidates/registry；同步 Vue/hydration delivery 同样会 supersede 更早的
+  pending transport。显式关闭脚本则既不安装这些观察器，也不会安排 auto probe。
+- 本阶段实现、确定性测试、受控真实 Chrome gate、真实站点 capability classifier 与
+  latest CDN Switcher 组合 gate 已完成。`safe` / `original` / `manual`、显式关闭、native
+  loader bypass 和证据歧义仍按设计禁用或 fail-open。
 
 ## Compatibility Contract
 
 - 兼容范围只覆盖 latest Bilibili Video CDN Switcher，不维护旧版矩阵。
 - 当前固定 snapshot 是 `0.1.4`，SHA-256
   `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
-- 当前交付证据中的 latest-upstream browser gate 已覆盖并通过两种 BALH/CDN Switcher
-  加载顺序。
+- latest-upstream browser gate 使用不同的 source/post-CDN host，分别覆盖两种
+  BALH/CDN Switcher 加载顺序和 Fetch/XHR response transport；只有 post-CDN exact
+  candidates 可以激活 future-route recovery。最终合并证据必须来自 strengthened gate
+  的完整通过结果，不能沿用候选本来就在目标 host 上的旧 fixture 结果。
+- strengthened gate 已在 Chrome `151.0.7922.72` 通过：`balh->cdn` 与 `cdn->balh`
+  的 Fetch/XHR 均为 `primary -> primary -> alternate -> alternate`；固定上游身份仍是
+  `0.1.4` 与上述 SHA-256。测试同时门禁 post-CDN publication、pre-CDN 零激活、当前
+  请求不重放、实际 grace/cooldown、稳定恢复、transport health 与隐私 surface。
 
 ## Release Gate
 
@@ -84,20 +111,31 @@ superseded_by:
   attempts 为 `completed=4` / `total=4`，持久化 2 个 host，并在重载后的新 runtime
   中以 `source="cache"`、`hostCount=2` 无网络复用。这只是自动辅助证据，不满足
   Joey 的人工验收。
+- 同一实现树的受控 recovery browser gate 已通过 Fetch/XHR：当前请求保持 in-flight，
+  future exact route 切到 alternate，cooldown 保持 alternate，predecessor/player
+  identity、浏览器 cleanup 与 exact-URL 隐私均验证完成。
+- live Stage 3 capability classifier 对同一 BVID 返回 `INCONCLUSIVE` / `exit 3`，原因是
+  `no-unique-exact-group`。这正确保留了证据不足与成功之间的边界，不替代受控正向 gate，
+  也不表示生产代码失败。
 - 合并与人工条件同时满足前，不创建稳定版 tag、不发布稳定版，也不刷新 `main`。
 
 ## Next Steps
 
-1. 在独立后续 PR 中交付 Stage 3，包含确定性状态机与浏览器覆盖。
-2. 确认三个阶段全部合并。
-3. 由 Joey 执行 UK-local 人工播放验收。
-4. 仅在上述门禁通过后恢复稳定 tag/release/`main` 刷新流程。
+1. 合并 Stage 1/2 PR #13 与独立 Stage 3 PR，确认三个阶段全部进入 `dev`。
+2. 由 Joey 执行 UK-local 人工播放验收。
+3. 仅在上述门禁通过后恢复稳定 tag/release/`main` 刷新流程。
 
 ## Evidence
 
 - 详细架构：`docs/design/cdn-selection.md`
+- Stage 3 可复用状态机与接入契约：`docs/design/cdn-stall-recovery.md`
 - 已完成的 Stage 1/2 工作流：
   `docs/project_journal/2026/08/2026-08-04-cdn-selection-integration-21b2.md`
 - CDN Switcher canonical identity 与固定 snapshot：
   `packages/unblock-area-limit/README.md#cdn-switcher-兼容性`
 - 精确 live E2E CLI 继续由仓库根 README 维护。
+- Stage 3 本地交付门禁：`pnpm run check`、
+  `pnpm run test:cdn-recovery-browser --timeout-ms 120000`、
+  `pnpm run test:cdn-switcher:latest`、
+  `pnpm run test:cdn-live-e2e --timeout-ms 120000` 与可选
+  `--stage3-capability` classifier。

@@ -102,7 +102,7 @@ superseded_by:
   async/subtitle/diagnostics、XHR compatibility、全部 CDN selector/runtime/adapter
   回归与 production build 均通过。
 - 2026-08-06 运行
-  `pnpm run test:cdn-live-e2e -- --timeout-ms 120000` 已通过，目标 BVID
+  `pnpm run test:cdn-live-e2e --timeout-ms 120000` 已通过，目标 BVID
   `BV17x411w7KC`、Chrome `151.0.7922.72`：
   - `probeState=ready`；
   - candidate/probed/healthy host 数分别为 `2/2/2`，failed/unprobeable/

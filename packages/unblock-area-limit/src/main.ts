@@ -35,6 +35,10 @@ function scriptContent() {
     bili.hide_adblock_tips()
 
     bili.area_limit_xhr()
+    if (!balh_config.is_closed) {
+        bili.installCdnRecoveryMonitor()
+        bili.installCdnFinalDeliveryObservers()
+    }
 
     bili.remove_pre_ad()
 
@@ -87,6 +91,7 @@ function scriptContent() {
             testCurrentVideoCdn: bili.probeCurrentPlayUrlCdn,
             clearCdnHealthCache: bili.clearCdnHealthCache,
             getCdnProbeStatus: bili.getCdnProbeStatus,
+            getCdnRecoveryStatus: bili.getCdnRecoveryStatus,
             set1080P: function () {
                 const settings = JSON.parse(localStorage.bilibili_player_settings)
                 const oldQuality = settings.setting_config.defquality

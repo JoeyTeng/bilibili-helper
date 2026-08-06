@@ -613,9 +613,11 @@ timezone/locale 推断地区。
    - BALH first, CDN Switcher second;
    - CDN Switcher first, BALH second.
 6. 组合 harness 至少验证 Fetch 与 XHR wrapper 不递归、不丢失原始调用语义、
-   playurl shape 与媒体 URL path/query 不损坏。共享选择核心的同一 payload 幂等、
-   BALH 内部异常 fail-open 由仓库内确定性测试覆盖；外部 wrapper 自己的失败仍
-   明确报告为不兼容。
+   playurl shape 与媒体 URL path/query 不损坏；fixture 必须从与目标 CDN 不同的
+   source host 开始，并分别证明两种 response transport 发布的是 downstream
+   transformer 完成后的 exact groups，pre-transform URL 不能激活 Stage 3。共享选择
+   核心的同一 payload 幂等、BALH 内部异常 fail-open 由仓库内确定性测试覆盖；外部
+   wrapper 自己的失败仍明确报告为不兼容。
 7. harness 使用真实浏览器 context，并在 `document-start` 等价阶段注入两份完整
    userscript；GM API、页面响应与网络出口由测试控制，不能复用用户 profile、
    cookie 或登录状态。
@@ -657,11 +659,12 @@ BALH 源码与兼容记录，不再下载第三方 latest。
 选择器不得返回空的 `baseUrl`/`backupUrl`、空 segment、部分签名或只含探测成功
 项的列表。若无法安全完成整个候选组的转换，应保留该组原值。
 
-## Stage 3（独立后续 PR）：stall recovery
+## Stage 3：stall recovery
 
-播放停顿后的实时恢复不属于已完成的 Stage 1/2。以下条目是 Stage 3 不可违反的
-约束草案，尚不是可直接实现的完整状态机；不能通过扩大 Stage 2 探测副作用来暗中
-交付：
+播放停顿后的实时恢复不属于已完成的 Stage 1/2，也不能通过扩大 Stage 2 探测副作用
+暗中交付。可直接实现的状态、事件、guard、时间参数、exact-group registry、Fetch/XHR
+语义、浏览器结果分类与跨项目复用清单统一维护在
+[`cdn-stall-recovery.md`](cdn-stall-recovery.md)。本节保留不可违反的上层边界：
 
 - 只有页面可见、播放器未暂停、未 seeking，且经过 grace period 后仍确认 low
   buffer 时才能判定 stall；后台 tab throttle、用户暂停和主动 seek 都不是 CDN
@@ -678,16 +681,34 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   不得来回切换，避免 host ping-pong。
 - 所有普通候选用尽后仍保留并尝试 MCDN/PCDN 最后兜底。
 - 新的视频、episode、质量或 candidate-group generation 会清除旧恢复状态。
+- 只有最终 delivery 的 exact groups 会进入内存 registry；`safe`、`original`、`manual`
+  与离开 `auto` 都会禁用并清除旧 activation/timer/override。
+- Fetch/XHR 最终响应观察器必须位于当前兼容 wrapper chain 的外层：后来赋值的 wrapper
+  可以继续调用它捕获的原 predecessor，但页面取得响应前必须重新发布 downstream
+  变换后的 exact groups。该观察不得二次运行 selector、替换 `Response` / XHR identity
+  或合成 URL；descriptor 无法安全组合时保持 fail-open。
+- playurl Fetch 调用或 XHR `open()` 必须在 predecessor 开始前取得单调 delivery token。
+  新请求先完成后，旧请求晚到不得覆盖 Stage 2 candidates 或 Stage 3 registry；outer
+  observer 必须恢复最近接受的 final group snapshot。同步 Vue/hydration delivery 也会
+  取得新 token，从而使更早的 pending transport 失效。token 与 snapshot 只存在内存。
+- 显式“关闭脚本”时不安装 monitor/final observer，也不允许已存在的 observer 继续
+  安排 auto probe 或启用 recovery；“未配置自定义区域代理”不等同于显式关闭，仍保留
+  CDN-only 选择与恢复能力。
+- Fetch/XHR 先 prepare exact route，只有 predecessor 接受 Fetch 调用或 native XHR
+  `open()` 成功后才 commit；构造、同步 predecessor、WebIDL/native `open()` 失败只
+  discard，不制造伪请求状态。
 
-Stage 3 PR 在写实现前必须把这份草案补成机器可测试的状态表：列出状态、事件、
-guard 与转换；固定 grace、cooldown、backoff 的默认值、上限和重置条件；定义媒体
-请求如何逐字匹配到 representation/segment group，以及歧义时的 fail-open 规则；
-并明确 Fetch/XHR 重路由对 method、headers、`Range`、credentials、signal、native
-`open()` 状态和 response identity 的保持语义。相同文档还必须给出 deterministic
-fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才进入实现。
+Stage 3 的实现必须遵循已冻结的设计参数：`0.5 s` low-buffer threshold、`3,000 ms`
+grace、`15,000 ms` 最小 cooldown、从 `5,000 ms` 指数增长且封顶 `60,000 ms` 的
+backoff，以及 `3 s` buffer / `5 s` 连续推进的稳定恢复重置。媒体请求只允许逐字命中
+唯一 representation/segment group；Fetch/XHR 重路由必须保持 method、headers、
+`Range`、credentials、body、signal、native `open()` 状态与 response/XHR identity。
+deterministic fixture、组合兼容、真实 Chromium 与 live capability 的验收矩阵也以同一
+文档为准。
 
-在这些状态机、观察信号与真实浏览器测试齐备前，`auto` 只做 Stage 2 后台探测并
-影响下一次 playurl 排序，不宣称具备当前播放换路或 stall recovery。
+Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能力仍限于页面 Fetch/XHR
+可见的未来 exact media `GET`。native media loader 绕过必须报告为 `UNSUPPORTED`，
+不能据此宣称恢复成功。
 
 ## 测试边界
 

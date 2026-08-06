@@ -588,6 +588,7 @@ function vueBoundaryStubPlugin() {
                 if (config.cdn_mode === 'manual') rewrite(playUrl, hosts[config.upos_server])
                 return value
             }
+            export function observeFinalCdnPlayUrlResponse(value) { return value }
         `],
     ])
     return stubPlugin('vue-cdn-boundaries', stubs)

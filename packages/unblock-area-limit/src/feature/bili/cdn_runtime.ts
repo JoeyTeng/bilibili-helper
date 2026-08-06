@@ -9,6 +9,7 @@ import {
     collectPlayUrlCdnGroups,
     optimizePlayUrlCdn,
 } from './cdn_selection'
+import { publishCdnRecoveryGroups } from './cdn_recovery_browser'
 
 // Capture fetch before BALH installs its own interception hook.
 const capturedFetch = typeof globalThis.fetch === 'function'
@@ -119,6 +120,7 @@ export interface CdnRuntimeDependencies {
     getManualReplaceAkamai?: () => typeof FALSE | 'Y' | undefined
     replaceManual?: (playUrl: unknown, host: string, replaceAkamai: typeof FALSE | 'Y') => unknown
     collectGroups?: (playUrl: unknown) => readonly CdnCandidateGroup[]
+    publishRecoveryGroups?: (groups: readonly CdnCandidateGroup[], enabled: boolean) => unknown
     optimize?: typeof optimizePlayUrlCdn
     log?: (event: string, status?: CdnProbeStatus) => void
     limits?: Partial<CdnProbeLimits>
@@ -126,6 +128,8 @@ export interface CdnRuntimeDependencies {
 
 export interface CdnRuntime {
     applyCdnPolicy<T>(playUrl: T): T
+    beginFinalCdnDelivery(): number
+    observeFinalCdnDelivery<T>(playUrl: T, deliveryOrder?: number): T
     probeCurrentPlayUrlCdn(options?: { force?: boolean }): Promise<CdnProbeStatus>
     clearCdnHealthCache(): void
     getCdnProbeStatus(): CdnProbeStatus
@@ -412,11 +416,14 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             globalThis.setTimeout(callback, 0)
         }),
         getNetworkHint: overrides.getNetworkHint ?? defaultNetworkHint,
-        getMode: overrides.getMode ?? (() => balh_config.cdn_mode),
+        getMode: overrides.getMode ?? (() => (
+            balh_config.is_closed ? 'original' : balh_config.cdn_mode
+        )),
         getManualHost: overrides.getManualHost ?? defaultManualHost,
         getManualReplaceAkamai: overrides.getManualReplaceAkamai ?? (() => balh_config.upos_replace_akamai),
         replaceManual: overrides.replaceManual ?? replaceManualCdnHosts,
         collectGroups: overrides.collectGroups ?? collectPlayUrlCdnGroups,
+        publishRecoveryGroups: overrides.publishRecoveryGroups ?? publishCdnRecoveryGroups,
         optimize: overrides.optimize ?? optimizePlayUrlCdn,
         log: overrides.log ?? ((event: string, probeStatus?: CdnProbeStatus) => util_debug(event, probeStatus)),
     }
@@ -436,6 +443,9 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     let unprobeableGeneration = -1
     let unprobeableUntil = 0
     let suppressedUnprobeableStatus: CdnProbeStatus | undefined
+    let finalDeliveryOrder = 0
+    let latestAcceptedFinalDeliveryOrder = 0
+    let latestAcceptedFinalGroups: readonly CdnCandidateGroup[] | undefined
     const activeControllers = new Set<AbortController>()
     let activeControllerDrain: Promise<void> = Promise.resolve()
     let resolveActiveControllerDrain: (() => void) | undefined
@@ -746,6 +756,31 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
         }
         updateCurrentCandidates(extractCandidates(groups))
         ensureHealthForCurrentHosts()
+        return groups
+    }
+
+    function cloneCandidateGroups(groups: readonly CdnCandidateGroup[]) {
+        return groups.map(group => ({
+            ...group,
+            candidates: group.candidates.map(candidate => ({
+                ...candidate,
+                riskKinds: [...candidate.riskKinds],
+            })),
+        }))
+    }
+
+    function restoreCurrent(groups: readonly CdnCandidateGroup[]) {
+        updateCurrentCandidates(extractCandidates(groups))
+        ensureHealthForCurrentHosts()
+        return groups
+    }
+
+    function publishRecoveryGroups(groups: readonly CdnCandidateGroup[], enabled: boolean) {
+        try {
+            dependencies.publishRecoveryGroups(groups, enabled)
+        } catch {
+            dependencies.log('cdn-recovery-publication-failed')
+        }
     }
 
     function scheduleAutoProbe() {
@@ -788,8 +823,11 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
     }
 
     function applyCdnPolicy<T>(playUrl: T): T {
-        if (!playUrl || typeof playUrl !== 'object') return playUrl
         const mode = normalizeMode(dependencies.getMode())
+        if (!playUrl || typeof playUrl !== 'object') {
+            publishRecoveryGroups([], mode === 'auto')
+            return playUrl
+        }
         if (mode === 'manual') {
             const host = dependencies.getManualHost()
             if (normalizeHost(host)) {
@@ -804,7 +842,7 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
                     dependencies.log('cdn-manual-replacement-failed')
                 }
             }
-            captureCurrent(playUrl)
+            publishRecoveryGroups(captureCurrent(playUrl), false)
             return playUrl
         }
         if (mode === 'safe' || mode === 'auto') {
@@ -815,11 +853,45 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
             } catch {
                 dependencies.log('cdn-selection-failed')
             }
-            captureCurrent(playUrl)
+            const finalGroups = captureCurrent(playUrl)
+            publishRecoveryGroups(finalGroups, mode === 'auto')
             if (mode === 'auto') scheduleAutoProbe()
             return playUrl
         }
-        captureCurrent(playUrl)
+        publishRecoveryGroups(captureCurrent(playUrl), false)
+        return playUrl
+    }
+
+    /**
+     * Re-publish a playurl payload after every downstream response transformer
+     * has run. This observes exact delivered groups without applying policy a
+     * second time or changing the payload returned by the predecessor chain.
+     */
+    function beginFinalCdnDelivery() {
+        finalDeliveryOrder += 1
+        return finalDeliveryOrder
+    }
+
+    function observeFinalCdnDelivery<T>(playUrl: T, deliveryOrder?: number): T {
+        const mode = normalizeMode(dependencies.getMode())
+        if (!playUrl || typeof playUrl !== 'object') return playUrl
+        const acceptedOrder = Number.isSafeInteger(deliveryOrder) && deliveryOrder! > 0
+            ? deliveryOrder!
+            : beginFinalCdnDelivery()
+        finalDeliveryOrder = Math.max(finalDeliveryOrder, acceptedOrder)
+
+        if (acceptedOrder < latestAcceptedFinalDeliveryOrder && latestAcceptedFinalGroups) {
+            const restoredGroups = restoreCurrent(latestAcceptedFinalGroups)
+            publishRecoveryGroups(restoredGroups, mode === 'auto')
+            if (mode === 'auto') scheduleAutoProbe()
+            return playUrl
+        }
+
+        const finalGroups = captureCurrent(playUrl)
+        latestAcceptedFinalDeliveryOrder = acceptedOrder
+        latestAcceptedFinalGroups = cloneCandidateGroups(finalGroups)
+        publishRecoveryGroups(finalGroups, mode === 'auto')
+        if (mode === 'auto') scheduleAutoProbe()
         return playUrl
     }
 
@@ -1496,6 +1568,8 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
 
     return {
         applyCdnPolicy,
+        beginFinalCdnDelivery,
+        observeFinalCdnDelivery,
         probeCurrentPlayUrlCdn,
         clearCdnHealthCache,
         getCdnProbeStatus,
@@ -1506,6 +1580,8 @@ export function createCdnRuntime(overrides: CdnRuntimeDependencies = {}): CdnRun
 const defaultRuntime = createCdnRuntime()
 
 export const applyCdnPolicy = defaultRuntime.applyCdnPolicy
+export const beginFinalCdnDelivery = defaultRuntime.beginFinalCdnDelivery
+export const observeFinalCdnDelivery = defaultRuntime.observeFinalCdnDelivery
 export const probeCurrentPlayUrlCdn = defaultRuntime.probeCurrentPlayUrlCdn
 export const clearCdnHealthCache = defaultRuntime.clearCdnHealthCache
 export const getCdnProbeStatus = defaultRuntime.getCdnProbeStatus

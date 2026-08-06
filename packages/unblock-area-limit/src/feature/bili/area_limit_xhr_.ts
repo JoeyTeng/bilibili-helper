@@ -22,10 +22,25 @@ import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
 import { applyCdnPolicyToPlayUrlResponse, findPlayUrlPayload } from './cdn_playurl';
+import { prepareCdnRecoveryRequestUrl } from './cdn_recovery_browser';
 
 export const area_limit_xhr = (() => {
+    function transformCdnRecoveryOpenUrl(url) {
+        try {
+            const prepared = prepareCdnRecoveryRequestUrl(url, 'GET')
+            return {
+                url: prepared.decision.url,
+                commit: () => prepared.commit(),
+                rollback: () => prepared.discard(),
+            }
+        } catch {
+            return url
+        }
+    }
+
     function injectCdnOnlyXhr() {
         injectXhrImpl({
+            transformOpenUrl: transformCdnRecoveryOpenUrl,
             transformRequest: () => null,
             transformResponse: ({ url, response, xhr }) => {
                 if (!isCdnPlayUrlUrl(url)) return null
@@ -67,6 +82,7 @@ export const area_limit_xhr = (() => {
         injectFetch()
         function injectXhr() {
             injectXhrImpl({
+                transformOpenUrl: transformCdnRecoveryOpenUrl,
                 /// {@template xhr_transform_response}
                 /// 转换响应数据, 处理简单的情况
                 /// - url: 响应的url

@@ -12,9 +12,14 @@ globalThis.__closedModeProxyCalls = []
 globalThis.__closedModeFullPipelineCalls = []
 globalThis.__closedModeWarnings = []
 globalThis.__closedModeThrowFromCdn = false
+globalThis.__closedModeMainCalls = []
+globalThis.__closedModeRuntimeRecoveryPublications = []
 globalThis.__closedModeConfig = {
     is_closed: 'Y',
     server_custom: 'https://proxy.invalid',
+    cdn_mode: 'auto',
+    upos_server: '',
+    upos_replace_akamai: '',
 }
 
 class NativeXMLHttpRequest extends EventTarget {
@@ -86,11 +91,30 @@ assert.deepEqual(globalThis.__closedModeFetchInstalls, [], 'explicitly closed mo
 assert.strictEqual(window.XMLHttpRequest, originalXMLHttpRequest, 'explicitly closed mode must not install XHR')
 assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'explicitly closed mode must not enter the full pipeline')
 
+const mainModuleUrl = await buildMainWiringModule()
+globalThis.__closedModeMainCalls = []
+await import(`${mainModuleUrl}#explicit-close`)
+assert.equal(countMainCall('area_limit_xhr'), 1, 'explicit-close main wiring did not reach area_limit_xhr')
+assert.equal(countMainCall('installCdnRecoveryMonitor'), 0, 'explicitly closed mode installed the CDN recovery monitor')
+assert.equal(countMainCall('installCdnFinalDeliveryObservers'), 0, 'explicitly closed mode installed final-delivery observers')
+
+await assertClosedDefaultRuntimeDoesNotScheduleFinalDeliveryRecovery()
+
 globalThis.__closedModeConfig.is_closed = ''
 globalThis.__closedModeConfig.server_custom = ''
 area_limit_xhr()
-assert.deepEqual(globalThis.__closedModeFetchInstalls, [{ cdnOnly: true }])
-assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'closed mode must not enter the area-unblock pipeline')
+assert.deepEqual(
+    globalThis.__closedModeFetchInstalls,
+    [{ cdnOnly: true }],
+    'missing custom proxy must preserve CDN-only Fetch wiring',
+)
+assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'CDN-only mode must not enter the area-unblock pipeline')
+
+globalThis.__closedModeMainCalls = []
+await import(`${mainModuleUrl}#missing-custom-proxy`)
+assert.equal(countMainCall('area_limit_xhr'), 1, 'missing-proxy main wiring did not reach area_limit_xhr')
+assert.equal(countMainCall('installCdnRecoveryMonitor'), 1, 'missing custom proxy incorrectly disabled the CDN recovery monitor')
+assert.equal(countMainCall('installCdnFinalDeliveryObservers'), 1, 'missing custom proxy incorrectly disabled final-delivery observers')
 
 const endpointCases = [
     {
@@ -311,6 +335,127 @@ function sendNativeRequest(url, response, body) {
     }
 }
 
+function countMainCall(name) {
+    return globalThis.__closedModeMainCalls.filter(call => call === name).length
+}
+
+async function buildMainWiringModule() {
+    const result = await build({
+        entryPoints: [path.join(rootDir, 'packages/unblock-area-limit/src/main.ts')],
+        bundle: true,
+        format: 'esm',
+        platform: 'node',
+        target: 'node20',
+        write: false,
+        define: {
+            invokeBy: JSON.stringify('closed-mode-wiring-test'),
+            __BALH_BUILD_VERSION__: JSON.stringify('test-build'),
+        },
+        plugins: [mainWiringStubPlugin()],
+    })
+    const bundledSource = result.outputFiles[0].text
+    return `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
+}
+
+async function assertClosedDefaultRuntimeDoesNotScheduleFinalDeliveryRecovery() {
+    const result = await build({
+        entryPoints: [path.join(rootDir, 'packages/unblock-area-limit/src/feature/bili/cdn_runtime.ts')],
+        bundle: true,
+        format: 'esm',
+        platform: 'node',
+        target: 'node20',
+        write: false,
+        plugins: [closedModeStubPlugin()],
+    })
+    const bundledSource = result.outputFiles[0].text
+    const runtimeModuleUrl = `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
+    const originalSetTimeout = globalThis.setTimeout
+    const scheduledCallbacks = []
+    globalThis.__closedModeRuntimeRecoveryPublications = []
+    globalThis.setTimeout = (callback, delayMs) => {
+        scheduledCallbacks.push({ callback, delayMs })
+        return scheduledCallbacks.length
+    }
+
+    try {
+        const { observeFinalCdnDelivery } = await import(`${runtimeModuleUrl}#explicit-close`)
+        const finalDelivery = { dash: { video: [] } }
+        assert.strictEqual(
+            observeFinalCdnDelivery(finalDelivery),
+            finalDelivery,
+            'closed default runtime changed the final-delivery payload',
+        )
+        assert.equal(globalThis.__closedModeRuntimeRecoveryPublications.length, 1)
+        assert.equal(
+            globalThis.__closedModeRuntimeRecoveryPublications[0].enabled,
+            false,
+            'closed default runtime enabled recovery publication',
+        )
+        assert.equal(scheduledCallbacks.length, 0, 'closed final delivery scheduled an automatic CDN probe')
+    } finally {
+        globalThis.setTimeout = originalSetTimeout
+    }
+}
+
+function mainWiringStubPlugin() {
+    const stubs = new Map([
+        ['./feature/config', `export const balh_config = globalThis.__closedModeConfig`],
+        ['./util/cookie', `export const cookieStorage = { set() {}, get() {} }`],
+        ['./util/log', `
+            export const logHub = { getAllMsg() { return [] } }
+            export function util_debug() {}
+            export function util_info() {}
+        `],
+        ['./util/ui', `export const ui = { alert() {} }`],
+        ['./feature/bili/index', `
+            const called = name => globalThis.__closedModeMainCalls.push(name)
+            export function version_remind() { called('version_remind') }
+            export function switch_to_old_player() { called('switch_to_old_player') }
+            export function area_limit_for_vue() { called('area_limit_for_vue') }
+            export function hide_adblock_tips() { called('hide_adblock_tips') }
+            export function area_limit_xhr() { called('area_limit_xhr') }
+            export function installCdnRecoveryMonitor() { called('installCdnRecoveryMonitor') }
+            export function installCdnFinalDeliveryObservers() { called('installCdnFinalDeliveryObservers') }
+            export function remove_pre_ad() { called('remove_pre_ad') }
+            export function check_html5() { called('check_html5') }
+            export function redirect_to_bangumi_or_insert_player() { called('redirect_to_bangumi_or_insert_player') }
+            export function fill_season_page() { called('fill_season_page') }
+            export function settings() {
+                called('settings')
+                return { show() {}, setup() {} }
+            }
+            export function jump_to_baipiao() { called('jump_to_baipiao') }
+            export function biliplus_check_area_limit() { called('biliplus_check_area_limit') }
+            export function sanitizeDiagnosticText(value) { return value }
+            export function createDiagnosticReport() { return {} }
+            export function probeCurrentPlayUrlCdn() {}
+            export function clearCdnHealthCache() {}
+            export function getCdnProbeStatus() { return {} }
+            export function getCdnRecoveryStatus() { return {} }
+            export const bilibili_login = {
+                isLogin() { return false },
+                isLoginBiliBili() { return false },
+                showLogin() {},
+                showLogout() {},
+            }
+        `],
+    ])
+
+    return {
+        name: 'closed-mode-main-wiring-stubs',
+        setup(esbuild) {
+            esbuild.onResolve({ filter: /.*/ }, args => {
+                if (!stubs.has(args.path)) return undefined
+                return { path: args.path, namespace: 'closed-mode-main-wiring' }
+            })
+            esbuild.onLoad({ filter: /.*/, namespace: 'closed-mode-main-wiring' }, args => ({
+                contents: stubs.get(args.path),
+                loader: 'js',
+            }))
+        },
+    }
+}
+
 function closedModeStubPlugin() {
     const proxyFailure = `
         function proxyFailure(name) {
@@ -320,7 +465,10 @@ function closedModeStubPlugin() {
     `
     const stubs = new Map([
         ['../../util/objects', `export const Objects = { convertKeyToSnakeCase: value => value, stringify: String }`],
-        ['../../util/converters', `export const Converters = {}`],
+        ['../../util/converters', `
+            export const Converters = { replaceUpos: value => value }
+            export const uposMap = {}
+        `],
         ['../../util/react', `export function _() { globalThis.__closedModeFullPipelineCalls.push('react') }`],
         ['../../util/async', `${proxyFailure}
             export const Async = {
@@ -348,6 +496,8 @@ function closedModeStubPlugin() {
             export const balh_config = globalThis.__closedModeConfig
             export function isClosed() { return balh_config.is_closed || !balh_config.server_custom }
         `],
+        ['../config', `export const balh_config = globalThis.__closedModeConfig`],
+        ['../r', `export const FALSE = ''`],
         ['../../feature/page', `
             const called = name => () => {
                 globalThis.__closedModeFullPipelineCalls.push('util_page.' + name)
@@ -414,6 +564,35 @@ function closedModeStubPlugin() {
                 }
                 if (payload) payload.__cdnApplied = true
                 return value
+            }
+        `],
+        ['./cdn_selection', `
+            export function collectPlayUrlCdnGroups() {
+                return [{
+                    key: 'dash-video:0',
+                    kind: 'dash-video',
+                    candidates: [{
+                        url: 'https://closed-runtime.test.bilivideo.com/video.m4s?deadline=1',
+                        host: 'closed-runtime.test.bilivideo.com',
+                        hostname: 'closed-runtime.test.bilivideo.com',
+                        riskKinds: [],
+                    }],
+                }]
+            }
+            export function optimizePlayUrlCdn() {
+                return { changed: false, groups: 1, diagnostics: [] }
+            }
+        `],
+        ['./cdn_recovery_browser', `
+            export function publishCdnRecoveryGroups(groups, enabled) {
+                globalThis.__closedModeRuntimeRecoveryPublications.push({ groups, enabled })
+            }
+            export function prepareCdnRecoveryRequestUrl(url) {
+                return {
+                    decision: { url, routed: false },
+                    commit() { return this.decision },
+                    discard() {},
+                }
             }
         `],
         ['./log', `
