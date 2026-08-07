@@ -18,7 +18,10 @@ import { util_page } from "../page"
 import { r } from "../r"
 import pageTemplate from './bangumi-play-page-template.html'
 import { bilibili_login } from "./bilibili_login"
-import { applyCdnPolicyToPlayUrlResponse } from "./cdn_playurl"
+import {
+    applyCdnPolicyToPlayUrlResponse,
+    observeFinalCdnPlayUrlResponse,
+} from "./cdn_playurl"
 
 let callbackCount = 1000
 function appendScript(
@@ -468,6 +471,7 @@ function createPlayInfoDelivery<T>(rawValue: T): T {
     }
     try {
         applyCdnPolicyToPlayUrlResponse(delivery)
+        observeFinalCdnPlayUrlResponse(delivery)
         return delivery
     } catch (error) {
         util_warn('apply CDN policy to playinfo failed', error)

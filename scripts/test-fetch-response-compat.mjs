@@ -24,8 +24,13 @@ const staleBodyHeaders = [
 const state = {
     binaryRewriteCalls: 0,
     cdnCalls: 0,
+    cdnRouteCommits: [],
+    cdnRouteCalls: [],
+    cdnRouteDiscards: [],
+    cdnRouteHandler: url => ({ url, routed: false }),
     metadataRewriteCalls: 0,
     proxyCalls: 0,
+    subtitleMetadataUrlHandler: () => undefined,
     throwFromCdn: false,
 }
 const config = {
@@ -66,6 +71,7 @@ await build({
 const { injectFetch, jsonResponse } = await import(pathToFileURL(outFile).href)
 
 await testJsonResponseCompatibility(jsonResponse)
+await testCdnFutureRequestRouting(injectFetch)
 await testBinarySubtitleResponseCompatibility(injectFetch)
 await testCdnOnlyIsolation(injectFetch)
 await testWbiFetchModes(injectFetch)
@@ -154,6 +160,7 @@ function stubName(specifier) {
     if (specifier === '../config') return 'config'
     if (specifier.endsWith('/feature/r')) return 'r'
     if (specifier === '../r') return 'r'
+    if (specifier.endsWith('/feature/bili/cdn_recovery_browser') || specifier === './cdn_recovery_browser') return 'cdn-recovery-browser'
     if (specifier.endsWith('/feature/bili/cdn_playurl') || specifier === './cdn_playurl') return 'cdn-playurl'
     if (specifier.endsWith('/feature/bili/subtitle_web_view') || specifier === './subtitle_web_view') return 'subtitle'
     if (specifier.endsWith('/feature/bili/space_account_info_map') || specifier === './space_account_info_map') return 'space-map'
@@ -197,6 +204,22 @@ function stubContents(name) {
             return `export const balh_config = globalThis.__fetchResponseCompatConfig`
         case 'r':
             return `export const r = { regex: { bilibili_api_proxy: /^$/ } }`
+        case 'cdn-recovery-browser':
+            return `
+                export function prepareCdnRecoveryRequestUrl(url, method) {
+                    const state = globalThis.__fetchResponseCompatState
+                    state.cdnRouteCalls.push({ url, method })
+                    const decision = state.cdnRouteHandler(url, method)
+                    return {
+                        decision,
+                        commit() {
+                            state.cdnRouteCommits.push(url)
+                            return decision
+                        },
+                        discard() { state.cdnRouteDiscards.push(url) },
+                    }
+                }
+            `
         case 'cdn-playurl':
             return `
                 export function applyCdnPolicyToPlayUrlResponse(value) {
@@ -222,9 +245,10 @@ function stubContents(name) {
             return `
                 export function isSubtitleBodyUrl(url) { return url.includes('/bfs/subtitle/') }
                 export function rewriteSubtitleBodyJson() { return null }
-                export function rewriteSubtitleMetadataUrl() {
-                    globalThis.__fetchResponseCompatState.metadataRewriteCalls += 1
-                    return undefined
+                export function rewriteSubtitleMetadataUrl(url, metadata) {
+                    const state = globalThis.__fetchResponseCompatState
+                    state.metadataRewriteCalls += 1
+                    return state.subtitleMetadataUrlHandler(url, metadata)
                 }
                 export function rewriteSubtitleWebViewResponse() {
                     globalThis.__fetchResponseCompatState.binaryRewriteCalls += 1
@@ -276,6 +300,302 @@ async function testJsonResponseCompatibility(jsonResponse) {
         TypeError,
         'clone should preserve the native invalid-receiver failure',
     )
+}
+
+async function testCdnFutureRequestRouting(injectFetch) {
+    await testCdnStringRoutingAfterPreprocessing(injectFetch)
+    await testCdnUrlRoutingInCdnOnlyMode(injectFetch)
+    await testCdnRequestRoutingSemantics(injectFetch)
+    await testCdnEffectiveMethodBypass(injectFetch)
+    await testCdnRoutingFailuresFailOpen(injectFetch)
+    await testCdnPredecessorThrowDiscardsPreparedRoute(injectFetch)
+}
+
+async function testCdnStringRoutingAfterPreprocessing(injectFetch) {
+    resetState()
+    const sourceUrl = 'https://media-source.example/video.m4s?fixture=source-string'
+    const preprocessedUrl = 'https://media-source.example/video.m4s?fixture=preprocessed-string'
+    const targetUrl = 'https://media-target.example/video.m4s?fixture=target-string'
+    const receiver = { name: 'string route receiver' }
+    const controller = new AbortController()
+    const init = {
+        method: 'gEt',
+        headers: new Headers({
+            Range: 'bytes=100-199',
+            'X-Media-Test': 'string-route',
+        }),
+        credentials: 'include',
+        cache: 'no-store',
+        redirect: 'manual',
+        referrer: 'https://www.bilibili.com/video/BV1compat',
+        referrerPolicy: 'strict-origin-when-cross-origin',
+        integrity: 'sha256-string-route',
+        keepalive: true,
+        signal: controller.signal,
+    }
+    const originResponse = new Response('string route response')
+    let predecessorCalls = 0
+
+    state.subtitleMetadataUrlHandler = url => url === sourceUrl ? preprocessedUrl : undefined
+    state.cdnRouteHandler = (url, method) => {
+        assert.equal(url, preprocessedUrl, 'CDN routing must run after existing request preprocessing')
+        assert.equal(method, init.method)
+        return { url: targetUrl, routed: true }
+    }
+    window.fetch = async function (input, requestInit) {
+        predecessorCalls += 1
+        assert.equal(this, receiver)
+        assert.equal(input, targetUrl, 'string input must remain a primitive string when routed')
+        assert.strictEqual(requestInit, init, 'caller init must be passed through unchanged')
+        return originResponse
+    }
+    injectFetch()
+
+    const response = await window.fetch.call(receiver, sourceUrl, init)
+    assert.equal(predecessorCalls, 1, 'routed string fetch must call the predecessor exactly once')
+    assert.strictEqual(response, originResponse, 'media response identity must be preserved')
+    assert.deepEqual(state.cdnRouteCalls, [{ url: preprocessedUrl, method: 'gEt' }])
+    assert.deepEqual(state.cdnRouteCommits, [preprocessedUrl])
+    assert.deepEqual(state.cdnRouteDiscards, [])
+    assert.equal(state.metadataRewriteCalls, 1)
+}
+
+async function testCdnUrlRoutingInCdnOnlyMode(injectFetch) {
+    resetState()
+    const source = new URL('/media/video.m4s?fixture=source-url', document.location.href)
+    const sourceHref = source.href
+    const target = '//media-url-target.example/media/video.m4s?fixture=target-url'
+    const receiver = { name: 'URL route receiver' }
+    const init = {
+        headers: { Range: 'bytes=200-299' },
+        credentials: 'same-origin',
+    }
+    const originResponse = new Response('URL route response')
+    let predecessorCalls = 0
+
+    state.cdnRouteHandler = () => ({ url: target, routed: true })
+    window.fetch = async function (input, requestInit) {
+        predecessorCalls += 1
+        assert.equal(this, receiver)
+        assert.ok(input instanceof URL, 'URL input must remain a URL object when routed')
+        assert.notStrictEqual(input, source, 'routed URL input must be a new URL')
+        assert.equal(input.href, new URL(target, document.location.href).href)
+        assert.strictEqual(requestInit, init)
+        return originResponse
+    }
+    injectFetch({ cdnOnly: true })
+
+    const response = await window.fetch.call(receiver, source, init)
+    assert.equal(predecessorCalls, 1, 'routed URL fetch must call the predecessor exactly once')
+    assert.strictEqual(response, originResponse)
+    assert.equal(source.href, sourceHref, 'routing must not mutate the caller URL')
+    assert.deepEqual(state.cdnRouteCalls, [{ url: sourceHref, method: 'GET' }])
+    assert.equal(state.metadataRewriteCalls, 0, 'CDN-only mode must retain its preprocessing boundary')
+}
+
+async function testCdnRequestRoutingSemantics(injectFetch) {
+    resetState()
+    const sourceUrl = 'https://media-request-source.example/audio.m4s?fixture=source-request'
+    const targetUrl = 'https://media-request-target.example/audio.m4s?fixture=target-request'
+    const sourceController = new AbortController()
+    const initController = new AbortController()
+    const source = new Request(sourceUrl, {
+        method: 'POST',
+        headers: new Headers({
+            Range: 'bytes=300-399',
+            'X-Media-Test': 'request-route',
+        }),
+        body: 'media-request-body',
+        credentials: 'include',
+        cache: 'no-store',
+        redirect: 'manual',
+        referrer: 'https://www.bilibili.com/video/BV1compat',
+        referrerPolicy: 'origin',
+        integrity: 'sha256-request-route',
+        signal: sourceController.signal,
+    })
+    const init = {
+        method: 'gEt',
+        headers: new Headers({
+            Range: 'bytes=400-499',
+            'X-Caller-Override': 'preserved',
+        }),
+        credentials: 'same-origin',
+        cache: 'reload',
+        redirect: 'follow',
+        signal: initController.signal,
+    }
+    const receiver = { name: 'Request route receiver' }
+    const originResponse = new Response('Request route response')
+    let predecessorCalls = 0
+    let routedRequest
+
+    state.cdnRouteHandler = () => ({ url: targetUrl, routed: true })
+    window.fetch = async function (input, requestInit) {
+        predecessorCalls += 1
+        assert.equal(this, receiver)
+        assert.ok(input instanceof Request)
+        assert.notStrictEqual(input, source, 'routed Request input must be reconstructed')
+        assert.strictEqual(requestInit, init, 'Request init override semantics must remain native')
+        routedRequest = input
+        return originResponse
+    }
+    injectFetch()
+
+    const response = await window.fetch.call(receiver, source, init)
+    assert.equal(predecessorCalls, 1, 'routed Request fetch must call the predecessor exactly once')
+    assert.strictEqual(response, originResponse)
+    assert.deepEqual(state.cdnRouteCalls, [{ url: sourceUrl, method: 'gEt' }])
+    assert.equal(routedRequest.url, targetUrl)
+    assert.equal(routedRequest.method, source.method)
+    assert.equal(routedRequest.headers.get('range'), 'bytes=300-399')
+    assert.equal(routedRequest.headers.get('x-media-test'), 'request-route')
+    assert.equal(routedRequest.credentials, source.credentials)
+    assert.equal(routedRequest.cache, source.cache)
+    assert.equal(routedRequest.redirect, source.redirect)
+    assert.equal(routedRequest.referrer, source.referrer)
+    assert.equal(routedRequest.referrerPolicy, source.referrerPolicy)
+    assert.equal(routedRequest.integrity, source.integrity)
+    assert.equal(routedRequest.keepalive, source.keepalive)
+    assert.equal(routedRequest.signal.aborted, false)
+    sourceController.abort('caller aborted')
+    assert.equal(routedRequest.signal.aborted, true, 'routed Request signal must follow the source signal')
+    assert.equal(await routedRequest.text(), 'media-request-body')
+}
+
+async function testCdnEffectiveMethodBypass(injectFetch) {
+    resetState()
+    const receiver = { name: 'non-GET bypass receiver' }
+    const sourcePostRequest = new Request('https://media-bypass.example/request-post.m4s', {
+        method: 'POST',
+        headers: { Range: 'bytes=500-599' },
+        body: 'request-post-body',
+        credentials: 'include',
+    })
+    const sourceGetRequest = new Request('https://media-bypass.example/request-get.m4s', {
+        method: 'GET',
+        headers: { Range: 'bytes=600-699' },
+    })
+    const cases = [
+        {
+            input: 'https://media-bypass.example/string-post.m4s',
+            init: { method: 'POST', body: 'string-post-body' },
+        },
+        {
+            input: sourcePostRequest,
+            init: undefined,
+        },
+        {
+            input: sourceGetRequest,
+            init: { method: 'POST', body: 'request-override-body' },
+        },
+    ]
+    const originResponses = cases.map((_, index) => new Response(`non-GET response ${index}`))
+    let predecessorCalls = 0
+
+    state.cdnRouteHandler = () => {
+        throw new Error('non-GET request reached CDN recovery router')
+    }
+    window.fetch = async function (input, requestInit) {
+        const index = predecessorCalls++
+        assert.equal(this, receiver)
+        assert.strictEqual(input, cases[index].input, 'non-GET input identity must be preserved')
+        assert.strictEqual(requestInit, cases[index].init, 'non-GET init identity must be preserved')
+        return originResponses[index]
+    }
+    injectFetch()
+
+    for (let index = 0; index < cases.length; index += 1) {
+        const response = await window.fetch.call(receiver, cases[index].input, cases[index].init)
+        assert.strictEqual(response, originResponses[index])
+    }
+    assert.equal(predecessorCalls, cases.length)
+    assert.deepEqual(state.cdnRouteCalls, [], 'only an effective GET may enter recovery routing')
+}
+
+async function testCdnRoutingFailuresFailOpen(injectFetch) {
+    resetState()
+    const receiver = { name: 'recovery fail-open receiver' }
+    const noRouteInput = new URL('https://media-fail-open.example/no-route.m4s')
+    const throwingRouterInput = 'https://media-fail-open.example/router-throws.m4s'
+    const invalidTargetInput = new URL('https://media-fail-open.example/invalid-target.m4s')
+    const lockedRequest = new Request('https://media-fail-open.example/locked-body.m4s', {
+        method: 'POST',
+        body: 'locked-media-body',
+    })
+    await lockedRequest.text()
+    const lockedInit = { method: 'GET' }
+    let unsupportedToStringCalls = 0
+    const unsupportedInput = {
+        toString() {
+            unsupportedToStringCalls += 1
+            return 'https://media-fail-open.example/coerced.m4s'
+        },
+    }
+    const cases = [
+        { input: noRouteInput, init: undefined },
+        { input: throwingRouterInput, init: undefined },
+        { input: invalidTargetInput, init: undefined },
+        { input: lockedRequest, init: lockedInit },
+        { input: unsupportedInput, init: undefined },
+    ]
+    const originResponses = cases.map((_, index) => new Response(`fail-open response ${index}`))
+    let predecessorCalls = 0
+
+    state.cdnRouteHandler = url => {
+        if (url === noRouteInput.href) {
+            return { url: 'https://must-not-route.example/no-route.m4s', routed: false }
+        }
+        if (url === throwingRouterInput) throw new Error('synthetic CDN recovery router failure')
+        if (url === invalidTargetInput.href) return { url: 'http://[', routed: true }
+        if (url === lockedRequest.url) {
+            return { url: 'https://media-fail-open.example/locked-target.m4s', routed: true }
+        }
+        throw new Error(`unexpected recovery URL: ${url}`)
+    }
+    window.fetch = async function (input, requestInit) {
+        const index = predecessorCalls++
+        assert.equal(this, receiver)
+        assert.strictEqual(input, cases[index].input, 'fail-open must preserve the original input identity')
+        assert.strictEqual(requestInit, cases[index].init, 'fail-open must preserve the init identity')
+        return originResponses[index]
+    }
+    injectFetch()
+
+    for (let index = 0; index < cases.length; index += 1) {
+        const response = await window.fetch.call(receiver, cases[index].input, cases[index].init)
+        assert.strictEqual(response, originResponses[index])
+    }
+    assert.equal(predecessorCalls, cases.length, 'every fail-open path must call the predecessor once')
+    assert.deepEqual(state.cdnRouteCalls, [
+        { url: noRouteInput.href, method: 'GET' },
+        { url: throwingRouterInput, method: 'GET' },
+        { url: invalidTargetInput.href, method: 'GET' },
+        { url: lockedRequest.url, method: 'GET' },
+    ])
+    assert.deepEqual(state.cdnRouteCommits, [noRouteInput.href])
+    assert.deepEqual(state.cdnRouteDiscards, [invalidTargetInput.href, lockedRequest.url])
+    assert.equal(unsupportedToStringCalls, 0, 'unsupported inputs must not be coerced by recovery routing')
+}
+
+async function testCdnPredecessorThrowDiscardsPreparedRoute(injectFetch) {
+    resetState()
+    const sourceUrl = 'https://media-predecessor-throw.example/source.m4s'
+    const targetUrl = 'https://media-predecessor-throw.example/target.m4s'
+    const predecessorError = new Error('synthetic predecessor throw')
+    let predecessorCalls = 0
+
+    state.cdnRouteHandler = () => ({ url: targetUrl, routed: true })
+    window.fetch = function () {
+        predecessorCalls += 1
+        throw predecessorError
+    }
+    injectFetch()
+
+    await assert.rejects(window.fetch(sourceUrl), error => error === predecessorError)
+    assert.equal(predecessorCalls, 1)
+    assert.deepEqual(state.cdnRouteCommits, [])
+    assert.deepEqual(state.cdnRouteDiscards, [sourceUrl])
 }
 
 async function testBinarySubtitleResponseCompatibility(injectFetch) {
@@ -471,6 +791,7 @@ async function testWbiFetchModes(injectFetch) {
         }, `${mode.label}: WBI failure partially mutated the predecessor body`)
         assert.equal(state.cdnCalls, 2, `${mode.label}: unexpected WBI CDN transform count`)
         assert.equal(state.proxyCalls, 0, `${mode.label}: signed WBI request entered a proxy path`)
+        assert.deepEqual(state.cdnRouteCalls, [], `${mode.label}: WBI POST entered recovery routing`)
     }
 }
 
@@ -536,7 +857,12 @@ function assertMetadata(response, metadata, label) {
 function resetState() {
     state.binaryRewriteCalls = 0
     state.cdnCalls = 0
+    state.cdnRouteCommits.length = 0
+    state.cdnRouteCalls.length = 0
+    state.cdnRouteDiscards.length = 0
+    state.cdnRouteHandler = url => ({ url, routed: false })
     state.metadataRewriteCalls = 0
     state.proxyCalls = 0
+    state.subtitleMetadataUrlHandler = () => undefined
     state.throwFromCdn = false
 }

@@ -7,7 +7,9 @@ import { RegExps } from "../../util/regexps"
 import { Strings } from "../../util/strings"
 import { balh_config } from "../config"
 import { r } from "../r"
+import { prepareCdnRecoveryRequestUrl } from "./cdn_recovery_browser"
 import { applyCdnPolicyToPlayUrlResponse } from "./cdn_playurl"
+import { isSupportedCdnPlayUrlEndpoint } from "./cdn_playurl_endpoint"
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
 
@@ -23,7 +25,16 @@ export function injectFetch({ cdnOnly = false }: { cdnOnly?: boolean } = {}) {
         const request = cdnOnly
             ? { input, init, url: getFetchUrl(input) }
             : rewriteSubtitleMetadataFetchInput(input, init)
-        const originResponse = await originFetch.call(this, request.input, request.init)
+        const routed = prepareCdnRecoveryFetchInput(request.input, request.init)
+        let originResult: Promise<Response>
+        try {
+            originResult = originFetch.call(this, routed.input, request.init)
+        } catch (error) {
+            routed.discard()
+            throw error
+        }
+        routed.commit()
+        const originResponse = await originResult
         const url = request.url
         if (url) {
             if (cdnOnly) {
@@ -79,6 +90,57 @@ export function injectFetch({ cdnOnly = false }: { cdnOnly?: boolean } = {}) {
         }
         return originResponse
     }
+}
+
+function prepareCdnRecoveryFetchInput(input: RequestInfo | URL, init?: RequestInit) {
+    const unchanged = {
+        input,
+        commit() { },
+        discard() { },
+    }
+    let prepared: ReturnType<typeof prepareCdnRecoveryRequestUrl> | undefined
+    try {
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+        if (!isGetMethod(method)) return unchanged
+
+        const url = getFetchUrl(input)
+        if (!url) return unchanged
+
+        prepared = prepareCdnRecoveryRequestUrl(url, method)
+        const decision = prepared.decision
+        let routedInput: RequestInfo | URL = input
+        if (decision.routed && typeof decision.url === 'string' && decision.url !== url) {
+            if (typeof input === 'string') routedInput = decision.url
+            else if (input instanceof URL) routedInput = new URL(decision.url, document.location.href)
+            else if (input instanceof Request) routedInput = new Request(decision.url, input)
+            else {
+                prepared.discard()
+                return unchanged
+            }
+        }
+
+        return {
+            input: routedInput,
+            commit: () => prepared!.commit(),
+            discard: () => prepared!.discard(),
+        }
+    } catch (_) {
+        try {
+            prepared?.discard()
+        } catch {
+            // The original predecessor call remains authoritative.
+        }
+        // Recovery routing is best-effort; the predecessor retains native Fetch behavior.
+    }
+    return unchanged
+}
+
+function isGetMethod(method: unknown): method is string {
+    return typeof method === 'string'
+        && method.length === 3
+        && (method[0] === 'G' || method[0] === 'g')
+        && (method[1] === 'E' || method[1] === 'e')
+        && (method[2] === 'T' || method[2] === 't')
 }
 
 function rewriteSubtitleMetadataFetchInput(input: RequestInfo | URL, init?: RequestInit) {
@@ -155,15 +217,35 @@ function redactSubtitleMetadataUrl(url: string) {
 }
 
 function isPgcPlayUrlUrl(url: string) {
-    return (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
-        || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl')))
-        && !new URL(url, document.location.href).searchParams.get('balh_ajax')
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return parsed?.hostname === 'api.bilibili.com'
+        && (parsed.pathname === '/pgc/player/web/playurl'
+            || parsed.pathname === '/pgc/player/web/v2/playurl')
+        && !parsed.searchParams.get('balh_ajax')
 }
 
 function isOtherPlayUrlUrl(url: string) {
-    return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
-        || url.match(RegExps.url('api.bilibili.com/x/player/wbi/playurl'))
-        || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return !!parsed && (
+        (parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/x/player/playurl'
+                || parsed.pathname === '/x/player/wbi/playurl'))
+        || (parsed.hostname === 'interface.bilibili.com'
+            && parsed.pathname === '/v2/playurl')
+    )
+}
+
+function parseSupportedCdnPlayUrlUrl(url: string) {
+    // Preserve the adapters' existing absolute/protocol-relative HTTP(S)
+    // boundary; endpoint membership itself is shared with the final observer.
+    if (!/^(?:https?:)?\/\//.test(url)) return null
+    try {
+        const parsed = new URL(url, document.location.href)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null
+    } catch {
+        return null
+    }
 }
 
 async function handlePlayUrlCdnFetch(originResponse: Response): Promise<Response> {

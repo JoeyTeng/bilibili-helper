@@ -1,7 +1,7 @@
 # CDN Selection Architecture
 
-状态：Stage 1（响应选择）与 Stage 2（本机两阶段探测）的实现及自动化验证已完成；
-Stage 3（stall recovery）由独立后续 PR 交付。全部三个阶段合并且 Joey 在 UK-local
+状态：Stage 1（响应选择）与 Stage 2（本机两阶段探测）已合并；Stage 3（stall
+recovery）已由当前独立 PR 实现并完成本地自动化验证。全部三个阶段合并且 Joey 在 UK-local
 环境完成人工播放验收前，不得创建稳定版 tag、发布稳定版或刷新 `main`。自动 live
 E2E 只能提供辅助证据，不能替代这项人工验收。
 
@@ -41,7 +41,7 @@ compatibility。新增播放入口时，优先扩展 envelope/adapter 和现有�
    `2 MiB` accounted-prefix 预算允许完整 `64 KiB` 样本时覆盖每个可准入的不同 host；
    Stage 1 成功结果中稳定排名前两名共享剩余 follow-up 预算，每个最多 `512 KiB`，
    并发不超过 `2`。吞吐量与可靠 DASH bitrate margin 是主要证据，TTFB 是次要证据。
-3. **Stage 3（计划中）**：在独立后续 PR 中实现有确认门槛、冷却与退避的 stall
+3. **Stage 3（已实现，待合并）**：在当前独立 PR 中实现有确认门槛、冷却与退避的 stall
    recovery，只重路由未来的 Fetch/XHR 媒体请求，不中止或重载当前请求。
 
 Stage 1/2 的完成不解除稳定发布门禁；完整交付状态以
@@ -66,8 +66,9 @@ Stage 1/2 的完成不解除稳定发布门禁；完整交付状态以
 - 不维护一个“英国最快 CDN”名单，也不按时区、语言、IP 地理位置或预设地区
   对 host 加权。
 - 不从 catalog、历史常量或第三方服务生成自动模式候选地址。
-- Stage 1/2 不实现播放卡顿后的在线切换、媒体预取、Range 缓存、Service Worker
-  接管或 WebRTC/P2P 屏蔽；在线切换仅属于计划中的 Stage 3。
+- Stage 1/2 本身不实现播放卡顿后的在线切换；Stage 3 只重路由未来的 exact Fetch/XHR
+  `GET`。三个阶段都不引入媒体预取、Range 缓存、Service Worker 接管或 WebRTC/P2P
+  屏蔽。
 - 不维护旧版 Bilibili CDN Switcher 矩阵；兼容窗口只覆盖 README 固定的单一 latest
   version/SHA-256 snapshot。
 - 不改变 playurl 的授权、画质、编码、音轨或分段边界。
@@ -569,6 +570,31 @@ thenable 不能被当作普通响应对象。当前注入契约不延迟或重�
 `loadend`、`progress` 等其他 native 生命周期事件，因此依赖这些事件读取 BALH replacement
 body 的外部 wrapper 不在单方兼容保证内，组合测试必须如实报告。
 
+jQuery playurl adapter 还有一个更外层的异步交付边界：原始 XHR `DONE` 之后，区域
+代理 Promise 仍可能把 source payload 换成另一组 signed URLs。逻辑请求开始时先取得
+delivery token，并包装该 jQuery 实例已有的 `param.xhr` / `ajaxSettings.xhr` factory；
+token 通过 `WeakMap` 只绑定 factory 实际返回的 transport XHR identity。final observer
+只延迟这个实例的 raw publication，同 path、不同 query 或完全相同 URL 的旁路 XHR
+均不能抢占 token。代理 normalization 与 CDN policy 完成后，最外层边界先发布最终
+payload，再按注册顺序调用 option `success` 和链式 `.done()`；组合使用两种回调、回调
+期间重入注册与交付后的 `.done()` memory 语义都只能看到同一最终对象。final-done
+gate 必须在 jQuery 把 jqXHR 暴露给用户 `beforeSend` 之前安装，并在用户 hook 返回后
+幂等修复，因此 `beforeSend`、全局 `ajaxSend` 和 `ajax()` 返回后注册的 `.done()` 都
+排队等待最终 payload。队列按真实 Deferred 注册顺序交付，例如 `beforeSend .done`、
+option `success`、`ajaxSend .done`、返回后的 `.done`；只替换回调参数中的 data，保留
+Deferred receiver、`textStatus` 与 jqXHR。请求未自带 hook 时仍组合执行
+`ajaxSettings.beforeSend`，并保留其 receiver、参数、返回值和 `false` 取消语义。内部
+raw resolver 只通过被捕获的 predecessor `.done` 绑定一次，不能把页面 callback
+重新挂回 raw Deferred。若自定义
+jQuery 没有可包装的 XHR factory，页面交付保持 fail-open，最终 payload 使用新的
+completion-order token 覆盖先前 raw observation，而不替换自定义 transport。
+页面 `success` / `.done()` 抛错时，先前 final observation 保持已提交，当前 once-memory
+callback list 在抛错点停止；原始异常在独立 browser task 重抛，不得进入 AJAX `error`
+或变成 Promise rejection。
+已经在 BALH 注入前注册、并在 `beforeSend` 之前直接取得 jqXHR 的 `ajaxPrefilter`
+callback 不在该 gate 可见的拦截面内；当前 latest CDN Switcher `0.1.4` 不使用该表面，
+若未来兼容对象开始依赖它，必须新增真实 jQuery 组合 gate 后再扩展兼容声明。
+
 ### 幂等性
 
 - 对同一 payload、模式、配置和分数快照，重复运行应得到 byte-equivalent 的 URL
@@ -613,9 +639,11 @@ timezone/locale 推断地区。
    - BALH first, CDN Switcher second;
    - CDN Switcher first, BALH second.
 6. 组合 harness 至少验证 Fetch 与 XHR wrapper 不递归、不丢失原始调用语义、
-   playurl shape 与媒体 URL path/query 不损坏。共享选择核心的同一 payload 幂等、
-   BALH 内部异常 fail-open 由仓库内确定性测试覆盖；外部 wrapper 自己的失败仍
-   明确报告为不兼容。
+   playurl shape 与媒体 URL path/query 不损坏；fixture 必须从与目标 CDN 不同的
+   source host 开始，并分别证明两种 response transport 发布的是 downstream
+   transformer 完成后的 exact groups，pre-transform URL 不能激活 Stage 3。共享选择
+   核心的同一 payload 幂等、BALH 内部异常 fail-open 由仓库内确定性测试覆盖；外部
+   wrapper 自己的失败仍明确报告为不兼容。
 7. harness 使用真实浏览器 context，并在 `document-start` 等价阶段注入两份完整
    userscript；GM API、页面响应与网络出口由测试控制，不能复用用户 profile、
    cookie 或登录状态。
@@ -657,11 +685,12 @@ BALH 源码与兼容记录，不再下载第三方 latest。
 选择器不得返回空的 `baseUrl`/`backupUrl`、空 segment、部分签名或只含探测成功
 项的列表。若无法安全完成整个候选组的转换，应保留该组原值。
 
-## Stage 3（独立后续 PR）：stall recovery
+## Stage 3：stall recovery
 
-播放停顿后的实时恢复不属于已完成的 Stage 1/2。以下条目是 Stage 3 不可违反的
-约束草案，尚不是可直接实现的完整状态机；不能通过扩大 Stage 2 探测副作用来暗中
-交付：
+播放停顿后的实时恢复不属于已完成的 Stage 1/2，也不能通过扩大 Stage 2 探测副作用
+暗中交付。可直接实现的状态、事件、guard、时间参数、exact-group registry、Fetch/XHR
+语义、浏览器结果分类与跨项目复用清单统一维护在
+[`cdn-stall-recovery.md`](cdn-stall-recovery.md)。本节保留不可违反的上层边界：
 
 - 只有页面可见、播放器未暂停、未 seeking，且经过 grace period 后仍确认 low
   buffer 时才能判定 stall；后台 tab throttle、用户暂停和主动 seek 都不是 CDN
@@ -670,6 +699,12 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   完整签名 URL 只存在于内存，不写 cache 或日志，不跨视频、清晰度或音轨复用。
 - 只重路由之后新发起的 Fetch/XHR 媒体请求；绝不 abort、reload 或重新播放当前
   正在进行的请求，也不通过重取 playurl 伪装成无缝恢复。
+- stall 确认只安装下一次请求的 pending route intent；`candidateIndex` 与 attempted set
+  只记录 predecessor 已接受的 Fetch 或 native `open()` 已成功的 XHR。pending 未被真实
+  请求 commit 前不得在后续 cooldown/grace 中跳过更多候选；其间若播放稳定恢复，则取消
+  pending 并以最后 committed candidate 重置失败历史。intent 先建立 provisional
+  cooldown；若真实请求延后 commit，则 deadline 至少延长到 `commitAt + cooldown`，不
+  重复增加 attempt，确保真实切换后仍保留完整最小冷却期。
 - 在同一候选组的完整签名 URL 内轮换，除显式 `manual` 外不做 host synthesis；
   静态 candidate pool 只能作为显式、默认关闭的实验性排序提示，并且只能引用当前
   exact signed candidate group 已有候选，不能注入外部 host/URL。
@@ -678,16 +713,57 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   不得来回切换，避免 host ping-pong。
 - 所有普通候选用尽后仍保留并尝试 MCDN/PCDN 最后兜底。
 - 新的视频、episode、质量或 candidate-group generation 会清除旧恢复状态。
+- 只有最终 delivery 的 exact groups 会进入内存 registry；`safe`、`original`、`manual`
+  与离开 `auto` 都会禁用并清除旧 activation/timer/override。
+- Fetch/XHR 最终响应观察器必须位于当前兼容 wrapper chain 的外层：后来赋值的 wrapper
+  可以继续调用它捕获的原 predecessor，但页面取得响应前必须重新发布 downstream
+  变换后的 exact groups。该观察不得二次运行 selector、替换 `Response` / XHR identity
+  或合成 URL；descriptor 无法安全组合时保持 fail-open。
+- playurl Fetch 调用或 XHR `open()` 必须在 predecessor 开始前取得单调 delivery token。
+  inner policy 只变换私有 payload，不更新 candidates、generation、probe 或 recovery；
+  只有被接受的 outer final token 才提交全局状态。新请求先完成后，旧请求晚到必须
+  零 collection/publication/schedule，不能通过“先发布旧组、再恢复新 snapshot”重置当前
+  activation/timer/override。同步 Vue/hydration delivery 也会取得新 token，从而使更早的
+  pending transport 失效。token 只存在内存。
+- 支持的 playurl endpoint 由一个共享 classifier 定义：现代接口使用精确 host/path，
+  legacy `/player/web_api[/v2]/playurl` 保留已有任意已解析 hostname 的兼容语义；最终
+  observer 只接收解析后的 HTTPS 请求。有效 JSON 错误 envelope 以同 token 发布空组。
+- 后置未知 Fetch/XHR accessor 的 repair 不执行 getter/setter，而是停用被捕获的旧
+  observer，避免 wrapper 再发布 raw 响应；替换到 repair 之间和最后一次 repair 之后的
+  晚期替换是明确的 fail-open 边界。
+- 显式“关闭脚本”时不安装 monitor/final observer，也不允许已存在的 observer 继续
+  安排 auto probe 或启用 recovery；“未配置自定义区域代理”不等同于显式关闭，仍保留
+  CDN-only 选择与恢复能力。
+- Fetch/XHR 先从同一 reverse index 取得 side-effect-free eligibility；无关 GET 不查询
+  DOM、不读取媒体属性也不重排 monitor timer。唯一 exact match 才 prepare route，只有
+  predecessor 接受 Fetch 调用或 native XHR
+  `open()` 成功后才 commit；构造、同步 predecessor、WebIDL/native `open()` 失败只
+  discard，不制造伪请求状态，也不把尚未发出的 alternate 计入 attempted。status 只以
+  candidate index 暴露 committed/pending 结构，并以不含 URL 的 `routeCommittedAt`
+  标记 pending 被真实请求 commit 的时刻；新上下文、禁用或 group reset 会清空该时间，
+  stable reset 保留它和既有 `retryAt`。
+- exact request 在 prepare 前以及 predecessor acceptance 后只允许做 video identity
+  synchronization，不提交 playback sample；否则恰好到期的 stable window 可能先取消已被
+  predecessor 接受的 pending alternate。route commit 线性化后才执行普通 monitor wake。
+- live capability 的 commit 证据必须同时满足：页面侧成功 predecessor acceptance 的
+  单调序列位于冻结 intent 边界之后、该序列已经出现在 committed status 读取前的 hook
+  fence、acceptance 不晚于 `routeCommittedAt`、status commit 不晚于当前样本，并且
+  `retryAt >= routeCommittedAt + 15,000 ms`。无法建立因果关系
+  时只能返回 `INCONCLUSIVE`。稳定恢复只累计相邻间隔不超过 `700 ms` 的可见健康样本；
+  reset 必须在前一采样已经证明连续窗口后出现，且不得改写 commit 时间或 cooldown。
 
-Stage 3 PR 在写实现前必须把这份草案补成机器可测试的状态表：列出状态、事件、
-guard 与转换；固定 grace、cooldown、backoff 的默认值、上限和重置条件；定义媒体
-请求如何逐字匹配到 representation/segment group，以及歧义时的 fail-open 规则；
-并明确 Fetch/XHR 重路由对 method、headers、`Range`、credentials、signal、native
-`open()` 状态和 response identity 的保持语义。相同文档还必须给出 deterministic
-fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才进入实现。
+Stage 3 的实现必须遵循已冻结的设计参数：`0.5 s` low-buffer threshold、`3,000 ms`
+grace、`15,000 ms` 最小 cooldown、从 `5,000 ms` 指数增长且封顶 `60,000 ms` 的
+backoff，以及页面可见时 `3 s` buffer / `5 s` 连续推进的稳定恢复重置；隐藏或未知
+visibility 不得清除失败历史。媒体请求只允许逐字命中
+唯一 representation/segment group；Fetch/XHR 重路由必须保持 method、headers、
+`Range`、credentials、body、signal、native `open()` 状态与 response/XHR identity。
+deterministic fixture、组合兼容、真实 Chromium 与 live capability 的验收矩阵也以同一
+文档为准。
 
-在这些状态机、观察信号与真实浏览器测试齐备前，`auto` 只做 Stage 2 后台探测并
-影响下一次 playurl 排序，不宣称具备当前播放换路或 stall recovery。
+Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能力仍限于页面 Fetch/XHR
+可见的未来 exact media `GET`。native media loader 绕过必须报告为 `UNSUPPORTED`，
+不能据此宣称恢复成功。
 
 ## 测试边界
 
@@ -786,7 +862,8 @@ fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才�
 - `cache backend`：可以从内存升级到持久化存储，但 host-only 与隐私字段限制不变。
 - `delivery adapter`：可增加新的 player/global hook，但只能调用共享核心，不能复制
   选择逻辑。
-- `stall recovery`：按 Stage 3 契约在独立后续 PR 中设计和验收；静态 candidate
+- `stall recovery`：已按 Stage 3 契约在当前独立 PR 中实现和验收；后续扩展仍不得放宽
+  exact-group、future-request-only、cooldown 或隐私边界。静态 candidate
   pool 只能是非默认实验性排序提示，而且只能引用当前 exact signed candidate group
   中已经存在的候选，不得引入外部 host/URL。任何外部 pool 都需要新的授权与签名
   契约，不属于本文定义的 Stage 3。
@@ -798,7 +875,7 @@ fixture、组合兼容与真实浏览器验收矩阵，完成设计评审后才�
 
 | Reference | 固定版本 | 参考概念 | 本设计的明确差异 |
 | --- | --- | --- | --- |
-| [siwei-yuan/bili-pilot](https://github.com/siwei-yuan/bili-pilot/tree/2baca4178fcfb449d40a30662bcd711c9e4d8121) | commit `2baca4178fcfb449d40a30662bcd711c9e4d8121`, MIT | 完整签名候选、按 representation/segment 规划、MCDN/PCDN 风险元数据、普通候选失败后保留降级候选、fail-open | 不采用其预取/Range cache；stall recovery 留给 Stage 3，默认探测也不发送 Range |
+| [siwei-yuan/bili-pilot](https://github.com/siwei-yuan/bili-pilot/tree/2baca4178fcfb449d40a30662bcd711c9e4d8121) | commit `2baca4178fcfb449d40a30662bcd711c9e4d8121`, MIT | 完整签名候选、按 representation/segment 规划、MCDN/PCDN 风险元数据、普通候选失败后保留降级候选、fail-open | 不采用其预取/Range cache；Stage 3 只改写未来 exact request，默认探测也不发送 Range |
 | [realzza/bilibili-accelerator](https://github.com/realzza/bilibili-accelerator/tree/6cba8c8b23ad01a152d186420081284b6eda1f77) | v0.4.0, commit `6cba8c8b23ad01a152d186420081284b6eda1f77`, MIT | 浏览器本地吞吐探测、`credentials: "omit"`、`cache: "no-store"`、无 Range 的前缀读取与 cancel、Fetch/XHR 组合入口、仅记录 host 的诊断思路 | 不采用静态 candidate pool、地区默认 host 或自动 host synthesis；缓存也不按 timezone/locale 分区 |
 | [SukkaW/Make-Bilibili-Great-Than-Ever-Before](https://github.com/SukkaW/Make-Bilibili-Great-Than-Ever-Before/tree/800ca13061df9b87fb6f38c0b2b2346ebd6812f9) (MBGTEB) | commit `800ca13061df9b87fb6f38c0b2b2346ebd6812f9`, MIT | 从 `baseUrl`/`backupUrl` 为每个 representation 收集关联 URL、识别 MCDN/PCDN 风险、在多入口请求链中匹配媒体对象 | 自动模式不采用随机选择、固定 fallback host、proxy wrapping 或跨响应收集 host；完整签名 URL 始终来自当前候选组 |
 | [MareDevi/bilibili-tui](https://github.com/MareDevi/bilibili-tui/tree/98737ce7d50a317455f4b959bab0d320577298c1) | commit `98737ce7d50a317455f4b959bab0d320577298c1`, MIT | 分别为 video/audio stream 排列候选、按 host 复用短期探测分数、区分延迟/吞吐/可靠性并设置 TTL | 浏览器实现不使用远程 catalog、地区 host 合成、文件系统历史或默认 Range probe；只缓存最小 host 级摘要 |

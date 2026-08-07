@@ -2,14 +2,23 @@
 import { util_debug } from "./log"
 import { Scripts } from "./scripts"
 let noReferrerHostArray: string[] = []
-/// 注入Xhr
-///
-/// [transformRequest]:
-/// {@macro xhr_transform_request}
-///
-/// [transformResponse]:
-/// {@macro xhr_transform_response}
-export function injectXhr({ transformRequest, transformResponse }) {
+/**
+ * Installs the XMLHttpRequest interception layer.
+ *
+ * `transformOpenUrl` is an optional synchronous, fail-open mapper. It is
+ * called immediately before the captured native `open()` only for primitive
+ * string `GET` method/URL pairs. A primitive string result replaces only the
+ * URL argument. A transactional `{ url, commit?, rollback? }` result defers
+ * optional routing state until native `open()` succeeds. Exceptions and every
+ * other result retain the original URL.
+ *
+ * [transformRequest]:
+ * {@macro xhr_transform_request}
+ *
+ * [transformResponse]:
+ * {@macro xhr_transform_response}
+ */
+export function injectXhr({ transformOpenUrl, transformRequest, transformResponse }) {
     // util_debug('XMLHttpRequest的描述符:', Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest'))
     const NativeXMLHttpRequest = window.XMLHttpRequest
     const nativePrototype = NativeXMLHttpRequest.prototype
@@ -129,19 +138,30 @@ export function injectXhr({ transformRequest, transformResponse }) {
 
         open(...args) {
             const state = requireState(this)
+            const routed = transformOpenArguments(args)
             // WebIDL argument conversion can run page code before native open
             // validates the call. Keep a stack for reentrant conversion hooks,
             // and only commit the new request after native success is known.
             const transaction = {
-                args,
+                args: routed.args,
+                routeCommit: routed.commit,
+                routeRollback: routed.rollback,
+                routeSettled: false,
+                applied: false,
                 committed: false,
             }
             state.openTransactions.push(transaction)
             let result
             try {
-                result = nativeOpen.apply(this, args)
+                result = nativeOpen.apply(this, transaction.args)
             } catch (error) {
-                removeOpenTransaction(state, transaction)
+                try {
+                    rollbackOpenTransaction(state, transaction)
+                } catch (_) {
+                    // Hostile container descriptors can make best-effort state
+                    // restoration fail. Preserve the native WebIDL/DOMException
+                    // outcome after settling the optional route rollback hook.
+                }
                 throw error
             }
             commitOpenTransaction(state, transaction)
@@ -351,13 +371,151 @@ export function injectXhr({ transformRequest, transformResponse }) {
         }
     }
 
-    function commitOpenTransaction(state, transaction) {
-        if (transaction.committed) return
-        transaction.committed = true
-        removeOpenTransaction(state, transaction)
+    function transformOpenArguments(args) {
+        const original = { args, commit: null, rollback: null }
+        const method = args[0]
+        const url = args[1]
+        if (
+            typeof transformOpenUrl !== 'function'
+            || typeof method !== 'string'
+            || typeof url !== 'string'
+            || !isGetMethod(method)
+        ) {
+            return original
+        }
+        let replacement
+        try {
+            replacement = transformOpenUrl(url)
+        } catch (_) {
+            return original
+        }
+        let replacementUrl
+        let commit = null
+        let rollback = null
+        if (typeof replacement === 'string') {
+            replacementUrl = replacement
+        } else if (replacement && typeof replacement === 'object') {
+            try {
+                const candidateUrl = replacement.url
+                if (typeof candidateUrl !== 'string') return original
+                replacementUrl = candidateUrl
+                const commitCallback = replacement.commit
+                const rollbackCallback = replacement.rollback
+                if (typeof commitCallback === 'function') {
+                    commit = () => commitCallback.call(replacement)
+                }
+                if (typeof rollbackCallback === 'function') {
+                    rollback = () => rollbackCallback.call(replacement)
+                }
+            } catch (_) {
+                return original
+            }
+        } else {
+            return original
+        }
+        const routedArgs = args.slice()
+        routedArgs[1] = replacementUrl
+        return { args: routedArgs, commit, rollback }
+    }
+
+    function isGetMethod(method) {
+        return method.length === 3
+            && (method[0] === 'G' || method[0] === 'g')
+            && (method[1] === 'E' || method[1] === 'e')
+            && (method[2] === 'T' || method[2] === 't')
+    }
+
+    function applyOpenTransaction(state, transaction) {
+        if (transaction.applied) return
+        transaction.applied = true
+        transaction.previousState = captureRequestState(state)
         resetRequestState(state)
+        transaction.appliedGeneration = state.generation
         state.container.__method = transaction.args[0]
         state.container.__url = transaction.args[1]
+    }
+
+    function commitOpenTransaction(state, transaction) {
+        if (transaction.committed) return
+        applyOpenTransaction(state, transaction)
+        if (state.generation !== transaction.appliedGeneration) {
+            // A trusted OPENED listener can synchronously call open() again on
+            // this XHR. The nested request then owns both the native XHR and
+            // the current wrapper generation; only discard the superseded
+            // outer route token without restoring over the nested state.
+            removeOpenTransaction(state, transaction)
+            settleOpenRoute(transaction, 'rollback')
+            return
+        }
+        transaction.committed = true
+        removeOpenTransaction(state, transaction)
+        settleOpenRoute(transaction, 'commit')
+    }
+
+    function rollbackOpenTransaction(state, transaction) {
+        removeOpenTransaction(state, transaction)
+        try {
+            if (transaction.applied && state.generation === transaction.appliedGeneration) {
+                restoreRequestState(state, transaction.previousState)
+            }
+        } finally {
+            settleOpenRoute(transaction, 'rollback')
+        }
+    }
+
+    function settleOpenRoute(transaction, outcome) {
+        if (transaction.routeSettled) return
+        transaction.routeSettled = true
+        const callback = outcome === 'commit'
+            ? transaction.routeCommit
+            : transaction.routeRollback
+        if (typeof callback !== 'function') return
+        try {
+            callback()
+        } catch (_) {
+            // Native open has already succeeded or failed; optional route state
+            // must never change the observable native outcome.
+        }
+    }
+
+    function captureRequestState(state) {
+        const stateValues = {}
+        for (const prop of [
+            'generation',
+            'aborting',
+            'asyncOutcome',
+            'asyncResponse',
+            'hasNativeFallback',
+            'nativeFallbackEvent',
+            'nativeCompletionDelivered',
+            'syntheticDelivery',
+        ]) {
+            stateValues[prop] = state[prop]
+        }
+        const containerValues = {}
+        for (const prop of [
+            '__method',
+            '__url',
+            '__block_response',
+            '__has_replacement',
+            '__redirect',
+            '__response',
+            'readyState',
+            'response',
+            'responseText',
+        ]) {
+            containerValues[prop] = captureContainerFlag(state.container, prop)
+        }
+        return { stateValues, containerValues }
+    }
+
+    function restoreRequestState(state, previousState) {
+        for (const [prop, value] of Object.entries(previousState.stateValues)) {
+            state[prop] = value
+        }
+        for (const [prop, captured] of Object.entries(previousState.containerValues)) {
+            restoreContainerFlag(state.container, prop, captured)
+        }
     }
 
     function removeOpenTransaction(state, transaction) {
@@ -411,9 +569,9 @@ export function injectXhr({ transformRequest, transformResponse }) {
             && event?.isTrusted === true
             && readNativeProperty(instance, 'readyState') === 1
         ) {
-            // Only a trusted native OPENED event proves that this transaction
-            // passed validation. Converter-dispatched or old-request events do not.
-            commitOpenTransaction(state, openTransaction)
+            // Expose the new request before native listeners observe OPENED, but
+            // keep the transaction reversible until native open returns.
+            applyOpenTransaction(state, openTransaction)
         }
         if (readNativeProperty(instance, 'readyState') === 4) {
             if (state.nativeCompletionDelivered) {

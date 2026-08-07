@@ -9,6 +9,7 @@
 - 使用说明：`packages/unblock-area-limit/README.md`
 - 高级设置和测试页：`packages/unblock-area-limit/README.dev.md`
 - CDN 选择器设计：`docs/design/cdn-selection.md`
+- CDN stall recovery 状态机与可复用接入契约：`docs/design/cdn-stall-recovery.md`
 
 ## 开发
 
@@ -42,17 +43,29 @@ pnpm run typecheck
 pnpm run check
 ```
 
-只运行 CDN selector、runtime、迁移与 adapter 回归：
+只运行 CDN selector、runtime、stall recovery、迁移与 adapter 回归：
 
 ```bash
 pnpm run test:cdn
 ```
 
+运行受控的真实 Chrome stall recovery gate（Fetch 与 XHR、held current request、
+`3 s` grace、future exact route、稳定恢复与 cooldown）：
+
+```bash
+pnpm run test:cdn-recovery-browser
+pnpm run test:cdn-recovery-browser --headed --timeout-ms 120000
+```
+
+该 gate 会自行构建 userscript，使用一次性浏览器 context 和完全受控的 Bilibili-origin
+fixture；它不读取用户 profile、登录态或真实 signed media URL。
+
 运行真实 Bilibili 视频与 CDN 的联网 E2E gate（会先重新构建本地用户脚本）：
 
 ```bash
 pnpm run test:cdn-live-e2e
-pnpm run test:cdn-live-e2e -- --headed --url https://www.bilibili.com/video/BV17x411w7KC/ --timeout-ms 120000
+pnpm run test:cdn-live-e2e --headed --url https://www.bilibili.com/video/BV17x411w7KC/ --timeout-ms 120000
+pnpm run test:cdn-live-e2e --stage3-capability --timeout-ms 180000
 ```
 
 该 gate 使用一次性无登录浏览器上下文，不读取 `access_key`，也不配置 BALH 或第三方代理。
@@ -65,6 +78,11 @@ pnpm run test:cdn-live-e2e -- --headed --url https://www.bilibili.com/video/BV17
 媒体和当前网络；若仅因网络波动失败，应重试一次确认，而不能把失败当作通过。该自动 gate
 不替代发布前的英国本地人工播放验收。
 
+可选的 `--stage3-capability` 会在受限时间内尝试对真实页面的 future Fetch/XHR media
+request 注入可恢复 stall，并输出 `PASS`、`FAIL`、`UNSUPPORTED` 或 `INCONCLUSIVE`。
+四类退出码依次为 `0`、`1`、`2`、`3`；native media loader 绕过或证据不足不会被误报为
+成功，也不单独证明生产代码有缺陷。该模式不会替代上面的默认 Stage 2 live gate。
+
 XHR subclass 与异步 fallback 的组合兼容回归由 `pnpm run test:xhr-compat` 负责；
 它也包含在 `pnpm run check` 中。
 
@@ -74,7 +92,9 @@ XHR subclass 与异步 fallback 的组合兼容回归由 `pnpm run test:xhr-comp
 pnpm run test:cdn-switcher:latest
 ```
 
-当前已验证的 Bilibili Video CDN Switcher 版本为 `0.1.4`；完整范围和源文件校验值见[CDN Switcher 兼容性](packages/unblock-area-limit/README.md#cdn-switcher-兼容性)。
+当前已验证的 Bilibili Video CDN Switcher 版本为 `0.1.4`；兼容 gate 覆盖 Fetch/XHR、
+两种脚本加载顺序、downstream 最终响应候选发布和 future-route recovery。完整范围和源文件校验值见
+[CDN Switcher 兼容性](packages/unblock-area-limit/README.md#cdn-switcher-兼容性)。
 
 该兼容测试应在创建稳定版 tag 前对 `dev` 的待发布提交显式运行。tag 触发的 release workflow 不下载可变的第三方 latest 源码，因此已冻结的 tag 不会因 CDN Switcher 后续发布而失去可重跑性。
 

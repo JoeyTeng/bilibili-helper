@@ -54,6 +54,13 @@ globalThis.reportError = error => reportedErrors.push(error)
 
 const { injectXhr } = await import(pathToFileURL(outFile).href)
 
+await testOpenUrlTransformContract()
+await testTransactionalOpenUrlHooks()
+await testTrustedOpenedReentrantOpenSupersedesOuterRoute()
+await testMappedOpenFailureRollsBackTransaction()
+await testRollbackRestorationFailurePreservesNativeError()
+await testReentrantOpenUrlTransform()
+await testRoutedNativeResponseIdentity()
 await testProxySuccessBeforeLateNative()
 await testListenerOnlyNativeFallback()
 await testNativeFallbackMetadata()
@@ -71,6 +78,490 @@ await testSynchronousNativeCompletionRemainsBlocked()
 await testTransformResponseThenable()
 
 console.log('xhr async fallback tests passed')
+
+async function testOpenUrlTransformContract() {
+    const openUrlCalls = []
+    const requestCalls = []
+    let returnedObjectToStringCalls = 0
+    let returnedObjectThenReads = 0
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            openUrlCalls.push(url)
+            if (url === '/route-source') return '/route-target'
+            if (url === '/mapper-throws') throw new Error('synthetic open URL transform failure')
+            if (url === '/null-result') return null
+            if (url === '/object-result') {
+                return {
+                    get then() {
+                        returnedObjectThenReads += 1
+                        return undefined
+                    },
+                    toString() {
+                        returnedObjectToStringCalls += 1
+                        return '/must-not-be-coerced'
+                    },
+                }
+            }
+            return undefined
+        },
+        transformRequest({ url, container }) {
+            requestCalls.push({
+                url,
+                method: container.__method,
+            })
+            return null
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+
+    xhr.open('gEt', '/route-source', false, 'media-user', 'media-password')
+    xhr.setRequestHeader('Range', 'bytes=100-199')
+    xhr.setRequestHeader('X-Media-Test', 'preserved')
+    xhr.withCredentials = true
+    xhr.timeout = 4321
+    xhr.responseType = 'arraybuffer'
+    xhr.send('media-body')
+
+    assert.equal(nativeXhr.openCalls, 1, 'routed GET must call native open exactly once')
+    assert.deepEqual(nativeXhr.openHistory[0], [
+        'gEt',
+        '/route-target',
+        false,
+        'media-user',
+        'media-password',
+    ])
+    assert.deepEqual(requestCalls, [{
+        url: '/route-target',
+        method: 'gEt',
+    }], 'transformRequest must observe the committed routed transaction')
+    assert.deepEqual(nativeXhr.snapshotRequest(), {
+        method: 'gEt',
+        url: '/route-target',
+        async: false,
+        user: 'media-user',
+        password: 'media-password',
+        requestHeaders: {
+            range: 'bytes=100-199',
+            'x-media-test': 'preserved',
+        },
+        requestBody: 'media-body',
+        withCredentials: true,
+        timeout: 4321,
+        responseType: 'arraybuffer',
+    })
+
+    xhr.open('POST', '/post-bypass')
+    xhr.send('post-body')
+    assert.equal(nativeXhr.openCalls, 2)
+    assert.deepEqual(nativeXhr.openHistory[1], ['POST', '/post-bypass'])
+    assert.deepEqual(openUrlCalls, ['/route-source'], 'POST must not call the URL mapper')
+    assert.deepEqual(requestCalls[1], {
+        url: '/post-bypass',
+        method: 'POST',
+    })
+
+    let methodToStringCalls = 0
+    const objectMethod = {
+        toString() {
+            methodToStringCalls += 1
+            return 'GET'
+        },
+    }
+    xhr.open(objectMethod, '/object-method-bypass')
+    assert.equal(nativeXhr.openCalls, 3)
+    assert.equal(methodToStringCalls, 1, 'only native WebIDL conversion may coerce a non-primitive method')
+    assert.deepEqual(openUrlCalls, ['/route-source'])
+
+    let urlToStringCalls = 0
+    const objectUrl = {
+        toString() {
+            urlToStringCalls += 1
+            return '/object-url-bypass'
+        },
+    }
+    xhr.open('GET', objectUrl)
+    assert.equal(nativeXhr.openCalls, 4)
+    assert.equal(urlToStringCalls, 1, 'only native WebIDL conversion may coerce a non-primitive URL')
+    assert.deepEqual(openUrlCalls, ['/route-source'])
+
+    assert.doesNotThrow(() => xhr.open('GET', '/mapper-throws'))
+    assert.equal(nativeXhr.openCalls, 5, 'mapper failure must not retry native open')
+    assert.deepEqual(nativeXhr.openHistory[4], ['GET', '/mapper-throws'])
+    xhr.send('mapper-throw-body')
+    assert.deepEqual(requestCalls[2], {
+        url: '/mapper-throws',
+        method: 'GET',
+    }, 'mapper failure must commit the original URL')
+    assert.equal(nativeXhr.snapshotRequest().requestBody, 'mapper-throw-body')
+
+    xhr.open('GET', '/null-result')
+    assert.equal(nativeXhr.openCalls, 6)
+    assert.deepEqual(nativeXhr.openHistory[5], ['GET', '/null-result'])
+
+    xhr.open('GET', '/object-result')
+    assert.equal(nativeXhr.openCalls, 7)
+    assert.deepEqual(nativeXhr.openHistory[6], ['GET', '/object-result'])
+    assert.equal(returnedObjectToStringCalls, 0, 'non-string mapper results must not be coerced')
+    assert.equal(returnedObjectThenReads, 0, 'non-string mapper results must not be inspected as thenables')
+    assert.deepEqual(openUrlCalls, [
+        '/route-source',
+        '/mapper-throws',
+        '/null-result',
+        '/object-result',
+    ])
+}
+
+async function testTransactionalOpenUrlHooks() {
+    {
+        const settlements = []
+        const { NativeXMLHttpRequest } = installInjectedXhr({
+            transformOpenUrl(url) {
+                return {
+                    url: `${url}-target`,
+                    commit() { settlements.push(`commit:${url}`) },
+                    rollback() { settlements.push(`rollback:${url}`) },
+                }
+            },
+            transformRequest() { return null },
+            transformResponse() { return null },
+        })
+        const xhr = new window.XMLHttpRequest()
+        xhr.open('GET', '/transaction-success')
+        assert.deepEqual(settlements, ['commit:/transaction-success'])
+        assert.deepEqual(NativeXMLHttpRequest.instances[0].openHistory, [[
+            'GET',
+            '/transaction-success-target',
+        ]])
+    }
+
+    {
+        const settlements = []
+        const converterError = new Error('synthetic password conversion failure')
+        const { NativeXMLHttpRequest } = installInjectedXhr({
+            transformOpenUrl(url) {
+                return {
+                    url: `${url}-target`,
+                    commit() { settlements.push(`commit:${url}`) },
+                    rollback() { settlements.push(`rollback:${url}`) },
+                }
+            },
+            transformRequest() { return null },
+            transformResponse() { return null },
+        })
+        const xhr = new window.XMLHttpRequest()
+        assert.throws(
+            () => xhr.open('GET', '/transaction-converter-throws', true, null, {
+                toString() { throw converterError },
+            }),
+            error => error === converterError,
+        )
+        assert.equal(NativeXMLHttpRequest.instances[0].openCalls, 1)
+        assert.deepEqual(settlements, ['rollback:/transaction-converter-throws'])
+    }
+
+    {
+        const settlements = []
+        const outerError = new Error('synthetic outer conversion failure')
+        let xhr
+        const { NativeXMLHttpRequest } = installInjectedXhr({
+            transformOpenUrl(url) {
+                return {
+                    url: `${url}-target`,
+                    commit() { settlements.push(`commit:${url}`) },
+                    rollback() { settlements.push(`rollback:${url}`) },
+                }
+            },
+            transformRequest() { return null },
+            transformResponse() { return null },
+        })
+        xhr = new window.XMLHttpRequest()
+        assert.throws(
+            () => xhr.open('GET', '/transaction-outer', true, null, {
+                toString() {
+                    xhr.open('GET', '/transaction-inner')
+                    throw outerError
+                },
+            }),
+            error => error === outerError,
+        )
+        assert.equal(NativeXMLHttpRequest.instances[0].openCalls, 2)
+        assert.deepEqual(settlements, [
+            'commit:/transaction-inner',
+            'rollback:/transaction-outer',
+        ])
+        assert.equal(NativeXMLHttpRequest.instances[0].snapshotRequest().url, '/transaction-inner-target')
+    }
+}
+
+async function testTrustedOpenedReentrantOpenSupersedesOuterRoute() {
+    const settlements = []
+    const attemptedRoutes = []
+    const requestCalls = []
+    let activeRoute
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            return {
+                url: `${url}-target`,
+                commit() {
+                    settlements.push(`commit:${url}`)
+                    attemptedRoutes.push(url)
+                    activeRoute = url
+                },
+                rollback() {
+                    settlements.push(`rollback:${url}`)
+                },
+            }
+        },
+        transformRequest({ url, container }) {
+            requestCalls.push({ url, method: container.__method })
+            return null
+        },
+        transformResponse() { return null },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+    let reentered = false
+    xhr.addEventListener('readystatechange', () => {
+        if (reentered || xhr.readyState !== 1) return
+        reentered = true
+        xhr.open('GET', '/listener-inner')
+    })
+
+    nativeXhr.dispatchReadyStateChangeOnNextOpen()
+    xhr.open('GET', '/listener-outer')
+
+    assert.deepEqual(nativeXhr.openHistory, [
+        ['GET', '/listener-outer-target'],
+        ['GET', '/listener-inner-target'],
+    ])
+    assert.deepEqual(settlements, [
+        'commit:/listener-inner',
+        'rollback:/listener-outer',
+    ], 'the superseded outer route token must be discarded after native open returns')
+    assert.equal(activeRoute, '/listener-inner')
+    assert.deepEqual(
+        attemptedRoutes,
+        ['/listener-inner'],
+        'only the nested native request may become an attempted active route',
+    )
+    assert.equal(
+        nativeXhr.snapshotRequest().url,
+        '/listener-inner-target',
+        'discarding the outer route must not restore over the nested native request',
+    )
+
+    xhr.send('listener-inner-body')
+    assert.deepEqual(requestCalls, [{
+        url: '/listener-inner-target',
+        method: 'GET',
+    }])
+    assert.equal(nativeXhr.snapshotRequest().requestBody, 'listener-inner-body')
+}
+
+async function testRoutedNativeResponseIdentity() {
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            return { url: `${url}-target`, commit() { }, rollback() { } }
+        },
+        transformRequest() { return null },
+        transformResponse() { return null },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+    const nativeResponse = new ArrayBuffer(8)
+    xhr.open('GET', '/native-identity')
+    xhr.responseType = 'arraybuffer'
+    xhr.send()
+    nativeXhr.complete(createNativeFixture({
+        response: nativeResponse,
+        responseText: '',
+        responseURL: 'https://media.example/native-identity-target',
+        status: 206,
+        statusText: 'Partial Content',
+        headers: { 'content-range': 'bytes 0-7/8' },
+    }))
+    assert.strictEqual(xhr.response, nativeResponse)
+    assert.equal(xhr.responseURL, 'https://media.example/native-identity-target')
+    assert.equal(xhr.status, 206)
+    assert.equal(xhr.getResponseHeader('Content-Range'), 'bytes 0-7/8')
+}
+
+async function testMappedOpenFailureRollsBackTransaction() {
+    const request = createDeferred()
+    const openUrlCalls = []
+    let container
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            openUrlCalls.push(url)
+            return url === '/mapped-open-throws' ? '/mapped-target-throws' : null
+        },
+        transformRequest(context) {
+            container = context.container
+            return request.promise
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+    xhr.open('GET', '/stable-request')
+    xhr.send()
+    nativeXhr.complete(createNativeFixture({
+        response: 'stable-native',
+        responseText: 'stable-native',
+        responseURL: 'https://api.bilibili.com/stable-native',
+    }))
+    assert.equal(container.__url, '/stable-request')
+    assert.equal(container.__block_response, true)
+
+    nativeXhr.dispatchReadyStateChangeAndThrowOnNextOpen()
+    assert.throws(
+        () => xhr.open('GET', '/mapped-open-throws'),
+        error => error?.name === 'NetworkError',
+    )
+    assert.equal(nativeXhr.openCalls, 2, 'a throwing mapped open must not reopen the original URL')
+    assert.deepEqual(nativeXhr.openHistory, [
+        ['GET', '/stable-request'],
+        ['GET', '/mapped-target-throws'],
+    ])
+    assert.deepEqual(openUrlCalls, ['/stable-request', '/mapped-open-throws'])
+    assert.equal(container.__method, 'GET')
+    assert.equal(container.__url, '/stable-request')
+    assert.equal(container.__block_response, true, 'failed native open must restore the old pending fallback')
+
+    const callbacks = []
+    xhr.onreadystatechange = function (event) {
+        callbacks.push(snapshotCallback(this, event))
+    }
+    request.resolve({ source: 'stable-proxy' })
+    await flushPromises()
+    await flushPromises()
+    assert.equal(callbacks.length, 1, 'failed mapped open must preserve the old request generation')
+    assert.deepEqual(callbacks[0].response, { source: 'stable-proxy' })
+    assert.equal(callbacks[0].responseURL, 'https://api.bilibili.com/stable-native')
+    assert.equal(callbacks[0].readyState, 4)
+}
+
+async function testRollbackRestorationFailurePreservesNativeError() {
+    const settlements = []
+    const restoreError = new Error('synthetic hostile restore setter')
+    let container
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            return {
+                url: `${url}-target`,
+                commit() { settlements.push(`commit:${url}`) },
+                rollback() { settlements.push(`rollback:${url}`) },
+            }
+        },
+        transformRequest(context) {
+            container = context.container
+            return null
+        },
+        transformResponse() { return null },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+    xhr.open('GET', '/restore-stable')
+    xhr.send()
+    settlements.length = 0
+
+    let armHostileRestore = true
+    xhr.addEventListener('readystatechange', () => {
+        if (!armHostileRestore || xhr.readyState !== 1) return
+        armHostileRestore = false
+        Object.defineProperty(container, '__url', {
+            configurable: true,
+            get() { return '/hostile-container-value' },
+            set() { throw restoreError },
+        })
+    })
+    nativeXhr.dispatchReadyStateChangeAndThrowOnNextOpen()
+
+    assert.throws(
+        () => xhr.open('GET', '/restore-failure'),
+        error => error?.name === 'NetworkError' && error !== restoreError,
+        'best-effort wrapper rollback must not replace the native open error',
+    )
+    assert.deepEqual(
+        settlements,
+        ['rollback:/restore-failure'],
+        'route rollback must settle even when internal state restoration fails',
+    )
+}
+
+async function testReentrantOpenUrlTransform() {
+    const openUrlCalls = []
+    const requestCalls = []
+    let xhr
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            openUrlCalls.push(url)
+            if (url === '/reentrant-outer') {
+                xhr.open('GET', '/reentrant-inner')
+                return '/reentrant-outer-target'
+            }
+            if (url === '/reentrant-inner') return '/reentrant-inner-target'
+            if (url === '/reentrant-failing-outer') {
+                xhr.open('GET', '/reentrant-surviving-inner')
+                return '/reentrant-failing-outer-target'
+            }
+            if (url === '/reentrant-surviving-inner') return '/reentrant-surviving-inner-target'
+            return null
+        },
+        transformRequest({ url, container }) {
+            requestCalls.push({ url, method: container.__method })
+            return null
+        },
+        transformResponse() {
+            return null
+        },
+    })
+    xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+
+    xhr.open('GET', '/reentrant-outer', true, 'outer-user', 'outer-password')
+    assert.equal(nativeXhr.openCalls, 2)
+    assert.deepEqual(nativeXhr.openHistory, [
+        ['GET', '/reentrant-inner-target'],
+        ['GET', '/reentrant-outer-target', true, 'outer-user', 'outer-password'],
+    ])
+    assert.deepEqual(openUrlCalls, ['/reentrant-outer', '/reentrant-inner'])
+
+    xhr.send('outer-body')
+    assert.deepEqual(requestCalls, [{
+        url: '/reentrant-outer-target',
+        method: 'GET',
+    }], 'the successful outer routed transaction must commit after reentrant open')
+    assert.equal(nativeXhr.snapshotRequest().requestBody, 'outer-body')
+
+    nativeXhr.throwWhenOpeningUrl('/reentrant-failing-outer-target')
+    assert.throws(
+        () => xhr.open('GET', '/reentrant-failing-outer'),
+        error => error?.name === 'NetworkError',
+    )
+    assert.equal(nativeXhr.openCalls, 4, 'each reentrant layer must call native open exactly once')
+    assert.deepEqual(nativeXhr.openHistory.slice(2), [
+        ['GET', '/reentrant-surviving-inner-target'],
+        ['GET', '/reentrant-failing-outer-target'],
+    ])
+    assert.deepEqual(openUrlCalls.slice(2), [
+        '/reentrant-failing-outer',
+        '/reentrant-surviving-inner',
+    ])
+
+    xhr.send('surviving-inner-body')
+    assert.deepEqual(requestCalls[1], {
+        url: '/reentrant-surviving-inner-target',
+        method: 'GET',
+    }, 'a failed outer native open must preserve its committed reentrant inner request')
+    assert.equal(nativeXhr.snapshotRequest().requestBody, 'surviving-inner-body')
+}
 
 async function testProxySuccessBeforeLateNative() {
     const request = createDeferred()
@@ -769,6 +1260,8 @@ function createNativeXhrClass() {
             instances.add(this)
             stateByInstance.set(this, createInitialNativeState())
             NativeXMLHttpRequest.instances.push(this)
+            this.openCalls = 0
+            this.openHistory = []
             this.sendCalls = 0
             this.abortCalls = 0
         }
@@ -791,6 +1284,22 @@ function createNativeXhrClass() {
 
         set responseType(value) {
             getState(this).responseType = value
+        }
+
+        get timeout() {
+            return getState(this).timeout
+        }
+
+        set timeout(value) {
+            getState(this).timeout = value
+        }
+
+        get withCredentials() {
+            return getState(this).withCredentials
+        }
+
+        set withCredentials(value) {
+            getState(this).withCredentials = value
         }
 
         get responseURL() {
@@ -824,21 +1333,47 @@ function createNativeXhrClass() {
             }
         }
 
-        open(method, url) {
+        open(method, url, ...rest) {
+            this.openCalls += 1
             const normalizedMethod = String(method)
             if (normalizedMethod === 'INVALID METHOD') {
                 throw new DOMException('Invalid HTTP method', 'SyntaxError')
             }
+            const normalizedUrl = String(url)
+            if (this.throwOnOpenUrl === normalizedUrl) {
+                this.openHistory.push([normalizedMethod, normalizedUrl, ...rest])
+                this.throwOnOpenUrl = undefined
+                throw new DOMException('Synthetic native open failure', 'NetworkError')
+            }
+            const normalizedRest = [...rest]
+            if (normalizedRest.length >= 2 && normalizedRest[1] != null) {
+                normalizedRest[1] = String(normalizedRest[1])
+            }
+            if (normalizedRest.length >= 3 && normalizedRest[2] != null) {
+                normalizedRest[2] = String(normalizedRest[2])
+            }
+            this.openHistory.push([normalizedMethod, normalizedUrl, ...normalizedRest])
             const state = getState(this)
+            const previousState = cloneNativeState(state)
             Object.assign(state, createInitialNativeState(), {
                 method: normalizedMethod,
-                url,
+                url: normalizedUrl,
+                async: normalizedRest.length >= 1 ? normalizedRest[0] : true,
+                user: normalizedRest[1],
+                password: normalizedRest[2],
                 readyState: 1,
                 onreadystatechange: state.onreadystatechange,
             })
-            if (this.dispatchOnOpen) {
-                this.dispatchOnOpen = false
+            const dispatchOnOpen = this.dispatchOnOpen
+            const throwAfterOpen = this.throwAfterOpen
+            this.dispatchOnOpen = false
+            this.throwAfterOpen = false
+            if (dispatchOnOpen) {
                 this.dispatchEvent(createNativeReadyStateChangeEvent())
+            }
+            if (throwAfterOpen) {
+                restoreNativeState(state, previousState)
+                throw new DOMException('Synthetic native open failure', 'NetworkError')
             }
         }
 
@@ -889,6 +1424,43 @@ function createNativeXhrClass() {
             this.dispatchOnOpen = true
         }
 
+        dispatchReadyStateChangeAndThrowOnNextOpen() {
+            this.dispatchOnOpen = true
+            this.throwAfterOpen = true
+        }
+
+        throwWhenOpeningUrl(url) {
+            this.throwOnOpenUrl = url
+        }
+
+        setRequestHeader(name, value) {
+            const state = getState(this)
+            if (state.readyState !== 1 || state.sent) {
+                throw new DOMException('Invalid XMLHttpRequest state', 'InvalidStateError')
+            }
+            const normalizedName = String(name).toLowerCase()
+            const normalizedValue = String(value)
+            state.requestHeaders[normalizedName] = state.requestHeaders[normalizedName]
+                ? `${state.requestHeaders[normalizedName]}, ${normalizedValue}`
+                : normalizedValue
+        }
+
+        snapshotRequest() {
+            const state = getState(this)
+            return {
+                method: state.method,
+                url: state.url,
+                async: state.async,
+                user: state.user,
+                password: state.password,
+                requestHeaders: { ...state.requestHeaders },
+                requestBody: state.requestBody,
+                withCredentials: state.withCredentials,
+                timeout: state.timeout,
+                responseType: state.responseType,
+            }
+        }
+
         getAllResponseHeaders() {
             return serializeHeaders(getState(this).headers)
         }
@@ -929,6 +1501,11 @@ function createNativeReadyStateChangeEvent() {
 
 function createInitialNativeState() {
     return {
+        method: undefined,
+        url: undefined,
+        async: true,
+        user: undefined,
+        password: undefined,
         readyState: 0,
         response: null,
         responseText: '',
@@ -938,9 +1515,28 @@ function createInitialNativeState() {
         status: 0,
         statusText: '',
         headers: {},
+        requestHeaders: {},
+        requestBody: undefined,
+        timeout: 0,
+        withCredentials: false,
         onreadystatechange: null,
         sent: false,
     }
+}
+
+function cloneNativeState(state) {
+    return {
+        ...state,
+        headers: { ...state.headers },
+        requestHeaders: { ...state.requestHeaders },
+    }
+}
+
+function restoreNativeState(state, snapshot) {
+    for (const key of Object.keys(state)) {
+        delete state[key]
+    }
+    Object.assign(state, cloneNativeState(snapshot))
 }
 
 function createNativeFixture(overrides = {}) {
