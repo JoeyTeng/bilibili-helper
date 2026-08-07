@@ -105,7 +105,7 @@ host-only 持久化 cache 使用 `v2` schema 和 `20 min` TTL，并在候选 hos
 即使没有配置自定义区域代理，只要没有显式选择“关闭脚本”，CDN 模式仍会处理平台已经返回的可播放地址；显式关闭脚本会同时禁用区域解锁与 CDN 选择。
 
 可以在设置页点击“测试当前视频 CDN”运行上述有界两阶段 probe。在 `auto` 模式下，
-Stage 3 还会为页面 Fetch/XHR 能看到的 exact media `GET` 监测播放停顿：只有页面可见、
+Stage 3 为页面 Fetch/XHR 能看到的 exact media `GET` 监测播放停顿：只有页面可见、
 未暂停或 seek、buffer 不超过 `0.5 s`，并连续 `3 s` 缺少有效播放推进时，才为之后的
 请求切到同一候选组的下一个完整签名 URL。它绝不 abort、reload、reopen 或重放当前
 请求；最小 `15 s` cooldown 和有上限的指数 backoff 防止来回切换。浏览器原生 media
@@ -117,7 +117,7 @@ candidate pool 不属于当前交付。
 再次排序、替换 `Response` / XHR 对象或拼接 URL。最新版 CDN Switcher 的两种加载顺序
 均由下列固定 snapshot gate 覆盖。
 
-仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。全部三个阶段合并且该人工验收完成前，不得创建稳定版 tag、发布稳定版或刷新 `main`；精确 live E2E 命令由仓库根 README 维护。
+仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。三个阶段已经全部合并；Joey 完成人工验收并明确授权发布前，不得创建稳定版 tag、发布稳定版或刷新 `main`。精确 live E2E 命令由仓库根 README 维护。
 
 #### CDN Switcher 兼容性
 
