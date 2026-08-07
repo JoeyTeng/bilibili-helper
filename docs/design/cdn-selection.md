@@ -699,6 +699,12 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   完整签名 URL 只存在于内存，不写 cache 或日志，不跨视频、清晰度或音轨复用。
 - 只重路由之后新发起的 Fetch/XHR 媒体请求；绝不 abort、reload 或重新播放当前
   正在进行的请求，也不通过重取 playurl 伪装成无缝恢复。
+- stall 确认只安装下一次请求的 pending route intent；`candidateIndex` 与 attempted set
+  只记录 predecessor 已接受的 Fetch 或 native `open()` 已成功的 XHR。pending 未被真实
+  请求 commit 前不得在后续 cooldown/grace 中跳过更多候选；其间若播放稳定恢复，则取消
+  pending 并以最后 committed candidate 重置失败历史。intent 先建立 provisional
+  cooldown；若真实请求延后 commit，则 deadline 至少延长到 `commitAt + cooldown`，不
+  重复增加 attempt，确保真实切换后仍保留完整最小冷却期。
 - 在同一候选组的完整签名 URL 内轮换，除显式 `manual` 外不做 host synthesis；
   静态 candidate pool 只能作为显式、默认关闭的实验性排序提示，并且只能引用当前
   exact signed candidate group 已有候选，不能注入外部 host/URL。
@@ -732,7 +738,19 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   DOM、不读取媒体属性也不重排 monitor timer。唯一 exact match 才 prepare route，只有
   predecessor 接受 Fetch 调用或 native XHR
   `open()` 成功后才 commit；构造、同步 predecessor、WebIDL/native `open()` 失败只
-  discard，不制造伪请求状态。
+  discard，不制造伪请求状态，也不把尚未发出的 alternate 计入 attempted。status 只以
+  candidate index 暴露 committed/pending 结构，并以不含 URL 的 `routeCommittedAt`
+  标记 pending 被真实请求 commit 的时刻；新上下文、禁用或 group reset 会清空该时间，
+  stable reset 保留它和既有 `retryAt`。
+- exact request 在 prepare 前以及 predecessor acceptance 后只允许做 video identity
+  synchronization，不提交 playback sample；否则恰好到期的 stable window 可能先取消已被
+  predecessor 接受的 pending alternate。route commit 线性化后才执行普通 monitor wake。
+- live capability 的 commit 证据必须同时满足：页面侧成功 predecessor acceptance 的
+  单调序列位于冻结 intent 边界之后、该序列已经出现在 committed status 读取前的 hook
+  fence、acceptance 不晚于 `routeCommittedAt`、status commit 不晚于当前样本，并且
+  `retryAt >= routeCommittedAt + 15,000 ms`。无法建立因果关系
+  时只能返回 `INCONCLUSIVE`。稳定恢复只累计相邻间隔不超过 `700 ms` 的可见健康样本；
+  reset 必须在前一采样已经证明连续窗口后出现，且不得改写 commit 时间或 cooldown。
 
 Stage 3 的实现必须遵循已冻结的设计参数：`0.5 s` low-buffer threshold、`3,000 ms`
 grace、`15,000 ms` 最小 cooldown、从 `5,000 ms` 指数增长且封顶 `60,000 ms` 的

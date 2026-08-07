@@ -51,6 +51,7 @@ function createRanges(ranges) {
 }
 
 function createVideo(currentTime, counters) {
+    const state = { currentTime }
     return {
         isConnected: true,
         paused: false,
@@ -58,13 +59,18 @@ function createVideo(currentTime, counters) {
         ended: false,
         get currentTime() {
             counters.mediaReadCount += 1
-            return currentTime
+            return state.currentTime
         },
         duration: 100,
-        buffered: createRanges([[0, currentTime + 5]]),
+        get buffered() {
+            return createRanges([[0, state.currentTime + 5]])
+        },
         currentSrc: 'media',
         src: '',
         srcObject: null,
+        setCurrentTime(value) {
+            state.currentTime = value
+        },
     }
 }
 
@@ -135,6 +141,7 @@ assert.equal(afterReplacement.contextEpoch, 1)
 assert.equal(afterReplacement.activeGroupCount, 1)
 assert.equal(afterReplacement.groups[0].state, 'monitoring')
 assert.equal(afterReplacement.groups[0].candidateIndex, 0)
+assert.equal(afterReplacement.groups[0].pendingCandidateIndex, null)
 
 recovery.sampleCdnRecoveryPlayback({
     visible: true,
@@ -151,7 +158,57 @@ assert.ok(graceTimer, 'low buffer must install the recovery grace timer')
 now = 3_000
 scheduledTimers.delete(graceTimer[0])
 graceTimer[1].callback()
-assert.equal(recovery.getCdnRecoveryStatus().groups[0].candidateIndex, 1)
+const afterGrace = recovery.getCdnRecoveryStatus()
+assert.equal(afterGrace.groups[0].state, 'waiting-retry')
+assert.equal(afterGrace.groups[0].candidateIndex, 0)
+assert.equal(afterGrace.groups[0].pendingCandidateIndex, 1)
+assert.equal(afterGrace.groups[0].attemptedCount, 1)
+assert.equal(afterGrace.groups[0].routeRevision, afterReplacement.groups[0].routeRevision + 1)
+assert.equal(afterGrace.groups[0].switchAttempts, 1)
+assert.equal(afterGrace.groups[0].timerPending, false)
+
+// The grace callback installs only a future route intent. The committed route
+// remains primary until a later exact request is accepted by its predecessor.
+recovery.sampleCdnRecoveryPlayback({
+    visible: true,
+    paused: false,
+    seeking: false,
+    ended: false,
+    currentTimeSeconds: 10,
+    durationSeconds: 100,
+    bufferedAheadSeconds: 5,
+})
+now = 7_999
+recovery.sampleCdnRecoveryPlayback({
+    visible: true,
+    paused: false,
+    seeking: false,
+    ended: false,
+    currentTimeSeconds: 14.999,
+    durationSeconds: 100,
+    bufferedAheadSeconds: 5,
+})
+secondVideo.setCurrentTime(15)
+const futurePrepared = recovery.prepareCdnRecoveryRequestUrl(primaryUrl, 'GET')
+assert.equal(futurePrepared.decision.url, alternateUrl)
+const beforeFutureCommit = recovery.getCdnRecoveryStatus()
+assert.equal(beforeFutureCommit.groups[0].candidateIndex, 0)
+assert.equal(beforeFutureCommit.groups[0].pendingCandidateIndex, 1)
+assert.equal(beforeFutureCommit.groups[0].attemptedCount, 1)
+assert.equal(beforeFutureCommit.groups[0].routeCommittedAt, null)
+now = 8_000
+secondVideo.setCurrentTime(16)
+const futureCommitted = futurePrepared.commit()
+assert.equal(futureCommitted.url, alternateUrl)
+assert.equal(futureCommitted.activation?.candidateIndex, 1)
+const afterFutureCommit = recovery.getCdnRecoveryStatus()
+assert.equal(afterFutureCommit.groups[0].candidateIndex, 1)
+assert.equal(afterFutureCommit.groups[0].pendingCandidateIndex, null)
+assert.equal(afterFutureCommit.groups[0].attemptedCount, 2)
+assert.equal(afterFutureCommit.groups[0].routeRevision, afterGrace.groups[0].routeRevision)
+assert.equal(afterFutureCommit.groups[0].switchAttempts, 1)
+assert.equal(afterFutureCommit.groups[0].routeCommittedAt, 8_000)
+assert.equal(afterFutureCommit.groups[0].retryAt, 23_000)
 
 // Eligibility may be checked before DOM synchronization, but the routed
 // decision must be prepared again afterwards. A replaced player clears the

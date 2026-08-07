@@ -853,6 +853,7 @@ async function exerciseOrder({ browser, order, balhSource, balhVersion, cdnSourc
                                 transportError: result.transportError ?? null,
                                 abortCount: result.abortCount,
                                 signalAborted: result.signalAborted === true,
+                                predecessorStartedAt: result.predecessorStartedAt ?? null,
                             } : null]
                         }))
                     }
@@ -871,6 +872,7 @@ async function exerciseOrder({ browser, order, balhSource, balhVersion, cdnSourc
                         if (transport === 'fetch') {
                             const controller = new AbortController()
                             const request = new Request(url, { headers: { accept }, signal: controller.signal })
+                            result.predecessorStartedAt = Date.now()
                             return fetch(request)
                                 .then(async response => {
                                     const candidate = response.headers.get('x-compat-media-candidate')
@@ -914,6 +916,7 @@ async function exerciseOrder({ browser, order, balhSource, balhVersion, cdnSourc
                                 result.abortCount += 1
                                 finish({ transportError: 'xhr-abort', status: xhr.status })
                             }
+                            result.predecessorStartedAt = Date.now()
                             xhr.open('GET', url, true)
                             xhr.setRequestHeader('accept', accept)
                             xhr.send()
@@ -1203,10 +1206,14 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(monitoringStatus, {
         state: 'monitoring',
         candidateIndex: 0,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: false,
     })
+    const routeRevisionBeforeIntentByKind = Object.fromEntries(
+        activeRecoveryGroups(monitoringStatus).map(group => [group.kind, group.routeRevision]),
+    )
     const lowBufferStartedAt = await page.evaluate(({ graceProbeDelayMs }) => {
         const state = window.__cdnSwitcherCompatState
         state.traceStage3RecoveryTimers = true
@@ -1224,6 +1231,7 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(confirmingStatus, {
         state: 'confirming',
         candidateIndex: 0,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: true,
@@ -1234,6 +1242,7 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(earlyStatus, {
         state: 'confirming',
         candidateIndex: 0,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: true,
@@ -1266,40 +1275,47 @@ async function exerciseStage3Compatibility({
     assertRunPending(await readStage3Run(page, 'current'),
         'current request immediately before grace expiry')
 
-    const switchedStatus = await waitForRecoveryState(page, 'waiting-retry')
-    assertRecoveryGroups(switchedStatus, {
+    const routeIntentStatus = await waitForRecoveryState(page, 'waiting-retry')
+    assertRecoveryGroups(routeIntentStatus, {
         state: 'waiting-retry',
-        candidateIndex: 1,
-        attemptedCount: 2,
+        candidateIndex: 0,
+        pendingCandidateIndex: 1,
+        attemptedCount: 1,
         switchAttempts: 1,
         timerPending: false,
     })
-    const switchEvents = await page.evaluate(() => {
+    const routeIntentEvents = await page.evaluate(() => {
         const state = window.__cdnSwitcherCompatState
         state.traceStage3RecoveryTimers = false
-        return state.stage3SwitchEvents.map(event => ({ ...event }))
+        return state.stage3RouteIntentEvents.map(event => ({ ...event }))
     })
-    assertCompat(switchEvents.length === 2,
-        `Stage3 did not record exactly two recovery switch events: ${JSON.stringify(switchEvents)}`)
-    for (const group of activeRecoveryGroups(switchedStatus)) {
-        const event = switchEvents.find(candidate => candidate.kind === group.kind)
-        assertCompat(event?.fromCandidateIndex === 0 && event?.toCandidateIndex === 1,
-            `Stage3 ${group.kind} switch event did not advance primary to alternate`)
-        assertCompat(Number.isFinite(event.switchedAt)
-            && event.callbackStartedAt <= event.switchedAt
-            && event.switchedAt <= event.callbackFinishedAt,
-            `Stage3 ${group.kind} switch timestamp was not captured inside its recovery timer`)
-        assertCompat(event.switchedAt - lowBufferStartedAt >= stage3GraceMs,
-            `Stage3 ${group.kind} switched before the 3-second confirmation grace elapsed`)
+    assertCompat(routeIntentEvents.length === 2,
+        `Stage3 did not record exactly two recovery route-intent events: ${JSON.stringify(routeIntentEvents)}`)
+    for (const group of activeRecoveryGroups(routeIntentStatus)) {
+        const event = routeIntentEvents.find(candidate => candidate.kind === group.kind)
+        assertCompat(event?.fromCandidateIndex === 0 && event?.toCandidateIndex === 0
+            && event?.fromPendingCandidateIndex === null
+            && event?.toPendingCandidateIndex === 1,
+        `Stage3 ${group.kind} route intent changed the committed candidate before a future request`)
+        assertCompat(event?.fromRouteRevision === routeRevisionBeforeIntentByKind[group.kind]
+            && event?.toRouteRevision === group.routeRevision
+            && event.toRouteRevision === event.fromRouteRevision + 1,
+        `Stage3 ${group.kind} route intent did not advance exactly one route revision`)
+        assertCompat(Number.isFinite(event.routeIntentAt)
+            && event.callbackStartedAt <= event.routeIntentAt
+            && event.routeIntentAt <= event.callbackFinishedAt,
+        `Stage3 ${group.kind} route-intent timestamp was not captured inside its recovery timer`)
+        assertCompat(event.routeIntentAt - lowBufferStartedAt >= stage3GraceMs,
+            `Stage3 ${group.kind} route intent was installed before the 3-second confirmation grace elapsed`)
         assertCompat(typeof group.retryAt === 'number'
-            && group.retryAt - event.switchedAt >= stage3MinimumCooldownMs,
-            `Stage3 ${group.kind} switch did not establish the 15-second minimum cooldown`)
+            && group.retryAt - event.routeIntentAt >= stage3MinimumCooldownMs,
+        `Stage3 ${group.kind} route intent did not establish the 15-second minimum cooldown`)
         const transport = group.kind === 'dash-video' ? 'fetch' : 'xhr'
         const graceRequest = mediaRequests.filter(request => request.transport === transport).at(-1)
         assertCompat(graceRequest?.candidate === 'primary'
             && Number.isFinite(graceRequest.observedAt)
-            && graceRequest.observedAt < event.switchedAt,
-            `Stage3 ${group.kind} grace probe did not reach its predecessor before the actual switch`)
+            && graceRequest.observedAt < event.routeIntentAt,
+        `Stage3 ${group.kind} grace probe did not reach its predecessor before the route intent`)
     }
     assertMediaRequestSequence(mediaRequests, {
         fetch: ['primary', 'primary'],
@@ -1322,6 +1338,31 @@ async function exerciseStage3Compatibility({
         fetch: ['primary', 'primary', 'alternate'],
         xhr: ['primary', 'primary', 'alternate'],
     })
+    const committedStatus = await readRecoveryStatus(page)
+    assertRecoveryGroups(committedStatus, {
+        state: 'waiting-retry',
+        candidateIndex: 1,
+        pendingCandidateIndex: null,
+        attemptedCount: 2,
+        switchAttempts: 1,
+        timerPending: false,
+    })
+    const retryAtByKind = {}
+    for (const group of activeRecoveryGroups(committedStatus)) {
+        const intentGroup = findRecoveryGroup(routeIntentStatus, group.kind)
+        const transport = group.kind === 'dash-video' ? 'fetch' : 'xhr'
+        const predecessorStartedAt = futureResult?.[transport]?.predecessorStartedAt
+        assertCompat(group.routeRevision === intentGroup?.routeRevision,
+            `Stage3 ${group.kind} predecessor commit unexpectedly changed the route revision`)
+        assertCompat(typeof group.retryAt === 'number'
+            && typeof intentGroup?.retryAt === 'number'
+            && group.retryAt >= intentGroup.retryAt,
+        `Stage3 ${group.kind} predecessor commit shortened the provisional cooldown`)
+        assertCompat(Number.isFinite(predecessorStartedAt)
+            && group.retryAt - predecessorStartedAt >= stage3MinimumCooldownMs,
+        `Stage3 ${group.kind} predecessor commit did not retain a 15-second cooldown`)
+        retryAtByKind[group.kind] = group.retryAt
+    }
     assertRunPending(await readStage3Run(page, 'current'),
         'current request while future route is active')
 
@@ -1333,14 +1374,12 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(cooldownStatus, {
         state: 'waiting-retry',
         candidateIndex: 1,
+        pendingCandidateIndex: null,
         attemptedCount: 2,
         switchAttempts: 1,
         timerPending: false,
     })
 
-    const retryAtByKind = Object.fromEntries(activeRecoveryGroups(switchedStatus).map(group => (
-        [group.kind, group.retryAt]
-    )))
     await page.evaluate(async () => {
         const state = window.__cdnSwitcherCompatState
         state.startStage3HealthyPlayback()
@@ -1350,6 +1389,7 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(stableStatus, {
         state: 'waiting-retry',
         candidateIndex: 1,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: false,
@@ -1366,6 +1406,7 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(resumedCooldownStatus, {
         state: 'waiting-retry',
         candidateIndex: 1,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: false,
@@ -1392,6 +1433,7 @@ async function exerciseStage3Compatibility({
     assertRecoveryGroups(cooldownBoundary.status, {
         state: 'waiting-retry',
         candidateIndex: 1,
+        pendingCandidateIndex: null,
         attemptedCount: 1,
         switchAttempts: 0,
         timerPending: false,
@@ -1592,6 +1634,7 @@ async function waitForStableRecoveryReset(page) {
             return active.length === 2 && active.every(group => (
                 group.state === 'waiting-retry'
                     && group.candidateIndex === 1
+                    && group.pendingCandidateIndex === null
                     && group.attemptedCount === 1
                     && group.switchAttempts === 0
             ))
@@ -1602,6 +1645,7 @@ async function waitForStableRecoveryReset(page) {
             kind: group.kind,
             state: group.state,
             candidateIndex: group.candidateIndex,
+            pendingCandidateIndex: group.pendingCandidateIndex,
             attemptedCount: group.attemptedCount,
             switchAttempts: group.switchAttempts,
         }))
@@ -1682,7 +1726,7 @@ function createHarnessBootstrap({
         gmReads: [],
         gmWrites: [],
         gmMenus: [],
-        stage3SwitchEvents: [],
+        stage3RouteIntentEvents: [],
         traceStage3RecoveryTimers: false,
         sensitiveConsoleArgumentCount: 0,
         incompleteConsoleArgumentCount: 0,
@@ -1695,13 +1739,19 @@ function createHarnessBootstrap({
 
     const nativeSetTimeout = globalThis.setTimeout.bind(globalThis)
     const nativeDateNow = Date.now.bind(Date)
-    const readRecoveryCandidateIndexes = () => {
+    const readRecoveryRoutes = () => {
         try {
             const groups = globalThis.bangumi_area_limit_hack?.getCdnRecoveryStatus?.()?.groups
             if (!Array.isArray(groups)) return null
             return Object.fromEntries(groups
-                .filter(group => typeof group?.kind === 'string' && Number.isInteger(group.candidateIndex))
-                .map(group => [group.kind, group.candidateIndex]))
+                .filter(group => typeof group?.kind === 'string'
+                    && Number.isInteger(group.candidateIndex)
+                    && Number.isInteger(group.routeRevision))
+                .map(group => [group.kind, {
+                    candidateIndex: group.candidateIndex,
+                    pendingCandidateIndex: group.pendingCandidateIndex ?? null,
+                    routeRevision: group.routeRevision,
+                }]))
         } catch {
             return null
         }
@@ -1715,7 +1765,7 @@ function createHarnessBootstrap({
             return nativeSetTimeout(callback, delayMs, ...args)
         }
         return nativeSetTimeout(function (...callbackArgs) {
-            const before = readRecoveryCandidateIndexes()
+            const before = readRecoveryRoutes()
             const callbackStartedAt = nativeDateNow()
             const nowCalls = []
             const previousDateNow = Date.now
@@ -1729,17 +1779,22 @@ function createHarnessBootstrap({
             } finally {
                 Date.now = previousDateNow
                 const callbackFinishedAt = nativeDateNow()
-                const after = readRecoveryCandidateIndexes()
+                const after = readRecoveryRoutes()
                 if (before && after && nowCalls.length > 0) {
-                    for (const [kind, fromCandidateIndex] of Object.entries(before)) {
-                        const toCandidateIndex = after[kind]
-                        if (!Number.isInteger(toCandidateIndex) || toCandidateIndex === fromCandidateIndex) continue
-                        if (state.stage3SwitchEvents.length >= 10) continue
-                        state.stage3SwitchEvents.push({
+                    for (const [kind, fromRoute] of Object.entries(before)) {
+                        const toRoute = after[kind]
+                        if (!toRoute
+                            || toRoute.routeRevision === fromRoute.routeRevision) continue
+                        if (state.stage3RouteIntentEvents.length >= 10) continue
+                        state.stage3RouteIntentEvents.push({
                             kind,
-                            fromCandidateIndex,
-                            toCandidateIndex,
-                            switchedAt: nowCalls[0],
+                            fromCandidateIndex: fromRoute.candidateIndex,
+                            toCandidateIndex: toRoute.candidateIndex,
+                            fromPendingCandidateIndex: fromRoute.pendingCandidateIndex,
+                            toPendingCandidateIndex: toRoute.pendingCandidateIndex,
+                            fromRouteRevision: fromRoute.routeRevision,
+                            toRouteRevision: toRoute.routeRevision,
+                            routeIntentAt: nowCalls[0],
                             callbackStartedAt,
                             callbackFinishedAt,
                             requestedDelayMs: numericDelayMs,

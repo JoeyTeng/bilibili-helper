@@ -116,12 +116,63 @@ const audioUrls = urls('audio', 2)
     assert.equal(groupStatus(recovery, 'video').attemptedCount, 1)
     clock.advance(1)
     assert.equal(groupStatus(recovery, 'video').state, 'waiting-retry')
-    assert.equal(groupStatus(recovery, 'video').attemptedCount, 2)
+    assert.equal(groupStatus(recovery, 'video').candidateIndex, 0)
+    assert.equal(groupStatus(recovery, 'video').pendingCandidateIndex, 1)
+    assert.equal(groupStatus(recovery, 'video').attemptedCount, 1)
     assert.equal(groupStatus(recovery, 'audio').attemptedCount, 0)
 
     const futureRequest = recovery.routeExactUrl(videoUrls[0])
     assert.equal(futureRequest.url, videoUrls[1])
     assert.equal(futureRequest.routed, true)
+    assert.equal(groupStatus(recovery, 'video').candidateIndex, 1)
+    assert.equal(groupStatus(recovery, 'video').pendingCandidateIndex, null)
+    assert.equal(groupStatus(recovery, 'video').attemptedCount, 2)
+    assert.equal(groupStatus(recovery, 'video').routeCommittedAt, 3_000)
+
+    recovery.beginContext()
+    assert.deepEqual(recovery.getStatus().groups.map(item => item.routeCommittedAt), [null, null])
+}
+
+{
+    const { clock, recovery } = makeActiveRecovery([group('timestamp-disable', videoUrls.slice(0, 2))])
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(3_000)
+    recovery.routeExactUrl(videoUrls[0])
+    assert.equal(groupStatus(recovery, 'timestamp-disable').routeCommittedAt, 3_000)
+    recovery.setEnabled(false)
+    assert.equal(groupStatus(recovery, 'timestamp-disable').routeCommittedAt, null)
+    recovery.setEnabled(true)
+    assert.equal(groupStatus(recovery, 'timestamp-disable').routeCommittedAt, null)
+}
+
+{
+    const { clock, recovery } = makeActiveRecovery([group('timestamp-replacement', videoUrls.slice(0, 2))])
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(3_000)
+    recovery.routeExactUrl(videoUrls[0])
+    assert.equal(groupStatus(recovery, 'timestamp-replacement').routeCommittedAt, 3_000)
+    recovery.publishGroups([group('timestamp-new-generation', videoUrls.slice(1, 3))], true)
+    assert.equal(groupStatus(recovery, 'timestamp-new-generation').routeCommittedAt, null)
+}
+
+{
+    const clock = new FakeClock()
+    let validClock = true
+    const recovery = createCdnRecoveryCoordinator({
+        ...clock.dependencies(),
+        now: () => validClock ? clock.now : -1,
+    })
+    recovery.publishGroups([group('timestamp-unavailable', videoUrls.slice(0, 2))], true)
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(3_000)
+    validClock = false
+    recovery.routeExactUrl(videoUrls[0])
+    const committed = groupStatus(recovery, 'timestamp-unavailable')
+    assert.equal(committed.candidateIndex, 1)
+    assert.equal(committed.routeCommittedAt, null)
 }
 
 {
@@ -152,7 +203,9 @@ const audioUrls = urls('audio', 2)
     assert.equal(groupStatus(recovery, 'progress').attemptedCount, 1)
     clock.advance(1)
     assert.equal(groupStatus(recovery, 'progress').state, 'waiting-retry')
-    assert.equal(groupStatus(recovery, 'progress').attemptedCount, 2)
+    assert.equal(groupStatus(recovery, 'progress').candidateIndex, 0)
+    assert.equal(groupStatus(recovery, 'progress').pendingCandidateIndex, 1)
+    assert.equal(groupStatus(recovery, 'progress').attemptedCount, 1)
 }
 
 for (const scenario of [
@@ -224,8 +277,15 @@ for (const scenario of [
         assert.equal(switched.state, 'waiting-retry')
         assert.equal(switched.switchAttempts, index + 1)
         assert.equal(switched.retryAt, confirmationStartedAt + 3_000 + expectedCooldowns[index])
-        assert.equal(switched.candidateIndex, index + 1)
+        assert.equal(switched.candidateIndex, index)
+        assert.equal(switched.pendingCandidateIndex, index + 1)
+        assert.equal(switched.attemptedCount, index + 1)
         recovery.routeExactUrl(videoUrls[0])
+        const committed = groupStatus(recovery, 'backoff')
+        assert.equal(committed.candidateIndex, index + 1)
+        assert.equal(committed.pendingCandidateIndex, null)
+        assert.equal(committed.attemptedCount, index + 2)
+        assert.equal(committed.retryAt, switched.retryAt)
     }
 
     const lastRetryAt = groupStatus(recovery, 'backoff').retryAt
@@ -238,15 +298,164 @@ for (const scenario of [
     assert.equal(exhausted.candidateIndex, 6)
 }
 
+{
+    const { clock, recovery } = makeActiveRecovery([group(
+        'late-pending-commit',
+        videoUrls.slice(0, 3),
+    )])
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(3_000)
+
+    const pending = groupStatus(recovery, 'late-pending-commit')
+    assert.deepEqual(
+        routeProgress(pending),
+        {
+            state: 'waiting-retry',
+            candidateIndex: 0,
+            pendingCandidateIndex: 1,
+            attemptedCount: 1,
+            switchAttempts: 1,
+            retryAt: 18_000,
+            timerPending: false,
+        },
+    )
+    assert.equal(pending.routeCommittedAt, null)
+    const intentRevision = pending.routeRevision
+
+    clock.advanceTo(pending.retryAt)
+    recovery.samplePlayback(low())
+    const atProvisionalDeadline = groupStatus(recovery, 'late-pending-commit')
+    assert.deepEqual(routeProgress(atProvisionalDeadline), routeProgress(pending))
+    assert.equal(atProvisionalDeadline.routeRevision, intentRevision)
+    assert.equal(clock.pendingCount, 0)
+    clock.advanceTo(30_000)
+    recovery.samplePlayback(low())
+    const stillPending = groupStatus(recovery, 'late-pending-commit')
+    assert.deepEqual(routeProgress(stillPending), routeProgress(pending))
+    assert.equal(stillPending.routeRevision, intentRevision)
+    assert.equal(clock.pendingCount, 0)
+
+    const firstPrepared = recovery.prepareExactUrl(videoUrls[0])
+    const secondPrepared = recovery.prepareExactUrl(videoUrls[0])
+    assert.equal(firstPrepared.decision.url, videoUrls[1])
+    assert.equal(secondPrepared.decision.url, videoUrls[1])
+    clock.advanceTo(32_000)
+    assert.equal(firstPrepared.commit().activation.candidateIndex, 1)
+    assert.equal(secondPrepared.commit().activation.candidateIndex, 1)
+
+    const committed = groupStatus(recovery, 'late-pending-commit')
+    assert.deepEqual(
+        routeProgress(committed),
+        {
+            state: 'waiting-retry',
+            candidateIndex: 1,
+            pendingCandidateIndex: null,
+            attemptedCount: 2,
+            switchAttempts: 1,
+            retryAt: 47_000,
+            timerPending: false,
+        },
+    )
+    assert.equal(committed.routeRevision, intentRevision)
+    assert.equal(committed.routeCommittedAt, 32_000)
+    assert.equal(committed.retryAt - committed.routeCommittedAt, 15_000)
+
+    clock.advanceTo(committed.retryAt - 1)
+    recovery.samplePlayback(low())
+    assert.equal(groupStatus(recovery, 'late-pending-commit').state, 'waiting-retry')
+    assert.equal(clock.pendingCount, 0)
+    clock.advance(1)
+    recovery.samplePlayback(low())
+    assert.equal(groupStatus(recovery, 'late-pending-commit').state, 'confirming')
+    clock.advance(3_000)
+    const nextPending = groupStatus(recovery, 'late-pending-commit')
+    assert.equal(nextPending.candidateIndex, 1)
+    assert.equal(nextPending.pendingCandidateIndex, 2)
+    assert.equal(nextPending.attemptedCount, 2)
+    assert.equal(nextPending.switchAttempts, 2)
+}
+
+{
+    const { clock, recovery } = makeActiveRecovery([group(
+        'stable-before-pending-commit',
+        videoUrls.slice(0, 2),
+    )])
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(3_000)
+    const stalePrepared = recovery.prepareExactUrl(videoUrls[0])
+    assert.equal(stalePrepared.decision.url, videoUrls[1])
+
+    recovery.samplePlayback(healthy(10))
+    for (let second = 1; second <= 5; second += 1) {
+        clock.advance(1_000)
+        recovery.samplePlayback(healthy(10 + second))
+    }
+
+    const reset = groupStatus(recovery, 'stable-before-pending-commit')
+    assert.deepEqual(
+        routeProgress(reset),
+        {
+            state: 'waiting-retry',
+            candidateIndex: 0,
+            pendingCandidateIndex: null,
+            attemptedCount: 1,
+            switchAttempts: 0,
+            retryAt: 18_000,
+            timerPending: false,
+        },
+    )
+    assert.equal(reset.routeCommittedAt, null)
+    assert.equal(stalePrepared.commit().activation, undefined)
+    assert.equal(recovery.routeExactUrl(videoUrls[0]).url, videoUrls[0])
+
+    clock.advanceTo(reset.retryAt)
+    recovery.samplePlayback(low(16))
+    clock.advance(3_000)
+    const retried = groupStatus(recovery, 'stable-before-pending-commit')
+    assert.equal(retried.candidateIndex, 0)
+    assert.equal(retried.pendingCandidateIndex, 1)
+    assert.equal(retried.attemptedCount, 1)
+}
+
+{
+    const clock = new FakeClock()
+    const recovery = createCdnRecoveryCoordinator({
+        ...clock.dependencies(),
+        timing: {
+            confirmationGraceMs: 0,
+            minimumSwitchCooldownMs: 0,
+            retryBackoffBaseMs: 0,
+            retryBackoffCapMs: 0,
+        },
+    })
+    recovery.publishGroups([group('same-tick-promotion', videoUrls.slice(0, 2))], true)
+    recovery.routeExactUrl(videoUrls[0])
+    recovery.samplePlayback(low())
+    clock.advance(0)
+    recovery.samplePlayback(low())
+    assert.equal(groupStatus(recovery, 'same-tick-promotion').state, 'waiting-retry')
+
+    recovery.routeExactUrl(videoUrls[0])
+    assert.equal(groupStatus(recovery, 'same-tick-promotion').state, 'monitoring')
+    recovery.samplePlayback(low())
+    assert.equal(groupStatus(recovery, 'same-tick-promotion').state, 'confirming')
+    assert.equal(clock.pendingCount, 1)
+}
+
 for (const hiddenVisibility of [false, null]) {
     const key = `stable-waiting-hidden-${String(hiddenVisibility)}`
     const { clock, recovery } = makeActiveRecovery([group(key, videoUrls.slice(0, 3))])
     recovery.routeExactUrl(videoUrls[0])
     recovery.samplePlayback(low())
     clock.advance(3_000)
+    recovery.routeExactUrl(videoUrls[0])
     const failed = groupStatus(recovery, key)
     const cooldownDeadline = failed.retryAt
+    const committedAt = failed.routeCommittedAt
     assert.equal(cooldownDeadline, 18_000)
+    assert.equal(committedAt, 3_000)
     assert.deepEqual(
         {
             state: failed.state,
@@ -295,12 +504,17 @@ for (const hiddenVisibility of [false, null]) {
     assert.equal(reset.switchAttempts, 0)
     assert.equal(reset.attemptedCount, 1)
     assert.equal(reset.retryAt, cooldownDeadline)
+    assert.equal(reset.routeCommittedAt, committedAt)
 
     clock.advanceTo(cooldownDeadline)
     recovery.samplePlayback(low(14))
     clock.advance(3_000)
-    assert.equal(groupStatus(recovery, key).candidateIndex, 0)
+    assert.equal(groupStatus(recovery, key).candidateIndex, 1)
+    assert.equal(groupStatus(recovery, key).pendingCandidateIndex, 0)
     assert.equal(recovery.routeExactUrl(videoUrls[1]).url, videoUrls[0])
+    assert.equal(groupStatus(recovery, key).candidateIndex, 0)
+    assert.equal(groupStatus(recovery, key).routeCommittedAt, clock.now)
+    assert.ok(groupStatus(recovery, key).routeCommittedAt > committedAt)
 }
 
 for (const hiddenVisibility of [false, null]) {
@@ -309,6 +523,7 @@ for (const hiddenVisibility of [false, null]) {
     recovery.routeExactUrl(videoUrls[0])
     recovery.samplePlayback(low())
     clock.advance(3_000)
+    recovery.routeExactUrl(videoUrls[0])
     const retryAt = groupStatus(recovery, key).retryAt
     clock.advanceTo(retryAt)
     recovery.samplePlayback(low(1))
@@ -419,11 +634,13 @@ for (const hiddenVisibility of [false, null]) {
     const timer = clock.pendingCallbacks[0]
     clock.advance(3_000)
     const afterFirstFire = groupStatus(recovery, 'duplicate')
-    assert.equal(afterFirstFire.attemptedCount, 2)
+    assert.equal(afterFirstFire.attemptedCount, 1)
+    assert.equal(afterFirstFire.pendingCandidateIndex, 1)
     assert.equal(afterFirstFire.state, 'waiting-retry')
     timer()
     const afterDuplicateFire = groupStatus(recovery, 'duplicate')
-    assert.equal(afterDuplicateFire.attemptedCount, 2)
+    assert.equal(afterDuplicateFire.attemptedCount, 1)
+    assert.equal(afterDuplicateFire.pendingCandidateIndex, 1)
     assert.equal(afterDuplicateFire.routeRevision, afterFirstFire.routeRevision)
 }
 
@@ -439,7 +656,8 @@ for (const hiddenVisibility of [false, null]) {
     clock.advance(2_999)
     assert.equal(groupStatus(recovery, 'early-timer').attemptedCount, 1)
     clock.advance(1)
-    assert.equal(groupStatus(recovery, 'early-timer').attemptedCount, 2)
+    assert.equal(groupStatus(recovery, 'early-timer').attemptedCount, 1)
+    assert.equal(groupStatus(recovery, 'early-timer').pendingCandidateIndex, 1)
 }
 
 {
@@ -576,4 +794,16 @@ function groupStatus(recovery, key) {
     const status = recovery.getStatus().groups.find(group => group.key === key)
     assert.ok(status, `Missing recovery group: ${key}`)
     return status
+}
+
+function routeProgress(status) {
+    return {
+        state: status.state,
+        candidateIndex: status.candidateIndex,
+        pendingCandidateIndex: status.pendingCandidateIndex,
+        attemptedCount: status.attemptedCount,
+        switchAttempts: status.switchAttempts,
+        retryAt: status.retryAt,
+        timerPending: status.timerPending,
+    }
 }

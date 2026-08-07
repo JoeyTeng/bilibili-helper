@@ -57,10 +57,12 @@ export interface CdnRecoveryGroupStatus {
     readonly generation: number
     readonly candidateCount: number
     readonly candidateIndex: number | null
+    readonly pendingCandidateIndex: number | null
     readonly attemptedCount: number
     readonly routeRevision: number
     readonly state: CdnRecoveryState
     readonly switchAttempts: number
+    readonly routeCommittedAt: number | null
     readonly retryAt: number | null
     readonly timerPending: boolean
 }
@@ -103,7 +105,9 @@ interface GroupRecoveryRuntime {
     readonly candidateCount: number
     state: CdnRecoveryState
     activation: RouteActivation | null
+    awaitingRouteCommit: boolean
     switchAttempts: number
+    routeCommittedAt: number | null
     retryAt: number
     retryAtSet: boolean
     timerRevision: number
@@ -114,6 +118,7 @@ interface GroupRecoveryRuntime {
     latestSampleAt: number | null
     lastProcessedFingerprint: string | null
     lastProcessedRouteRevision: number | null
+    lastProcessedCandidateIndex: number | null
     stableStartAt: number | null
     stableLastAt: number | null
     stableLastCurrentTimeSeconds: number | null
@@ -213,6 +218,7 @@ export function createCdnRecoveryCoordinator(
         group.latestSampleAt = sampledAt
         group.lastProcessedFingerprint = 'unavailable'
         group.lastProcessedRouteRevision = group.activation?.routeRevision ?? null
+        group.lastProcessedCandidateIndex = group.activation?.candidateIndex ?? null
         clearStableWindow(group)
         if (group.state !== 'confirming') return
         cancelConfirmation(group)
@@ -223,16 +229,19 @@ export function createCdnRecoveryCoordinator(
         const fingerprint = sampleFingerprint(signals)
         if (group.latestSampleAt === sampledAt
             && group.lastProcessedFingerprint === fingerprint
-            && group.lastProcessedRouteRevision === group.activation?.routeRevision) return
+            && group.lastProcessedRouteRevision === group.activation?.routeRevision
+            && group.lastProcessedCandidateIndex === group.activation?.candidateIndex) return
 
         group.latestSignals = copySignals(signals)
         group.latestSampleAt = sampledAt
         group.lastProcessedFingerprint = fingerprint
         group.lastProcessedRouteRevision = group.activation?.routeRevision ?? null
+        group.lastProcessedCandidateIndex = group.activation?.candidateIndex ?? null
 
         if (group.state === 'waiting-retry' || group.state === 'exhausted') {
             if (processStableRecovery(group, signals, sampledAt)) return
             if (group.state === 'exhausted') return
+            if (group.awaitingRouteCommit) return
             if (sampledAt < group.retryAt) return
             if (isEligibleLowBuffer(signals, timing)) startConfirmation(group, signals, sampledAt)
             else group.state = 'monitoring'
@@ -344,7 +353,14 @@ export function createCdnRecoveryCoordinator(
         group.lastProcessedRouteRevision = result.activation.routeRevision
         clearStableWindow(group)
         if (result.exhausted) {
+            group.awaitingRouteCommit = false
             group.state = 'exhausted'
+            return
+        }
+
+        group.awaitingRouteCommit = true
+        if (!result.advanced) {
+            group.state = 'waiting-retry'
             return
         }
 
@@ -460,6 +476,7 @@ export function createCdnRecoveryCoordinator(
         }
 
         group.activation = reset.activation
+        group.awaitingRouteCommit = false
         group.switchAttempts = 0
         group.lastProcessedRouteRevision = reset.activation.routeRevision
         clearStableWindow(group)
@@ -478,6 +495,11 @@ export function createCdnRecoveryCoordinator(
 
         for (const routingGroup of routingStatus.groups) {
             const activeActivation = activeActivations.get(routingGroup.groupId) ?? null
+            const pendingCandidateIndex = routingGroup.pendingCandidateIndex
+            const awaitingRouteCommit = typeof pendingCandidateIndex === 'number'
+                && Number.isInteger(pendingCandidateIndex)
+                && pendingCandidateIndex >= 0
+                && pendingCandidateIndex < routingGroup.candidateCount
             const existing = groupsById.get(routingGroup.groupId)
             const reusable = existing
                 && existing.contextEpoch === routingStatus.contextEpoch
@@ -493,10 +515,16 @@ export function createCdnRecoveryCoordinator(
                     routingGroup.candidateCount,
                     routingStatus.enabled,
                     activeActivation,
+                    awaitingRouteCommit,
                 )
 
             if (reusable) {
-                synchronizeGroupActivation(group, routingStatus.enabled, activeActivation)
+                synchronizeGroupActivation(
+                    group,
+                    routingStatus.enabled,
+                    activeActivation,
+                    awaitingRouteCommit,
+                )
             }
             nextGroups.set(group.groupId, group)
         }
@@ -511,6 +539,7 @@ export function createCdnRecoveryCoordinator(
         group: GroupRecoveryRuntime,
         routingEnabled: boolean,
         activeActivation: RouteActivation | null,
+        awaitingRouteCommit: boolean,
     ) {
         if (!routingEnabled) {
             invalidateGraceTimer(group)
@@ -526,15 +555,36 @@ export function createCdnRecoveryCoordinator(
         }
         if (!group.activation) {
             group.activation = activeActivation
-            group.state = 'monitoring'
+            group.awaitingRouteCommit = awaitingRouteCommit
+            group.state = awaitingRouteCommit ? 'waiting-retry' : 'monitoring'
             return
         }
-        if (sameActivation(group.activation, activeActivation)) return
+        const committedPendingRoute = group.awaitingRouteCommit
+            && !awaitingRouteCommit
+            && group.activation.candidateIndex !== activeActivation.candidateIndex
+        group.awaitingRouteCommit = awaitingRouteCommit
+        if (sameActivation(group.activation, activeActivation)) {
+            if (awaitingRouteCommit) group.state = 'waiting-retry'
+            return
+        }
 
         invalidateGraceTimer(group)
         group.activation = activeActivation
+        const observedAt = readNow(now)
+        const synchronizedAt = observedAt ?? 0
+        if (committedPendingRoute && group.switchAttempts > 0) {
+            group.routeCommittedAt = observedAt
+            // The intent deadline is provisional; a late request gets a full post-commit cooldown.
+            group.retryAt = Math.max(
+                group.retryAt,
+                synchronizedAt + switchCooldownMs(group.switchAttempts, timing),
+            )
+            group.retryAtSet = true
+        }
         clearStableWindow(group)
-        group.state = safeNow(now) < group.retryAt ? 'waiting-retry' : 'monitoring'
+        group.state = awaitingRouteCommit || synchronizedAt < group.retryAt
+            ? 'waiting-retry'
+            : 'monitoring'
     }
 
     function getStatus(): CdnRecoveryStatus {
@@ -548,10 +598,12 @@ export function createCdnRecoveryCoordinator(
                 generation: routingGroup.generation,
                 candidateCount: routingGroup.candidateCount,
                 candidateIndex: routingGroup.candidateIndex,
+                pendingCandidateIndex: routingGroup.pendingCandidateIndex,
                 attemptedCount: routingGroup.attemptedCount,
                 routeRevision: routingGroup.routeRevision,
                 state: recovery?.state ?? (routingStatus.enabled ? 'unseen' : 'disabled'),
                 switchAttempts: recovery?.switchAttempts ?? 0,
+                routeCommittedAt: recovery?.routeCommittedAt ?? null,
                 retryAt: recovery?.retryAtSet ? recovery.retryAt : null,
                 timerPending: recovery?.timerHandle !== null && recovery?.timerHandle !== undefined,
             } satisfies CdnRecoveryGroupStatus
@@ -629,6 +681,7 @@ function createGroupRecoveryRuntime(
     candidateCount: number,
     enabled: boolean,
     activation: RouteActivation | null,
+    awaitingRouteCommit: boolean,
 ): GroupRecoveryRuntime {
     return {
         groupId,
@@ -637,9 +690,15 @@ function createGroupRecoveryRuntime(
         contextEpoch,
         generation,
         candidateCount,
-        state: !enabled ? 'disabled' : activation ? 'monitoring' : 'unseen',
+        state: !enabled
+            ? 'disabled'
+            : activation
+                ? awaitingRouteCommit ? 'waiting-retry' : 'monitoring'
+                : 'unseen',
         activation,
+        awaitingRouteCommit,
         switchAttempts: 0,
+        routeCommittedAt: null,
         retryAt: 0,
         retryAtSet: false,
         timerRevision: 0,
@@ -650,6 +709,7 @@ function createGroupRecoveryRuntime(
         latestSampleAt: null,
         lastProcessedFingerprint: null,
         lastProcessedRouteRevision: activation?.routeRevision ?? null,
+        lastProcessedCandidateIndex: activation?.candidateIndex ?? null,
         stableStartAt: null,
         stableLastAt: null,
         stableLastCurrentTimeSeconds: null,
@@ -663,14 +723,17 @@ function disableGroup(group: GroupRecoveryRuntime) {
 
 function resetGroupToUnseen(group: GroupRecoveryRuntime) {
     group.activation = null
+    group.awaitingRouteCommit = false
     group.state = 'unseen'
     group.switchAttempts = 0
+    group.routeCommittedAt = null
     group.retryAt = 0
     group.retryAtSet = false
     group.latestSignals = null
     group.latestSampleAt = null
     group.lastProcessedFingerprint = null
     group.lastProcessedRouteRevision = null
+    group.lastProcessedCandidateIndex = null
     clearStableWindow(group)
 }
 
@@ -780,11 +843,15 @@ function finiteNumber(value: number | null) {
 }
 
 function safeNow(now: () => number) {
+    return readNow(now) ?? 0
+}
+
+function readNow(now: () => number) {
     try {
         const value = now()
-        return Number.isFinite(value) ? value : 0
+        return Number.isFinite(value) && value >= 0 ? value : null
     } catch {
-        return 0
+        return null
     }
 }
 

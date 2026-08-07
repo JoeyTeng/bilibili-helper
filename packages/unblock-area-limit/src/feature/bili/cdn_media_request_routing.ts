@@ -43,6 +43,7 @@ export interface CdnRoutingGroupStatus {
     readonly candidateCount: number
     readonly active: boolean
     readonly candidateIndex: number | null
+    readonly pendingCandidateIndex: number | null
     readonly attemptedCount: number
     readonly routeRevision: number
     readonly exhausted: boolean
@@ -101,6 +102,7 @@ interface GroupRuntime {
     active: boolean
     candidateIndex: number | null
     overrideCandidateIndex: number | null
+    pendingCandidateIndex: number | null
     routeRevision: number
     exhausted: boolean
 }
@@ -195,11 +197,13 @@ export function createCdnMediaRequestRouter(
         if (!group || !group.candidates[match.candidateIndex]) {
             return settledPreparation(originalDecision)
         }
-        const targetIndex = group.overrideCandidateIndex ?? match.candidateIndex
+        const routeCandidateIndex = group.pendingCandidateIndex
+            ?? group.overrideCandidateIndex
+        const targetIndex = routeCandidateIndex ?? match.candidateIndex
         const target = group.candidates[targetIndex]
         if (!target) return settledPreparation(originalDecision)
 
-        const targetUrl = group.overrideCandidateIndex === null ? url : target.url
+        const targetUrl = routeCandidateIndex === null ? url : target.url
         const decision: CdnMediaRouteDecision = {
             url: targetUrl,
             routed: targetUrl !== url,
@@ -226,7 +230,9 @@ export function createCdnMediaRequestRouter(
                 if (!currentMatches || currentMatches.length !== 1
                     || currentMatches[0].groupId !== group.groupId
                     || currentMatches[0].candidateIndex !== match.candidateIndex
-                    || (group.overrideCandidateIndex ?? match.candidateIndex) !== targetIndex) {
+                    || (group.pendingCandidateIndex
+                        ?? group.overrideCandidateIndex
+                        ?? match.candidateIndex) !== targetIndex) {
                     return committedDecision
                 }
 
@@ -251,6 +257,15 @@ export function createCdnMediaRequestRouter(
         const group = validateActivation(activation)
         if (!group) return { accepted: false, advanced: false, exhausted: false }
 
+        if (group.pendingCandidateIndex !== null) {
+            return {
+                accepted: true,
+                advanced: false,
+                exhausted: false,
+                activation: activationFor(group),
+            }
+        }
+
         const nextCandidateIndex = group.fallbackOrder.find(index => !group.attempted.has(index))
         group.routeRevision += 1
         if (nextCandidateIndex === undefined) {
@@ -263,9 +278,7 @@ export function createCdnMediaRequestRouter(
             }
         }
 
-        group.overrideCandidateIndex = nextCandidateIndex
-        group.candidateIndex = nextCandidateIndex
-        group.attempted.add(nextCandidateIndex)
+        group.pendingCandidateIndex = nextCandidateIndex
         group.exhausted = false
         return {
             accepted: true,
@@ -280,6 +293,7 @@ export function createCdnMediaRequestRouter(
     ): CdnStableRecoveryResetResult {
         const group = validateActivation(activation)
         if (!group || group.candidateIndex === null) return { accepted: false }
+        group.pendingCandidateIndex = null
         group.attempted = new Set([group.candidateIndex])
         group.exhausted = false
         group.routeRevision += 1
@@ -295,6 +309,7 @@ export function createCdnMediaRequestRouter(
             candidateCount: group.candidates.length,
             active: group.active,
             candidateIndex: group.candidateIndex,
+            pendingCandidateIndex: group.pendingCandidateIndex,
             attemptedCount: group.attempted.size,
             routeRevision: group.routeRevision,
             exhausted: group.exhausted,
@@ -392,7 +407,12 @@ function observeCommittedRoute(
         group.active = true
         group.candidateIndex = matchedCandidateIndex
         group.overrideCandidateIndex = null
+        group.pendingCandidateIndex = null
         group.attempted.add(matchedCandidateIndex)
+        group.exhausted = false
+    } else if (group.pendingCandidateIndex !== null) {
+        group.overrideCandidateIndex = targetCandidateIndex
+        group.pendingCandidateIndex = null
         group.exhausted = false
     } else if (group.overrideCandidateIndex === null
         && group.candidateIndex !== matchedCandidateIndex) {
@@ -456,6 +476,7 @@ function createGroupRuntime(snapshot: GroupSnapshot, groupId: number): GroupRunt
         active: false,
         candidateIndex: null,
         overrideCandidateIndex: null,
+        pendingCandidateIndex: null,
         routeRevision: 0,
         exhausted: false,
     }
@@ -491,6 +512,7 @@ function resetGroupRuntime(group: GroupRuntime) {
     group.active = false
     group.candidateIndex = null
     group.overrideCandidateIndex = null
+    group.pendingCandidateIndex = null
     group.routeRevision += 1
     group.exhausted = false
 }

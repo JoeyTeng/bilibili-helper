@@ -57,6 +57,7 @@ const processWatchdogSlackMs = 20_000
 const browserRequestTimeoutMs = scenarioTimeoutMs + 5_000
 const beforeGraceDelayMs = 2_200
 const minimumMeasuredGraceMs = 2_900
+const minimumCooldownMs = 15_000
 const cooldownLowWindowMs = 3_400
 const rangeHeader = 'bytes=0-31'
 const maxConsoleInspections = 100
@@ -357,7 +358,7 @@ async function exerciseTransport({ browser, transport, userscript, timeoutMs }) 
     let page
     let result
     let failure
-    let initialRetryAt
+    let routeIntentRetryAt
     let measuredGraceMs
     let publishedContextEpoch
     let requestBaseline
@@ -470,7 +471,12 @@ async function exerciseTransport({ browser, transport, userscript, timeoutMs }) 
         await runStage(`${transport}-before-grace`, deadline, beforeGraceDelayMs + 500, () => (
             page.waitForTimeout(beforeGraceDelayMs)
         ))
-        await assertBeforeGrace(page, observations, transport, deadline)
+        const confirmingRouteRevision = await assertBeforeGrace(
+            page,
+            observations,
+            transport,
+            deadline,
+        )
         const waitingObservedAtMs = await waitForGroupState(
             page,
             transport,
@@ -485,31 +491,39 @@ async function exerciseTransport({ browser, transport, userscript, timeoutMs }) 
             confirmingObservedAtMs,
             waitingObservedAtMs,
             publishedContextEpoch,
+            confirmingRouteRevision,
             deadline,
         )
         measuredGraceMs = afterGrace.measuredGraceMs
-        initialRetryAt = afterGrace.retryAt
+        routeIntentRetryAt = afterGrace.retryAt
 
         await startMediaRequest(page, transport, 'future', deadline)
         await waitForMediaObservation(observations, 'future', deadline)
         await waitForMediaSettlement(page, transport, 'future', deadline)
         assertRoutedObservation(observations, transport, 'future')
-        await assertFutureState(page, transport, deadline)
+        const futureState = await assertFutureState(
+            page,
+            transport,
+            afterGrace.routeRevision,
+            routeIntentRetryAt,
+            deadline,
+        )
+        const committedRetryAt = futureState.retryAt
 
         await beginHealthyPlayback(page, transport, deadline)
-        await waitForStableReset(page, transport, initialRetryAt, deadline)
-        await beginLowPlayback(page, transport, initialRetryAt, deadline)
+        await waitForStableReset(page, transport, committedRetryAt, deadline)
+        await beginLowPlayback(page, transport, committedRetryAt, deadline)
         await runStage(`${transport}-cooldown-window`, deadline, cooldownLowWindowMs + 500, () => (
             page.waitForTimeout(cooldownLowWindowMs)
         ))
-        await assertCooldownState(page, transport, initialRetryAt, deadline)
+        await assertCooldownState(page, transport, committedRetryAt, deadline)
 
         await startMediaRequest(page, transport, 'cooldown', deadline)
         await waitForMediaObservation(observations, 'cooldown', deadline)
         await waitForMediaSettlement(page, transport, 'cooldown', deadline)
         assertRoutedObservation(observations, transport, 'cooldown')
         await assertRoutedMediaCompleted(page, transport, 'cooldown', deadline)
-        await assertCooldownState(page, transport, initialRetryAt, deadline)
+        await assertCooldownState(page, transport, committedRetryAt, deadline)
 
         await assertCurrentRequestHeld(page, observations, transport, deadline)
         await releaseHeldRoutes(heldRoutes)
@@ -1226,7 +1240,8 @@ async function assertBeforeGrace(page, observations, transport, deadline) {
     ])
     const group = status.groups[0]
     if (group.state !== 'confirming' || group.candidateIndex !== 0
-        || group.attemptedCount !== 1 || group.switchAttempts !== 0
+        || group.pendingCandidateIndex !== null || group.attemptedCount !== 1
+        || group.switchAttempts !== 0
         || !group.timerPending) {
         throw new HarnessFailure(`${transport}-before-grace`, 'advanced-before-confirmation-grace')
     }
@@ -1238,6 +1253,7 @@ async function assertBeforeGrace(page, observations, transport, deadline) {
         throw new HarnessFailure(`${transport}-before-grace`, 'current-request-interfered')
     }
     assertTransportObjectState(media, transport, false, `${transport}-before-grace`)
+    return group.routeRevision
 }
 
 async function assertAfterGrace(
@@ -1247,6 +1263,7 @@ async function assertAfterGrace(
     confirmingObservedAtMs,
     waitingObservedAtMs,
     publishedContextEpoch,
+    confirmingRouteRevision,
     deadline,
 ) {
     const [status, media] = await Promise.all([
@@ -1255,10 +1272,12 @@ async function assertAfterGrace(
     ])
     const group = status.groups[0]
     if (status.contextEpoch !== publishedContextEpoch + 1
-        || group.state !== 'waiting-retry' || group.candidateIndex !== 1
-        || group.attemptedCount !== 2 || group.switchAttempts !== 1
+        || group.state !== 'waiting-retry' || group.candidateIndex !== 0
+        || group.pendingCandidateIndex !== 1 || group.attemptedCount !== 1
+        || group.routeRevision !== confirmingRouteRevision + 1
+        || group.switchAttempts !== 1
         || group.timerPending || typeof group.retryAt !== 'number') {
-        throw new HarnessFailure(`${transport}-after-grace`, 'future-route-not-advanced')
+        throw new HarnessFailure(`${transport}-after-grace`, 'future-route-intent-not-installed')
     }
     if (media.settled || media.outcome !== 'pending' || media.abortCount !== 0
         || countPhase(observations, 'initial') !== 1
@@ -1278,7 +1297,11 @@ async function assertAfterGrace(
         || remainingCooldownMs < 14_800 || remainingCooldownMs > 15_100) {
         throw new HarnessFailure(`${transport}-after-grace`, 'initial-cooldown-mismatch')
     }
-    return { measuredGraceMs, retryAt: group.retryAt }
+    return {
+        measuredGraceMs,
+        retryAt: group.retryAt,
+        routeRevision: group.routeRevision,
+    }
 }
 
 function assertRoutedObservation(observations, transport, phase) {
@@ -1293,7 +1316,13 @@ function assertRoutedObservation(observations, transport, phase) {
     }
 }
 
-async function assertFutureState(page, transport, deadline) {
+async function assertFutureState(
+    page,
+    transport,
+    expectedRouteRevision,
+    provisionalRetryAt,
+    deadline,
+) {
     const [status, future, initial] = await Promise.all([
         readRecoveryStatus(page, transport, deadline),
         readMediaState(page, transport, 'future', deadline),
@@ -1304,10 +1333,15 @@ async function assertFutureState(page, transport, deadline) {
         || future.loadEndCount !== 1 || future.abortCount !== 0
         || initial.settled || initial.outcome !== 'pending'
         || group.state !== 'waiting-retry' || group.candidateIndex !== 1
-        || group.switchAttempts !== 1) {
+        || group.pendingCandidateIndex !== null || group.attemptedCount !== 2
+        || group.routeRevision !== expectedRouteRevision
+        || group.switchAttempts !== 1
+        || typeof group.retryAt !== 'number' || group.retryAt < provisionalRetryAt
+        || group.retryAt - future.startedAtEpochMs < minimumCooldownMs) {
         throw new HarnessFailure(`${transport}-future-state`, 'alternate-delivery-or-current-hold-failed')
     }
     assertTransportObjectState(future, transport, true, `${transport}-future-state`)
+    return { retryAt: group.retryAt }
 }
 
 async function assertRoutedMediaCompleted(page, transport, phase, deadline) {
@@ -1349,6 +1383,7 @@ async function waitForStableReset(page, transport, expectedRetryAt, deadline) {
         const group = status?.groups?.[0]
         return group?.state === 'waiting-retry'
             && group.candidateIndex === 1
+            && group.pendingCandidateIndex === null
             && group.attemptedCount === 1
             && group.switchAttempts === 0
             && group.retryAt === retryAt
@@ -1387,7 +1422,8 @@ async function assertCooldownState(page, transport, expectedRetryAt, deadline) {
     const status = await readRecoveryStatus(page, transport, deadline)
     const group = status.groups[0]
     if (group.state !== 'waiting-retry' || group.candidateIndex !== 1
-        || group.attemptedCount !== 1 || group.switchAttempts !== 0
+        || group.pendingCandidateIndex !== null || group.attemptedCount !== 1
+        || group.switchAttempts !== 0
         || group.retryAt !== expectedRetryAt || group.retryAt <= Date.now()
         || group.timerPending) {
         throw new HarnessFailure(`${transport}-cooldown`, 'ping-pong-or-cooldown-shortened')

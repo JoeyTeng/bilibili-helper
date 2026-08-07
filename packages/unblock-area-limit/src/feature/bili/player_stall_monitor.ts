@@ -26,6 +26,7 @@ export interface PlayerStallMonitorDependencies {
 export interface PlayerStallMonitor {
     start(): void
     stop(): void
+    synchronizeContext(): void
     wake(): void
     dispose(): void
 }
@@ -127,6 +128,11 @@ export function createPlayerStallMonitor(
             processingWake = false
             deferredWake = false
         }
+    }
+
+    function synchronizeContext() {
+        if (!running || disposed) return
+        synchronizeSelectedVideo()
     }
 
     function runWakeCycle() {
@@ -258,26 +264,30 @@ export function createPlayerStallMonitor(
     }
 
     function sampleSelectedVideo() {
-        const video = selectVideo(queryVideos())
+        const video = synchronizeSelectedVideo()
         if (!video) {
             submitSample(null)
             return
         }
 
+        const signals = readPlaybackSignals(documentValue, video)
+        submitSample(signals)
+    }
+
+    function synchronizeSelectedVideo() {
+        const video = selectVideo(queryVideos())
+        if (!video) return null
         if (selectedVideo === null) {
             selectedVideo = video
         } else if (selectedVideo !== video) {
             try {
                 dependencies.beginContext()
             } catch {
-                submitSample(null)
-                return
+                return null
             }
             selectedVideo = video
         }
-
-        const signals = readPlaybackSignals(documentValue, video)
-        submitSample(signals)
+        return video
     }
 
     function submitSample(signals: PlaybackSignals | null) {
@@ -298,7 +308,7 @@ export function createPlayerStallMonitor(
         }
     }
 
-    return { start, stop, wake, dispose }
+    return { start, stop, synchronizeContext, wake, dispose }
 }
 
 function selectVideo(videos: readonly HTMLVideoElement[] | null) {

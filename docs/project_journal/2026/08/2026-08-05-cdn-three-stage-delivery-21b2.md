@@ -131,22 +131,53 @@ superseded_by:
   `visible=false/null` 跨窗不变，以及随后可见连续推进仍按契约重置。该修复进入新的
   签名 head；合并门禁仍以该 head 的完整测试、secret admission 与整段 fresh-context
   review 结果为准。
+- 签名 head `ab829be` 的整段 fresh-context review 提出 1 项 P1：stall 确认时过早把
+  尚未发出的 alternate 写入 `candidateIndex` / attempted，可能在没有 future GET 时跨
+  cooldown 跳过多个候选；若原请求先自行恢复，还会把未使用 alternate 当成成功项。
+  修复把 committed candidate、persistent override 与 pending intent 分离；只有 Fetch
+  predecessor 接受或 native XHR `open()` 成功后的 commit 才消费候选。pending 未 commit
+  时保持 `waiting-retry` 且不再 advance，稳定恢复则取消 pending、以最后真实 candidate
+  重置。最终签名 head 仍按完整测试、secret admission 与新的整段 fresh-context review
+  重新验收。
+- 对上述修复的 live capability 聚焦审计继续拦下 5 个 false-PASS 边界：浏览器请求窗口
+  不能证明哪个请求导致 commit、cooldown 锚到了最后 pending 样本、终点可能使用陈旧
+  observer snapshot、健康样本可跨隐藏/暂停间隔，以及 stable reset 可改写 deadline。
+  修复后的页面 hook 只在 Fetch predecessor 返回或 native XHR `open()` 成功后记录单调
+  acceptance；coordinator 以同一次同步时钟公开不含 URL 的 `routeCommittedAt`。gate 要求
+  acceptance 在冻结 intent 序列后且不晚于 commit；committed status 读取前的 hook
+  fence 必须已包含该 acceptance，并精确验证
+  `retryAt >= routeCommittedAt + 15,000 ms`；终点持续检查 page-hook route，稳定窗口限制
+  相邻样本不超过 `700 ms`，reset 只能使用前一采样已证明的窗口且必须原样保留 commit
+  时间和 deadline。无法建立因果关系的 XHR delayed-send 等情况降级为 `INCONCLUSIVE`，
+  不再误报 `FAIL` 或 `PASS`。
+- `routeCommittedAt` 接入审计还发现 accepted-request `commit()` 之前的 monitor wake 可能
+  恰好完成 `5 s` stable window，先取消已被 predecessor 接受的 pending intent。browser
+  composition 现在把 video identity synchronization 与 playback sample 拆开：eligible
+  prepare 与 native acceptance 后只同步 video/context，route commit 线性化并写入 commit
+  时间后才执行普通 wake。组合回归把 stable window 固定在 `4,999 ms`，于第 `5,000 ms`
+  接受 alternate，并断言 candidate 被真实提交、deadline 从该 commit 补满 `15,000 ms`。
+- capability hook 本身也保持 fail-open：先让 predecessor 返回/抛出原结果，再 best-effort
+  解码 method/URL 与记录 acceptance；观测时钟或 history 写入失败只设置 sticky
+  evidence-incomplete，不改变 Fetch promise/throw 或 XHR native outcome。classifier 同时严格
+  校验 accepted sequence、逐 candidate transport count 与 schema；任何缺失、畸形或计数不一致
+  都只能 `INCONCLUSIVE`，不能因静默丢记录而在 cooldown 终点假通过。
 - `pnpm run check` 在最终 findings 修复树上完整通过；聚合 gate 新增
   jQuery-final-delivery、empty-final-delivery 与 live cooldown assessment 回归，且 build
   成功。
 - 受控 Chrome `151.0.7922.108` recovery E2E 在最终修复树重新通过：Fetch grace
-  `3028 ms`、XHR grace `2998 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
+  `3024 ms`、XHR grace `3012 ms`，两者均保持 current request；grace 后只安装 pending
+  intent，future predecessor 接受后才 commit alternate 并从真实 commit 时刻补满 cooldown，
   cooldown、predecessor/player identity、cleanup 与隐私门禁均通过。
 - 固定 CDN Switcher `0.1.4` / SHA-256
   `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4` 重新通过两种
   load order；Chrome `151.0.7922.108` 中 Fetch/XHR 均为
   `primary -> primary -> alternate -> alternate`。
-- 隐藏页 stable-reset 修正树的真实 Bilibili live E2E 使用公开 BVID `BV1xx411c7mD`
+- committed/pending route 分离后的真实 Bilibili live E2E 使用公开 BVID `BV1xx411c7mD`
   完整通过：2 个 candidate/probed host 均 healthy，`completed=4` / `total=4`，cache 以
-  `source="cache"` / `hostCount=2` 无网络复用。此前默认 BVID 的有界重试曾出现
-  `cdn-cache-coverage: not-exercised`；临时诊断显示首阶段 `completed=2`、2 个 host 均
-  healthy，但 2 个 follow-up 未完成。代码与受控 fixture 未变，更换公开稿件后同一
-  gate 完整通过，因此按外部请求瞬态记录，不归类为代码失败。Stage 3 capability 仍严格
+  `source="cache"` / `hostCount=2` 无网络复用。最终候选树的首次 live 运行出现一次
+  `cdn-cache-coverage: not-exercised`，同一代码、BVID 与命令在新的浏览器 context 立即
+  重试即得到上述完整 `4/4` 与 cache reuse；结合受控 fixture 未变，按外部请求瞬态记录，
+  不归类为代码失败。Stage 3 capability 仍严格
   返回 `INCONCLUSIVE` / `exit 3`，原因是 `no-unique-exact-group`，没有降级为 generic
   PASS。
 - 最终合并门禁把 `origin/dev@e7b8a988` 到新签名 head 的整个真实 PR merge-base 范围

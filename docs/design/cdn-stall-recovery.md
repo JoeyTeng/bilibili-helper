@@ -14,13 +14,20 @@ The recovery path has four hard boundaries:
 2. It changes only a future Fetch/XHR `GET`; it never aborts, reloads, reopens, or replays an
    in-flight request.
 3. Exact signed URLs remain in memory only. Storage, normal logs, diagnostics, and status objects
-   contain only structural group identifiers, host-only summaries, and counters.
+   contain only structural group identifiers, host-only summaries, counters, and timing metadata.
 4. Missing or ambiguous evidence is fail-open. Native media loading that bypasses page Fetch/XHR
    is reported as unsupported instead of being presented as a successful recovery.
 
 `safe`, `original`, and `manual` retain their existing meanings and never perform Stage 3
 automatic routing. The experimental static candidate pool remains disabled by default and is not
 part of this delivery.
+
+`routeCommittedAt` is the coordinator's observation time for the most recent promotion of a
+recovery-generated pending route in the current context. It is not the first activation time or a
+timestamp for every exact request. Stable recovery preserves it even though route revision and
+attempt counters reset; context, generation, registry, or enabled-state reset clears it. An
+unavailable, non-finite, or negative injected clock also yields `null`, so capability evidence is
+inconclusive instead of fabricating an epoch timestamp.
 
 ## Reusable module boundary
 
@@ -40,8 +47,9 @@ standard document + video signals
   -> advance future-route intent for active exact groups
 ```
 
-- `cdn_media_request_routing.ts` owns exact groups, reverse lookup, group generations, attempted
-  candidates, and future-route overrides. It does not read the DOM or storage.
+- `cdn_media_request_routing.ts` owns exact groups, reverse lookup, group generations, committed
+  attempts, persistent overrides, and pending future-route intent. It does not read the DOM or
+  storage.
 - `cdn_recovery.ts` owns the deterministic state machine and injected clock/signal interfaces. It
   does not know BALH proxy endpoints.
 - `player_stall_monitor.ts` is the browser adapter for standard `document` and
@@ -163,14 +171,17 @@ ambiguity return the original request unchanged.
 
 The fallback view is a stable partition of the delivered candidates: ordinary candidates first,
 then MCDN/PCDN-risk candidates, while order within each partition is preserved. If every candidate
-is risky, original order is preserved. The current observed candidate counts as attempted.
+is risky, original order is preserved. A candidate counts as attempted only after the corresponding
+Fetch call or native XHR `open()` crosses its commit boundary.
 
 ### Activation and route intent
 
 A group changes from `unseen` to active only when a page Fetch/XHR `GET` uniquely matches one of
-its exact candidates. A confirmed stall is broadcast only to active groups in the current context.
-Each eligible group independently advances its future-route override to its next untried exact
-candidate. The request that supplied the evidence is already in flight and remains untouched.
+its exact candidates and commits. A confirmed stall is broadcast only to active groups in the
+current context. Each eligible group independently installs a pending future-route intent for its
+next untried exact candidate. The request that supplied the evidence is already in flight and
+remains untouched. Until a later exact request commits that intent, the committed candidate and
+attempted set do not change, and another cooldown/grace cycle cannot skip to a later candidate.
 
 An immutable activation binds:
 
@@ -185,16 +196,20 @@ interface RouteActivation {
 ```
 
 Every advance revalidates all five fields. Old generation/revision activations and duplicate
-completion signals are no-ops. Exhaustion preserves the last exact candidate and never returns an
-empty or fabricated URL.
+completion signals are no-ops. `candidateIndex` always identifies the last committed request;
+`pendingCandidateIndex` is a structural status field for the uncommitted next-request intent and
+never contains a URL. Exhaustion is possible only after every candidate was actually committed,
+preserves the last exact candidate, and never returns an empty or fabricated URL.
 
 Request observation is transactional. `prepareExactUrl()` computes an exact decision, a
 side-effect-free eligibility bit, and an opaque token without changing active/attempted state.
 Unrelated GETs return before any video query, media sampling, or monitor timer churn. `commit()`
 revalidates the context, generation,
-group, route revision, exact match, and target before observing the request; `discard()` leaves
-routing state untouched. Fetch commits only after its predecessor accepts the call. XHR commits
-only after the single native `open()` returns successfully. This prevents constructor errors,
+group, route revision, exact match, and target before observing the request. Only that commit
+promotes a pending candidate into the persistent override/current candidate and attempted set;
+`discard()` leaves the pending intent available for a later request. Fetch commits only after its
+predecessor accepts the call. XHR commits only after the single native `open()` returns
+successfully. This prevents constructor errors,
 synchronous predecessor errors, native/WebIDL failures, and reentrant outer-open rollback from
 creating a request that never existed or undoing a successful inner request.
 
@@ -202,10 +217,12 @@ The native acceptance boundary is itself reentrant: a Fetch predecessor or XHR W
 can synchronously replace the active video after `prepare()` and before `commit()`. The browser
 adapter first uses the router's authoritative reverse index to reject unrelated requests without
 DOM work, then synchronizes video identity for an eligible exact request and again immediately after
-native acceptance. If that synchronization advances `contextEpoch`, the old token stays stale and BALH
-re-observes only the exact URL that was actually accepted, and only when the current router would
-leave that URL unchanged. It never sends a second request or applies a newly computed override to
-an already accepted call.
+native acceptance. These two identity synchronizations never submit a playback sample: once the
+predecessor has accepted a pending alternate, a stable-window sample must not cancel that intent
+before route commit linearizes. If synchronization advances `contextEpoch`, the old token stays
+stale and BALH re-observes only the exact URL that was actually accepted, and only when the current
+router would leave that URL unchanged. The normal monitor wake runs after commit. It never sends a
+second request or applies a newly computed override to an already accepted call.
 
 ## Playback signals
 
@@ -254,9 +271,10 @@ active audio/video groups, but their candidates, attempts, cooldowns, and timers
 | `monitoring` | eligible low-buffer sample at or after `retryAt` | `confirming`; start a grace token |
 | `confirming` | sample becomes hidden, paused, seeking, ended, near-end, healthy, or unknown | `monitoring`; invalidate the grace token |
 | `confirming` | playback advances at least `0.25 s` while buffer stays low | remain `confirming`; restart the full grace interval |
-| `confirming` | current grace expires, sample is still eligible/low, and progress stayed below `0.25 s` | advance future route and enter `waiting-retry`; if no candidate remains, enter `exhausted` |
-| `waiting-retry` | `now >= retryAt` | low buffer starts a fresh `confirming`; otherwise `monitoring` |
-| `waiting-retry` / `exhausted` | page is visible, buffer is at least `3 s`, and non-seeking playback advances continuously for `5 s` | reset attempts to the current candidate and reset backoff; do not shorten an existing cooldown |
+| `confirming` | current grace expires, sample is still eligible/low, and progress stayed below `0.25 s` | install one pending future route and enter `waiting-retry`; if every candidate was committed, enter `exhausted` |
+| `waiting-retry` | no later exact request has committed the pending route | remain `waiting-retry`; do not consume or skip another candidate, even after `retryAt` |
+| `waiting-retry` | pending route committed and `now >= retryAt` | low buffer starts a fresh `confirming`; otherwise `monitoring` |
+| `waiting-retry` / `exhausted` | page is visible, buffer is at least `3 s`, and non-seeking playback advances continuously for `5 s` | cancel any uncommitted pending route, reset attempts/backoff to the last committed candidate, and do not shorten an existing cooldown |
 | any | context/generation change, active video replacement, leaving `auto`, or explicit disable | invalidate timers/activations and return to `disabled` or `unseen` |
 
 An eligible low-buffer sample is exactly:
@@ -285,14 +303,25 @@ Default timing constants are:
 | stable playback reset window | `5 s` |
 | active sampling interval | `500 ms` |
 
-After a switch:
+Installing a distinct pending route intent establishes a provisional deadline:
 
 ```text
-retryAt = switchedAt + max(15_000, min(5_000 * 2^(attempt - 1), 60_000))
+retryAt = intentAt + max(15_000, min(5_000 * 2^(attempt - 1), 60_000))
 ```
+
+If the future request commits later, the actual switch extends (but never shortens) that deadline:
+
+```text
+retryAt = max(retryAt, committedAt + max(15_000, min(5_000 * 2^(attempt - 1), 60_000)))
+```
+
+Promotion does not increment the attempt again. This preserves a full post-commit cooldown even
+when no future media request appeared during the provisional interval.
 
 Hidden, paused, seeking, and unknown samples cancel grace but do not erase failure history.
 Backoff and the attempted set reset only after stable recovery or a new media context/generation.
+Stable recovery before the next request cancels the pending intent without marking it attempted;
+stable recovery after a committed alternate retains that committed override.
 
 Every timer captures `{contextEpoch, generation, groupId, timerRevision}`. Replacing groups,
 resetting context, cancelling grace, or scheduling a newer timer increments the relevant revision.
@@ -368,6 +397,9 @@ successful inner `open()`, and only the inner URL may become active/attempted.
 ### Deterministic tests
 
 - state boundaries at `grace - 1`, grace, cooldown, every backoff step, cap, and stable reset;
+- pending intent without candidate consumption, a next request delayed beyond cooldown without
+  skipping, stable recovery before commit cancelling the pending intent, and exhaustion only after
+  every alternate request commits;
 - low buffer with real progress; hidden, paused, seeking, ended, near-end, unknown buffer, and
   low -> healthy -> low transitions; hidden/unknown visibility exceeding the stable window in both
   `waiting-retry` and `exhausted` without clearing attempts, followed by a visible stable reset;
@@ -406,21 +438,26 @@ successful inner `open()`, and only the inner URL may become active/attempted.
    starting from source-host candidates and proving that only the post-Switcher exact groups can
    activate recovery.
 2. The live Bilibili smoke continues to prove actual playback plus Stage 2 probe/cache behavior.
-   A Stage 3 capability mode records browser `resourceType` and page-hook counters without logging
-   signed URLs.
+   A Stage 3 capability mode records browser `resourceType` plus a bounded page-side sequence of
+   successful predecessor acceptances without logging signed URLs. Fetch is recorded only after
+   its predecessor returns; XHR is recorded only after native `open()` succeeds.
 
 Stage 3 capability has four explicit terminal results:
 
 - `PASS`: an interceptable future request uses the exact same-group alternate, current request is
-  not aborted/reloaded, playback resumes, and cooldown holds; the initial cooldown proof brackets
-  the switch between the last unswitched and first switched samples instead of adding a fresh full
-  cooldown after detection. The live proof allows at most `2,700 ms` of observation uncertainty:
-  deterministic state-machine tests prove the exact `15,000 ms` minimum, while the live gate can
-  only reject shortening that exceeds its bounded observation interval;
+  not aborted/reloaded, playback resumes, and cooldown holds. The page acceptance must follow the
+  frozen pending-intent sequence, be present in a page-hook fence captured before the committed
+  status read, and precede the coordinator's privacy-safe `routeCommittedAt`; the
+  deadline must satisfy `retryAt >= routeCommittedAt + 15,000 ms`. Later accepted calls remain
+  checked through the terminal sample so a stale browser-observer snapshot cannot hide a route
+  change immediately before the deadline. Stable recovery requires samples no more than `700 ms`
+  apart, must already be proved before a reset is observed, and may change neither `retryAt` nor
+  `routeCommittedAt`;
 - `FAIL`: transport is interceptable but a required invariant fails;
 - `UNSUPPORTED`: native media loading bypasses page Fetch/XHR;
-- `INCONCLUSIVE`: no unique request/group, no alternate, or bounded fault injection cannot produce
-  a valid low-buffer window.
+- `INCONCLUSIVE`: no unique request/group, no alternate, the predecessor acceptance cannot be
+  causally bound to the commit, or bounded fault injection cannot produce a valid low-buffer
+  window.
 
 `UNSUPPORTED` and `INCONCLUSIVE` are non-success results for the Stage 3-specific capability gate
 and must never fall through to a generic `PASS`. They do not replace UK-local manual acceptance.

@@ -470,8 +470,28 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(recoveryTimers.size, 1)
     now = 3_000
     ;[...recoveryTimers.values()][0]()
+    const routeIntentStatus = recovery.getStatus()
+    assert.deepEqual(routeIntentStatus.groups[0], {
+        groupId: 1,
+        key: 'ordering-new-final',
+        kind: 'dash-video',
+        generation: 1,
+        candidateCount: 2,
+        candidateIndex: 0,
+        pendingCandidateIndex: 1,
+        attemptedCount: 1,
+        routeRevision: 1,
+        state: 'waiting-retry',
+        switchAttempts: 1,
+        routeCommittedAt: null,
+        retryAt: 18_000,
+        timerPending: false,
+    })
+    assert.equal(recoveryTimers.size, 0)
     now = 18_000
     recovery.samplePlayback(stalledPlayback)
+    assert.deepEqual(recovery.getStatus(), routeIntentStatus)
+    assert.equal(recoveryTimers.size, 0)
     const overriddenRoute = recovery.routeExactUrl(newFinalUrl)
     assert.equal(overriddenRoute.routed, true)
     assert.equal(overriddenRoute.url, newFinalAlternateUrl)
@@ -485,12 +505,14 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
         generation: 1,
         candidateCount: 2,
         candidateIndex: 1,
+        pendingCandidateIndex: null,
         attemptedCount: 2,
         routeRevision: 1,
-        state: 'confirming',
+        state: 'waiting-retry',
         switchAttempts: 1,
-        retryAt: 18_000,
-        timerPending: true,
+        routeCommittedAt: 18_000,
+        retryAt: 33_000,
+        timerPending: false,
     })
     const publicationsBeforeStaleResponse = publications.length
     const schedulesBeforeStaleResponse = scheduled.length

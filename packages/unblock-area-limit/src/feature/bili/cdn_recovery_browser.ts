@@ -62,6 +62,14 @@ function wakeDefaultMonitor() {
     }
 }
 
+function synchronizeDefaultMonitorContext() {
+    try {
+        defaultMonitor?.synchronizeContext()
+    } catch {
+        // Context synchronization is optional and must not affect native acceptance.
+    }
+}
+
 /** Publish the final delivered candidate groups and wake the browser adapter. */
 export function publishCdnRecoveryGroups(
     groups: readonly CdnCandidateGroup[],
@@ -106,9 +114,9 @@ export function prepareCdnRecoveryRequestUrl(
     eligibility.discard()
 
     // Synchronize a replaced player before this request can become the first
-    // activation in its new playback context. Re-prepare after the wake so a
+    // activation in its new playback context. Re-prepare after synchronization so a
     // cleared or newly installed override cannot leak across that boundary.
-    wakeDefaultMonitor()
+    synchronizeDefaultMonitorContext()
     let prepared: PreparedCdnMediaRoute
     try {
         prepared = recoveryCoordinator.prepareExactUrl(url, method)
@@ -127,10 +135,10 @@ export function prepareCdnRecoveryRequestUrl(
             state = 'committed'
             try {
                 // Native Fetch/XHR acceptance can synchronously run page code.
-                // Observe a replaced player before committing the request into
-                // recovery state, then re-observe the URL that was actually
-                // accepted if the original prepared epoch became stale.
-                wakeDefaultMonitor()
+                // Linearize player identity before route commit without sampling
+                // playback: a stable-window sample here could cancel the pending
+                // route that the predecessor has already accepted.
+                synchronizeDefaultMonitorContext()
                 const acceptedDecision = prepared.decision
                 let observation = prepared.commit()
                 if (!observation.activation) {

@@ -20,6 +20,9 @@ const stage3PollIntervalMs = 200
 const stage3StatusSampleTimeoutMs = 2_000
 const stage3SwitchObservationSlackMs = 500
 const stage3MinimumCooldownMs = 15_000
+const stage3StableBufferSeconds = 3
+const stage3StablePlaybackResetMs = 5_000
+const stage3StableObservationMaxGapMs = stage3PollIntervalMs + stage3SwitchObservationSlackMs
 const stage3HookSymbol = 'balh.stage3.live-capability'
 const stage3MaxBrowserRequests = 10_000
 const stage3MaxHeldRequests = 32
@@ -44,18 +47,24 @@ class HarnessFailure extends Error {
     }
 }
 
-const stage3CapabilityRequested = process.argv.slice(2).includes('--stage3-capability')
+const isDirectRun = process.argv[1]
+    ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+    : false
+const stage3CapabilityRequested = isDirectRun
+    && process.argv.slice(2).includes('--stage3-capability')
 
-run().catch(error => {
-    const stage = error instanceof HarnessFailure ? error.stage : 'unexpected'
-    const reason = error instanceof HarnessFailure ? error.reason : 'unexpected-error'
-    if (stage3CapabilityRequested) {
-        console.error(`[cdn-live-e2e] stage3Capability=FAIL reason=${stage}-${reason}`)
-    } else {
-        console.error(`[cdn-live-e2e] FAIL stage=${stage} reason=${reason}`)
-    }
-    process.exitCode = 1
-})
+if (isDirectRun) {
+    run().catch(error => {
+        const stage = error instanceof HarnessFailure ? error.stage : 'unexpected'
+        const reason = error instanceof HarnessFailure ? error.reason : 'unexpected-error'
+        if (stage3CapabilityRequested) {
+            console.error(`[cdn-live-e2e] stage3Capability=FAIL reason=${stage}-${reason}`)
+        } else {
+            console.error(`[cdn-live-e2e] FAIL stage=${stage} reason=${reason}`)
+        }
+        process.exitCode = 1
+    })
+}
 
 async function run() {
     const options = parseArgs(process.argv.slice(2))
@@ -297,7 +306,7 @@ function createStage3CapabilityHookScript() {
     return `;(${installStage3CapabilityHooks.toString()})(${JSON.stringify(stage3HookSymbol)}, ${stage3MaxBrowserRequests});`
 }
 
-function installStage3CapabilityHooks(symbolName, maxHistory) {
+export function installStage3CapabilityHooks(symbolName, maxHistory) {
     const history = []
     const documentId = (() => {
         try {
@@ -310,30 +319,42 @@ function installStage3CapabilityHooks(symbolName, maxHistory) {
     let exactIndex = new Map()
     let fetchInstalled = false
     let xhrInstalled = false
+    let acceptedSequence = 0
+    let observationFailed = false
 
-    const record = (transport, method, url) => {
+    const recordAccepted = (transport, method, url) => {
         if (typeof method !== 'string' || method.toUpperCase() !== 'GET' || typeof url !== 'string') return
         if (history.length >= maxHistory) {
             overflowed = true
             history.shift()
         }
-        history.push({ transport, url })
+        history.push({
+            transport,
+            url,
+            sequence: ++acceptedSequence,
+            acceptedAt: Date.now(),
+        })
     }
 
     try {
         const predecessorFetch = window.fetch
         if (typeof predecessorFetch === 'function') {
             window.fetch = function (input, init) {
-                const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
-                const url = typeof input === 'string'
-                    ? input
-                    : input instanceof URL
-                        ? input.href
-                        : input instanceof Request
-                            ? input.url
-                            : null
-                record('fetch', method, url)
-                return predecessorFetch.apply(this, arguments)
+                const result = predecessorFetch.apply(this, arguments)
+                try {
+                    const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+                    const url = typeof input === 'string'
+                        ? input
+                        : input instanceof URL
+                            ? input.href
+                            : input instanceof Request
+                                ? input.url
+                                : null
+                    recordAccepted('fetch', method, url)
+                } catch {
+                    observationFailed = true
+                }
+                return result
             }
             fetchInstalled = true
         }
@@ -351,8 +372,13 @@ function installStage3CapabilityHooks(symbolName, maxHistory) {
                 enumerable: descriptor?.enumerable ?? false,
                 writable: descriptor?.writable ?? true,
                 value: function (method, url) {
-                    record('xhr', method, typeof url === 'string' ? url : null)
-                    return predecessorOpen.apply(this, arguments)
+                    const result = predecessorOpen.apply(this, arguments)
+                    try {
+                        recordAccepted('xhr', method, typeof url === 'string' ? url : null)
+                    } catch {
+                        observationFailed = true
+                    }
+                    return result
                 },
             })
             xhrInstalled = true
@@ -386,6 +412,7 @@ function installStage3CapabilityHooks(symbolName, maxHistory) {
 
     const snapshot = () => {
         const counts = new Map()
+        const acceptedCalls = []
         let ambiguousCalls = 0
         for (const item of history) {
             const matches = exactIndex.get(item.url)
@@ -405,6 +432,13 @@ function installStage3CapabilityHooks(symbolName, maxHistory) {
             if (item.transport === 'fetch') current.fetchCalls += 1
             if (item.transport === 'xhr') current.xhrCalls += 1
             counts.set(key, current)
+            acceptedCalls.push({
+                groupIndex: match.groupIndex,
+                candidateIndex: match.candidateIndex,
+                transport: item.transport,
+                sequence: item.sequence,
+                acceptedAt: item.acceptedAt,
+            })
         }
         return {
             installed: true,
@@ -412,7 +446,10 @@ function installStage3CapabilityHooks(symbolName, maxHistory) {
             fetchInstalled,
             xhrInstalled,
             overflowed,
+            observationFailed,
             ambiguousCalls,
+            acceptedSequence,
+            acceptedCalls,
             exactCalls: [...counts.values()],
         }
     }
@@ -864,6 +901,19 @@ async function configureStage3PageHooks(page, deadline, groups) {
 
 async function readStage3CapabilitySample(page, deadline) {
     const sample = await runStage('stage3-sample', deadline, stage3StatusSampleTimeoutMs, () => page.evaluate(symbolName => {
+        const hook = window[Symbol.for(symbolName)]
+        let statusFenceFailed = false
+        const readHookSnapshot = () => {
+            try {
+                return typeof hook?.snapshot === 'function'
+                    ? hook.snapshot()
+                    : { installed: false }
+            } catch {
+                statusFenceFailed = true
+                return { installed: true, observationFailed: true }
+            }
+        }
+        const hooksBeforeStatus = readHookSnapshot()
         const rawStatus = window.bangumi_area_limit_hack?.getCdnRecoveryStatus?.()
         const status = rawStatus && typeof rawStatus === 'object' ? {
             enabled: rawStatus.enabled,
@@ -878,14 +928,17 @@ async function readStage3CapabilitySample(page, deadline) {
                 generation: group?.generation,
                 candidateCount: group?.candidateCount,
                 candidateIndex: group?.candidateIndex,
+                pendingCandidateIndex: group?.pendingCandidateIndex,
                 attemptedCount: group?.attemptedCount,
                 routeRevision: group?.routeRevision,
                 state: group?.state,
                 switchAttempts: group?.switchAttempts,
+                routeCommittedAt: group?.routeCommittedAt,
                 retryAt: group?.retryAt,
                 timerPending: group?.timerPending,
             })) : null,
         } : null
+        const statusObservedAt = Date.now()
 
         const selectVideo = () => {
             let connected
@@ -951,12 +1004,17 @@ async function readStage3CapabilitySample(page, deadline) {
             }
         }
 
-        const hook = window[Symbol.for(symbolName)]
+        const signals = readSignals(selectVideo())
+        const hooksAfterStatus = readHookSnapshot()
         return {
-            now: Date.now(),
+            now: statusObservedAt,
             status,
-            signals: readSignals(selectVideo()),
-            hooks: typeof hook?.snapshot === 'function' ? hook.snapshot() : { installed: false },
+            signals,
+            hooks: {
+                ...hooksAfterStatus,
+                acceptedSequenceBeforeStatus: hooksBeforeStatus?.acceptedSequence,
+                statusFenceFailed,
+            },
         }
     }, stage3HookSymbol))
     validateStage3RecoveryStatus(sample?.status)
@@ -981,10 +1039,16 @@ function validateStage3RecoveryStatus(status) {
             || (group.candidateIndex !== null
                 && (!Number.isInteger(group.candidateIndex)
                     || group.candidateIndex < 0 || group.candidateIndex >= group.candidateCount))
+            || (group.pendingCandidateIndex !== null
+                && (!Number.isInteger(group.pendingCandidateIndex)
+                    || group.pendingCandidateIndex < 0
+                    || group.pendingCandidateIndex >= group.candidateCount))
             || !Number.isInteger(group.attemptedCount) || group.attemptedCount < 0
             || !Number.isInteger(group.routeRevision) || group.routeRevision < 0
             || !states.has(group.state)
             || !Number.isInteger(group.switchAttempts) || group.switchAttempts < 0
+            || (group.routeCommittedAt !== null
+                && (!Number.isFinite(group.routeCommittedAt) || group.routeCommittedAt < 0))
             || (group.retryAt !== null && (!Number.isFinite(group.retryAt) || group.retryAt < 0))
             || typeof group.timerPending !== 'boolean') {
             throw new HarnessFailure('stage3-status', 'invalid-group')
@@ -997,8 +1061,9 @@ async function observeStage3Transport(page, deadline, observer, groups) {
     let lastAnalysis
     let lastSample
     while (Date.now() < end) {
+        const observerSnapshot = observer.snapshot()
         const sample = await readStage3CapabilitySample(page, deadline)
-        const analysis = analyzeStage3Transport(groups, observer.snapshot(), sample.hooks)
+        const analysis = analyzeStage3Transport(groups, observerSnapshot, sample.hooks)
         lastAnalysis = analysis
         lastSample = sample
 
@@ -1055,17 +1120,72 @@ function analyzeStage3Transport(groups, observerSnapshot, hookSnapshot) {
     }
 
     const hookCounts = new Map()
+    const acceptedCalls = []
     let pageFetchCalls = 0
     let pageXhrCalls = 0
+    let pageHookEvidenceInvalid = hookSnapshot?.installed !== true
+        || !Array.isArray(hookSnapshot?.exactCalls)
+        || !Array.isArray(hookSnapshot?.acceptedCalls)
+        || !Number.isSafeInteger(hookSnapshot?.acceptedSequence)
+        || hookSnapshot.acceptedSequence < 0
+        || !Number.isSafeInteger(hookSnapshot?.acceptedSequenceBeforeStatus)
+        || hookSnapshot.acceptedSequenceBeforeStatus < 0
+        || hookSnapshot.acceptedSequenceBeforeStatus > hookSnapshot.acceptedSequence
+        || !Number.isSafeInteger(hookSnapshot?.ambiguousCalls)
+        || hookSnapshot.ambiguousCalls < 0
+        || typeof hookSnapshot?.observationFailed !== 'boolean'
+        || typeof hookSnapshot?.statusFenceFailed !== 'boolean'
     if (Array.isArray(hookSnapshot?.exactCalls)) {
         for (const item of hookSnapshot.exactCalls) {
-            if (!Number.isInteger(item?.groupIndex) || !Number.isInteger(item?.candidateIndex)
-                || !Number.isInteger(item?.fetchCalls) || item.fetchCalls < 0
-                || !Number.isInteger(item?.xhrCalls) || item.xhrCalls < 0) continue
-            hookCounts.set(stage3MatchKey(item), item)
+            if (!Number.isSafeInteger(item?.groupIndex) || !Number.isSafeInteger(item?.candidateIndex)
+                || !Number.isSafeInteger(item?.fetchCalls) || item.fetchCalls < 0
+                || !Number.isSafeInteger(item?.xhrCalls) || item.xhrCalls < 0
+                || !groups[item.groupIndex]?.candidates[item.candidateIndex]) {
+                pageHookEvidenceInvalid = true
+                continue
+            }
+            const key = stage3MatchKey(item)
+            if (hookCounts.has(key)) {
+                pageHookEvidenceInvalid = true
+                continue
+            }
+            hookCounts.set(key, item)
             pageFetchCalls += item.fetchCalls
             pageXhrCalls += item.xhrCalls
         }
+    }
+    let previousAcceptedSequence = 0
+    if (Array.isArray(hookSnapshot?.acceptedCalls)) {
+        for (const item of hookSnapshot.acceptedCalls) {
+            if (!Number.isSafeInteger(item?.groupIndex) || item.groupIndex < 0
+                || !Number.isSafeInteger(item?.candidateIndex) || item.candidateIndex < 0
+                || (item.transport !== 'fetch' && item.transport !== 'xhr')
+                || !Number.isSafeInteger(item.sequence) || item.sequence < 1
+                || item.sequence <= previousAcceptedSequence
+                || item.sequence > hookSnapshot.acceptedSequence
+                || !Number.isFinite(item.acceptedAt) || item.acceptedAt < 0
+                || !groups[item.groupIndex]?.candidates[item.candidateIndex]) {
+                pageHookEvidenceInvalid = true
+                continue
+            }
+            acceptedCalls.push({ ...item })
+            previousAcceptedSequence = item.sequence
+        }
+    }
+    const acceptedCounts = new Map()
+    for (const call of acceptedCalls) {
+        const key = stage3MatchKey(call)
+        const counts = acceptedCounts.get(key) ?? { fetchCalls: 0, xhrCalls: 0 }
+        if (call.transport === 'fetch') counts.fetchCalls += 1
+        else counts.xhrCalls += 1
+        acceptedCounts.set(key, counts)
+    }
+    const countKeys = new Set([...hookCounts.keys(), ...acceptedCounts.keys()])
+    for (const key of countKeys) {
+        const reported = hookCounts.get(key) ?? { fetchCalls: 0, xhrCalls: 0 }
+        const observed = acceptedCounts.get(key) ?? { fetchCalls: 0, xhrCalls: 0 }
+        if (reported.fetchCalls !== observed.fetchCalls
+            || reported.xhrCalls !== observed.xhrCalls) pageHookEvidenceInvalid = true
     }
 
     const browserCounts = new Map()
@@ -1102,7 +1222,12 @@ function analyzeStage3Transport(groups, observerSnapshot, hookSnapshot) {
         exactIndex,
         uniqueBrowserRecords,
         supportedRecords,
-        observationOverflowed: observerSnapshot.overflowed === true || hookSnapshot?.overflowed === true,
+        acceptedCalls,
+        observationOverflowed: observerSnapshot.overflowed === true
+            || hookSnapshot?.overflowed === true
+            || hookSnapshot?.observationFailed === true
+            || hookSnapshot?.statusFenceFailed === true
+            || pageHookEvidenceInvalid,
         unsupportedReason,
         evidence: {
             browserExactRequests: uniqueBrowserRecords.length,
@@ -1117,6 +1242,13 @@ function analyzeStage3Transport(groups, observerSnapshot, hookSnapshot) {
             )).length,
             pageFetchCalls,
             pageXhrCalls,
+            pageAcceptedCalls: acceptedCalls.length,
+            pageAmbiguousCalls: Number.isSafeInteger(hookSnapshot?.ambiguousCalls)
+                ? hookSnapshot.ambiguousCalls
+                : 0,
+            pageObservationFailed: hookSnapshot?.observationFailed === true,
+            pageStatusFenceFailed: hookSnapshot?.statusFenceFailed === true,
+            pageHookEvidenceInvalid,
         },
     }
 }
@@ -1132,7 +1264,8 @@ function selectStage3ObservedGroup(groups, status, analysis) {
         // activate recovery. A clean monitoring baseline also prevents an old
         // grace or cooldown from being counted as fault-injection evidence.
         if (recovery.state !== 'monitoring'
-            || recovery.candidateIndex !== record.match.candidateIndex) continue
+            || recovery.candidateIndex !== record.match.candidateIndex
+            || recovery.pendingCandidateIndex !== null) continue
         const hasUniqueAlternate = group.candidates.some((_, candidateIndex) => (
             candidateIndex !== record.match.candidateIndex
                 && isUniqueStage3Candidate(
@@ -1146,6 +1279,7 @@ function selectStage3ObservedGroup(groups, status, analysis) {
         candidates.push({
             groupIndex: record.match.groupIndex,
             initialCandidateIndex: record.match.candidateIndex,
+            initialAttemptedCount: recovery.attemptedCount,
             groupId: recovery.groupId,
             contextEpoch: status.contextEpoch,
             generation: recovery.generation,
@@ -1194,6 +1328,348 @@ function isUniqueStage3Candidate(groups, index, groupIndex, candidateIndex) {
 
 function stage3MatchKey(match) {
     return `${match.groupIndex}:${match.candidateIndex}`
+}
+
+function stage3SequenceAtOrBefore(observerSnapshot, observedAt) {
+    let sequence = 0
+    for (const record of observerSnapshot.records) {
+        if (Number.isFinite(record.startedAt) && record.startedAt <= observedAt) {
+            sequence = Math.max(sequence, record.sequence)
+        }
+    }
+    return sequence
+}
+
+/**
+ * Classify the structural boundary between a pending route intent and the
+ * route that a later predecessor call actually accepted. Exact URLs never
+ * enter this state or its evidence.
+ */
+export function assessStage3RouteBoundary(selected, recovery, intentStatus = null) {
+    const classifyCommittedBoundary = status => {
+        if (status.candidateIndex === selected.initialCandidateIndex
+            && status.attemptedCount === selected.initialAttemptedCount) {
+            if (Number.isInteger(status.pendingCandidateIndex)
+                && status.pendingCandidateIndex !== selected.initialCandidateIndex) {
+                return {
+                    phase: 'pending-intent',
+                    pendingCandidateIndex: status.pendingCandidateIndex,
+                    committedCandidateIndex: null,
+                }
+            }
+            if (status.pendingCandidateIndex === null) {
+                return {
+                    phase: 'baseline',
+                    pendingCandidateIndex: null,
+                    committedCandidateIndex: null,
+                }
+            }
+        }
+        if (Number.isInteger(status.candidateIndex)
+            && status.candidateIndex !== selected.initialCandidateIndex
+            && status.attemptedCount === selected.initialAttemptedCount + 1
+            && status.pendingCandidateIndex === null) {
+            return {
+                phase: 'committed-route',
+                pendingCandidateIndex: null,
+                committedCandidateIndex: status.candidateIndex,
+            }
+        }
+        return { phase: 'invalid', reason: 'route-intent-state-invalid' }
+    }
+
+    if (intentStatus === null) {
+        const switchDelta = recovery.switchAttempts - selected.initialSwitchAttempts
+        const revisionDelta = recovery.routeRevision - selected.initialRouteRevision
+        if (switchDelta === 0 && revisionDelta === 0) {
+            const boundary = classifyCommittedBoundary(recovery)
+            return boundary.phase === 'baseline'
+                ? boundary
+                : { phase: 'invalid', reason: 'route-changed-before-fault-window' }
+        }
+        if (switchDelta !== 1 || revisionDelta !== 1) {
+            return { phase: 'invalid', reason: 'route-changed-before-fault-window' }
+        }
+        const boundary = classifyCommittedBoundary(recovery)
+        return boundary.phase === 'pending-intent' || boundary.phase === 'committed-route'
+            ? boundary
+            : { phase: 'invalid', reason: 'route-intent-state-invalid' }
+    }
+
+    if (recovery.switchAttempts !== intentStatus.switchAttempts
+        || recovery.routeRevision !== intentStatus.routeRevision) {
+        return { phase: 'invalid', reason: 'cooldown-not-held' }
+    }
+    const intentBoundary = classifyCommittedBoundary(intentStatus)
+    const boundary = classifyCommittedBoundary(recovery)
+    if (boundary.phase !== 'pending-intent' && boundary.phase !== 'committed-route') {
+        return { phase: 'invalid', reason: 'route-intent-state-invalid' }
+    }
+    if (intentBoundary.phase === 'pending-intent') {
+        if (boundary.phase === 'pending-intent'
+            && boundary.pendingCandidateIndex !== intentBoundary.pendingCandidateIndex) {
+            return { phase: 'invalid', reason: 'cooldown-not-held' }
+        }
+        if (boundary.phase === 'committed-route'
+            && boundary.committedCandidateIndex !== intentBoundary.pendingCandidateIndex) {
+            return { phase: 'invalid', reason: 'future-route-intent-mismatch' }
+        }
+    } else if (intentBoundary.phase === 'committed-route') {
+        if (boundary.phase !== 'committed-route'
+            || boundary.committedCandidateIndex !== intentBoundary.committedCandidateIndex) {
+            return { phase: 'invalid', reason: 'cooldown-not-held' }
+        }
+    } else {
+        return { phase: 'invalid', reason: 'route-intent-state-invalid' }
+    }
+    return boundary
+}
+
+export function assessStage3CommittedRouteBoundary(selected, recovery, committedStatus) {
+    const boundary = assessStage3RouteBoundary(selected, recovery, committedStatus)
+    if (boundary.phase !== 'invalid') return boundary
+    const stableReset = recovery.candidateIndex === committedStatus.candidateIndex
+        && recovery.pendingCandidateIndex === null
+        && recovery.attemptedCount === 1
+        && recovery.switchAttempts === 0
+        && recovery.routeRevision === committedStatus.routeRevision + 1
+    if (stableReset) {
+        if (recovery.retryAt !== committedStatus.retryAt
+            || recovery.routeCommittedAt !== committedStatus.routeCommittedAt) {
+            return { phase: 'invalid', reason: 'cooldown-not-held' }
+        }
+        return {
+            phase: 'committed-route',
+            pendingCandidateIndex: null,
+            committedCandidateIndex: recovery.candidateIndex,
+            stableReset: true,
+        }
+    }
+    return boundary
+}
+
+export function classifyStage3ObservedIntentBoundary(boundary) {
+    if (boundary.phase === 'committed-route') {
+        return stage3CapabilityResult('INCONCLUSIVE', 'route-commit-causality-unproven')
+    }
+    return null
+}
+
+export function assessStage3FutureRouteObservation({
+    supportedRecords,
+    selected,
+    recovery,
+    intentStatus,
+    afterSequence,
+    ignoredSequences = [],
+    recordStartedAfter = null,
+    recordStartedBy = null,
+    committedStatus = null,
+}) {
+    const boundary = committedStatus === null
+        ? assessStage3RouteBoundary(selected, recovery, intentStatus)
+        : assessStage3CommittedRouteBoundary(selected, recovery, committedStatus)
+    if (boundary.phase === 'invalid') {
+        return {
+            result: stage3CapabilityResult('FAIL', boundary.reason),
+            boundary,
+        }
+    }
+
+    const ignored = new Set(ignoredSequences)
+    const futureRecords = supportedRecords.filter(record => (
+        record.sequence > afterSequence
+            && !ignored.has(record.sequence)
+            && record.match.groupIndex === selected.groupIndex
+            && (recordStartedAfter === null || record.startedAt >= recordStartedAfter)
+            && (recordStartedBy === null || record.startedAt <= recordStartedBy)
+    ))
+    if (futureRecords.some(record => (
+        record.match.candidateIndex === selected.initialCandidateIndex
+    ))) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'future-route-unchanged'),
+            boundary,
+        }
+    }
+
+    const alternateIndexes = [...new Set(futureRecords.map(record => (
+        record.match.candidateIndex
+    )))]
+    if (alternateIndexes.length > 1) {
+        return {
+            result: stage3CapabilityResult('INCONCLUSIVE', 'same-group-alternate-ambiguous'),
+            boundary,
+        }
+    }
+
+    const requestCandidateIndex = alternateIndexes[0] ?? null
+    const statusCandidateIndex = boundary.phase === 'committed-route'
+        ? boundary.committedCandidateIndex
+        : null
+    if (requestCandidateIndex !== null
+        && boundary.phase === 'pending-intent'
+        && requestCandidateIndex !== boundary.pendingCandidateIndex) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'future-route-intent-mismatch'),
+            boundary,
+        }
+    }
+    if (requestCandidateIndex !== null && statusCandidateIndex !== null
+        && requestCandidateIndex !== statusCandidateIndex) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'future-route-commit-mismatch'),
+            boundary,
+        }
+    }
+
+    const alternateCandidateIndex = requestCandidateIndex ?? statusCandidateIndex
+    const alternateRecords = alternateCandidateIndex === null
+        ? []
+        : futureRecords.filter(record => (
+            record.match.candidateIndex === alternateCandidateIndex
+        ))
+    return {
+        result: null,
+        boundary,
+        alternateCandidateIndex,
+        alternateStarted: requestCandidateIndex !== null,
+        alternateResponded: alternateRecords.some(record => (
+            record.responded && record.responseOk && !record.failed
+        )),
+        alternateRequestStartedAt: alternateRecords.length === 0
+            ? null
+            : Math.min(...alternateRecords.map(record => record.startedAt)),
+        routeCommitted: statusCandidateIndex !== null,
+    }
+}
+
+export function classifyStage3FutureRouteTimeout({
+    alternateStarted,
+    routeCommitted,
+    alternateResponded,
+    signalsUnavailable,
+    resumeAnchor,
+}) {
+    if (!alternateStarted) {
+        return stage3CapabilityResult('INCONCLUSIVE', 'no-interceptable-future-request')
+    }
+    if (!routeCommitted) {
+        return stage3CapabilityResult('FAIL', 'alternate-route-not-committed')
+    }
+    if (!alternateResponded) {
+        return stage3CapabilityResult('INCONCLUSIVE', 'alternate-request-did-not-respond')
+    }
+    if (signalsUnavailable || resumeAnchor === null) {
+        return stage3CapabilityResult('INCONCLUSIVE', 'playback-signals-unavailable')
+    }
+    return stage3CapabilityResult('FAIL', 'playback-did-not-resume')
+}
+
+export function assessStage3CommitCausality({
+    acceptedCalls,
+    selected,
+    committedCandidateIndex,
+    afterAcceptedSequence,
+    acceptedSequenceAtStatus,
+    routeCommittedAt,
+    observedAt,
+}) {
+    const calls = acceptedCalls.filter(call => (
+        call.sequence > afterAcceptedSequence
+            && call.sequence <= acceptedSequenceAtStatus
+            && call.groupIndex === selected.groupIndex
+            && call.acceptedAt <= observedAt
+    ))
+    if (calls.some(call => call.candidateIndex === selected.initialCandidateIndex)) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'future-route-unchanged'),
+            acceptedCall: null,
+        }
+    }
+    const candidateIndexes = [...new Set(calls.map(call => call.candidateIndex))]
+    if (candidateIndexes.length > 1) {
+        return {
+            result: stage3CapabilityResult('INCONCLUSIVE', 'same-group-alternate-ambiguous'),
+            acceptedCall: null,
+        }
+    }
+    if (candidateIndexes.length === 0) {
+        return {
+            result: stage3CapabilityResult('INCONCLUSIVE', 'route-commit-causality-unproven'),
+            acceptedCall: null,
+        }
+    }
+    if (candidateIndexes[0] !== committedCandidateIndex) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'future-route-commit-mismatch'),
+            acceptedCall: null,
+        }
+    }
+    const acceptedCall = calls.reduce((earliest, call) => (
+        call.sequence < earliest.sequence ? call : earliest
+    ))
+    if (!Number.isFinite(routeCommittedAt) || !Number.isFinite(observedAt)
+        || acceptedCall.acceptedAt > routeCommittedAt
+        || routeCommittedAt > observedAt) {
+        return {
+            result: stage3CapabilityResult('INCONCLUSIVE', 'route-commit-causality-unproven'),
+            acceptedCall: null,
+        }
+    }
+    return { result: null, acceptedCall }
+}
+
+export function assessStage3CommittedCooldown({
+    retryAt,
+    routeCommittedAt,
+    minimumCooldownMs,
+}) {
+    const evidence = {
+        routeCommittedAt: Number.isFinite(routeCommittedAt) ? routeCommittedAt : null,
+        cooldownDeadline: Number.isFinite(retryAt) ? retryAt : null,
+        cooldownFromCommitMs: Number.isFinite(retryAt) && Number.isFinite(routeCommittedAt)
+            ? retryAt - routeCommittedAt
+            : null,
+        minimumCooldownMs,
+    }
+    if (!Number.isFinite(routeCommittedAt)) {
+        return {
+            result: stage3CapabilityResult('INCONCLUSIVE', 'commit-cooldown-anchor-unavailable'),
+            evidence,
+        }
+    }
+    if (!Number.isFinite(retryAt) || retryAt < routeCommittedAt + minimumCooldownMs) {
+        return {
+            result: stage3CapabilityResult('FAIL', 'cooldown-not-installed'),
+            evidence,
+        }
+    }
+    return { result: null, evidence }
+}
+
+export function assessStage3AcceptedRouteWindow({
+    acceptedCalls,
+    selected,
+    committedCandidateIndex,
+    afterAcceptedSequence,
+    observedAt,
+}) {
+    const calls = acceptedCalls.filter(call => (
+        call.sequence > afterAcceptedSequence
+            && call.groupIndex === selected.groupIndex
+            && call.acceptedAt <= observedAt
+    ))
+    if (calls.some(call => call.candidateIndex !== committedCandidateIndex)) {
+        return stage3CapabilityResult('FAIL', 'cooldown-route-changed')
+    }
+    return null
+}
+
+function prefixStage3CooldownEvidence(prefix, evidence) {
+    return Object.fromEntries(Object.entries(evidence).map(([key, value]) => (
+        [`${prefix}${key[0].toUpperCase()}${key.slice(1)}`, value]
+    )))
 }
 
 async function runStage3FaultWindow(page, deadline, observer, groups, observation) {
@@ -1449,11 +1925,18 @@ async function waitForStage3RouteAdvance(
     let sawLowBuffer = false
     let lastAnalysis
     let lastSample
-    let lastUnswitchedNow = null
+    let lastNoIntentNow = null
 
     while (Date.now() < end) {
-        const sample = await readStage3CapabilitySample(page, deadline)
         const observerSnapshot = observer.snapshot()
+        const sample = await readStage3CapabilitySample(page, deadline)
+        const sequenceAtSample = stage3SequenceAtOrBefore(observerSnapshot, sample.now)
+        const acceptedSequenceAtSample = Number.isInteger(sample.hooks.acceptedSequence)
+            ? sample.hooks.acceptedSequence
+            : 0
+        const ambiguousCallsAtSample = Number.isInteger(sample.hooks.ambiguousCalls)
+            ? sample.hooks.ambiguousCalls
+            : 0
         const analysis = analyzeStage3Transport(groups, observerSnapshot, sample.hooks)
         const evidence = stage3FaultEvidence(initialEvidence, analysis, hold, sawLowBuffer)
         lastAnalysis = analysis
@@ -1483,11 +1966,9 @@ async function waitForStage3RouteAdvance(
             || recovery.generation !== selected.generation) {
             return stage3CapabilityResult('INCONCLUSIVE', 'media-context-changed', evidence)
         }
-        if (recovery.switchAttempts < selected.initialSwitchAttempts
-            || (recovery.switchAttempts === selected.initialSwitchAttempts
-                && recovery.candidateIndex !== null
-                && recovery.candidateIndex !== selected.initialCandidateIndex)) {
-            return stage3CapabilityResult('INCONCLUSIVE', 'route-changed-before-fault-window', evidence)
+        const routeBoundary = assessStage3RouteBoundary(selected, recovery)
+        if (routeBoundary.phase === 'invalid') {
+            return stage3CapabilityResult('INCONCLUSIVE', routeBoundary.reason, evidence)
         }
 
         const signals = sample.signals
@@ -1504,11 +1985,8 @@ async function waitForStage3RouteAdvance(
             lowWindowAnchor = null
         }
 
-        const switched = recovery.switchAttempts > selected.initialSwitchAttempts
-            && recovery.routeRevision > selected.initialRouteRevision
-            && recovery.candidateIndex !== null
-            && recovery.candidateIndex !== selected.initialCandidateIndex
-        if (switched) {
+        if (routeBoundary.phase === 'pending-intent'
+            || routeBoundary.phase === 'committed-route') {
             if (!validLowBufferWindow) {
                 return stage3CapabilityResult('INCONCLUSIVE', 'no-valid-low-buffer-window', evidence)
             }
@@ -1518,27 +1996,48 @@ async function waitForStage3RouteAdvance(
             if (hold.hasUnobservedRequest(observer)) {
                 return stage3CapabilityResult('INCONCLUSIVE', 'held-request-not-observed', evidence)
             }
-            const switchedIndex = recovery.candidateIndex
-            if (!isUniqueStage3Candidate(groups, analysis.exactIndex, selected.groupIndex, switchedIndex)) {
+            const structuralAlternateIndex = routeBoundary.phase === 'pending-intent'
+                ? routeBoundary.pendingCandidateIndex
+                : routeBoundary.committedCandidateIndex
+            if (!isUniqueStage3Candidate(
+                groups,
+                analysis.exactIndex,
+                selected.groupIndex,
+                structuralAlternateIndex,
+            )) {
                 return stage3CapabilityResult('INCONCLUSIVE', 'same-group-alternate-ambiguous', evidence)
             }
-            const cooldown = assessStage3InitialCooldown(
-                {
-                    retryAt: recovery.retryAt,
-                    lastUnswitchedAt: lastUnswitchedNow,
-                    firstSwitchedAt: sample.now,
-                    minimumCooldownMs: stage3MinimumCooldownMs,
-                    maxObservationWindowMs: stage3PollIntervalMs
-                        + stage3StatusSampleTimeoutMs
-                        + stage3SwitchObservationSlackMs,
-                },
-            )
-            const cooldownEvidence = { ...evidence, ...cooldown.evidence }
-            if (cooldown.result) {
+            const directCommit = classifyStage3ObservedIntentBoundary(routeBoundary)
+            if (directCommit) {
+                // A baseline-to-committed jump does not prove that pending intent
+                // existed before the accepted predecessor call. Never infer that
+                // ordering from two independently observed snapshots.
                 return stage3CapabilityResult(
-                    cooldown.result.status,
-                    cooldown.result.reason,
-                    cooldownEvidence,
+                    directCommit.status,
+                    directCommit.reason,
+                    evidence,
+                )
+            }
+            const intentCooldown = assessStage3InitialCooldown({
+                retryAt: recovery.retryAt,
+                lastUnswitchedAt: lastNoIntentNow,
+                firstSwitchedAt: sample.now,
+                minimumCooldownMs: stage3MinimumCooldownMs,
+                maxObservationWindowMs: stage3PollIntervalMs
+                    + stage3StatusSampleTimeoutMs
+                    + stage3SwitchObservationSlackMs,
+            })
+            const intentEvidence = {
+                ...evidence,
+                routeIntentObserved: true,
+                routeCommitted: routeBoundary.phase === 'committed-route',
+                ...prefixStage3CooldownEvidence('intent', intentCooldown.evidence),
+            }
+            if (intentCooldown.result) {
+                return stage3CapabilityResult(
+                    intentCooldown.result.status,
+                    intentCooldown.result.reason,
+                    intentEvidence,
                 )
             }
             return waitForStage3FutureAlternate(
@@ -1547,17 +2046,17 @@ async function waitForStage3RouteAdvance(
                 observer,
                 groups,
                 selected,
-                switchedIndex,
                 recovery,
                 hold,
                 documentId,
-                // Requests started before this first switched snapshot cannot be
-                // attributed to the switch without a page-side causal marker.
-                observerSnapshot.sequence,
-                cooldownEvidence,
+                sequenceAtSample,
+                [],
+                acceptedSequenceAtSample,
+                ambiguousCallsAtSample,
+                intentEvidence,
             )
         }
-        lastUnswitchedNow = sample.now
+        lastNoIntentNow = sample.now
         await stage3Delay(deadline, stage3PollIntervalMs)
     }
 
@@ -1581,32 +2080,48 @@ async function waitForStage3FutureAlternate(
     observer,
     groups,
     selected,
-    switchedIndex,
-    switchStatus,
+    intentStatus,
     hold,
     documentId,
-    switchDetectionSequence,
+    intentDetectionSequence,
+    ignoredSequences,
+    intentAcceptedSequence,
+    intentAmbiguousCalls,
     initialEvidence,
 ) {
     const end = boundedStageEnd(deadline, stage3FutureRequestTimeoutMs)
+    const maxObservationWindowMs = stage3PollIntervalMs
+        + stage3StatusSampleTimeoutMs
+        + stage3SwitchObservationSlackMs
     let resumeAnchor = null
     let alternateStarted = false
     let alternateResponded = false
+    let routeCommitted = false
+    let committedIndex = null
+    let commitStatus = null
+    let commitAcceptedSequence = null
+    let commitRecordStartedAfter = null
+    let commitRecordStartedBy = null
     let currentReleased = false
     let playbackResumed = false
     let lastAnalysis
     let signalsUnavailable = false
+    let accumulatedEvidence = initialEvidence
+    let stableObservation = emptyStage3StableObservation()
 
     while (Date.now() < end) {
-        const sample = await readStage3CapabilitySample(page, deadline)
         const observerSnapshot = observer.snapshot()
+        const sample = await readStage3CapabilitySample(page, deadline)
+        const stableProvedBeforeSample = stableObservation.proved
+        stableObservation = advanceStage3StableObservation(stableObservation, sample)
         const analysis = analyzeStage3Transport(groups, observerSnapshot, sample.hooks)
         lastAnalysis = analysis
         const evidence = {
-            ...initialEvidence,
+            ...accumulatedEvidence,
             ...analysis.evidence,
             alternateRequests: alternateStarted ? 1 : 0,
             alternateResponses: alternateResponded ? 1 : 0,
+            routeCommitted,
             playbackResumed,
         }
 
@@ -1618,6 +2133,9 @@ async function waitForStage3FutureAlternate(
         }
         if (analysis.unsupportedReason) {
             return stage3CapabilityResult('UNSUPPORTED', analysis.unsupportedReason, evidence)
+        }
+        if (analysis.evidence.pageAmbiguousCalls > intentAmbiguousCalls) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'page-exact-call-ambiguous', evidence)
         }
         if (hold.hasAbortedRequest(observer)) {
             return stage3CapabilityResult('INCONCLUSIVE', 'current-request-abort-unclassified', evidence)
@@ -1634,41 +2152,138 @@ async function waitForStage3FutureAlternate(
             || recovery.generation !== selected.generation) {
             return stage3CapabilityResult('INCONCLUSIVE', 'media-context-changed', evidence)
         }
-        if (recovery.switchAttempts > switchStatus.switchAttempts
-            || recovery.candidateIndex !== switchedIndex
-            || typeof recovery.retryAt !== 'number'
-            || recovery.retryAt < switchStatus.retryAt) {
+        if (typeof recovery.retryAt !== 'number'
+            || recovery.retryAt < intentStatus.retryAt) {
             return stage3CapabilityResult('FAIL', 'cooldown-not-held', evidence)
         }
 
-        const alternateRecords = analysis.supportedRecords.filter(record => (
-            record.sequence > switchDetectionSequence
-                && record.match.groupIndex === selected.groupIndex
-                && record.match.candidateIndex === switchedIndex
-        ))
-        alternateStarted ||= alternateRecords.length > 0
-        const hasHealthyAlternateResponse = alternateRecords.some(record => (
-            record.responded && record.responseOk && !record.failed
-        ))
+        const observedBoundary = routeCommitted
+            ? assessStage3CommittedRouteBoundary(selected, recovery, commitStatus)
+            : assessStage3RouteBoundary(selected, recovery, intentStatus)
+        if (observedBoundary.phase === 'invalid') {
+            return stage3CapabilityResult('FAIL', observedBoundary.reason, evidence)
+        }
+        if (observedBoundary.phase === 'pending-intent') {
+            if (routeCommitted) {
+                return stage3CapabilityResult('FAIL', 'cooldown-not-held', evidence)
+            }
+        } else if (!routeCommitted) {
+            const commitCausality = assessStage3CommitCausality({
+                acceptedCalls: analysis.acceptedCalls,
+                selected,
+                committedCandidateIndex: observedBoundary.committedCandidateIndex,
+                afterAcceptedSequence: intentAcceptedSequence,
+                acceptedSequenceAtStatus: sample.hooks.acceptedSequenceBeforeStatus,
+                routeCommittedAt: recovery.routeCommittedAt,
+                observedAt: sample.now,
+            })
+            if (commitCausality.result) {
+                return stage3CapabilityResult(
+                    commitCausality.result.status,
+                    commitCausality.result.reason,
+                    evidence,
+                )
+            }
+            const committedCooldown = assessStage3CommittedCooldown({
+                retryAt: recovery.retryAt,
+                routeCommittedAt: recovery.routeCommittedAt,
+                minimumCooldownMs: stage3MinimumCooldownMs,
+            })
+            accumulatedEvidence = {
+                ...accumulatedEvidence,
+                ...prefixStage3CooldownEvidence('commit', committedCooldown.evidence),
+            }
+            if (committedCooldown.result) {
+                return stage3CapabilityResult(
+                    committedCooldown.result.status,
+                    committedCooldown.result.reason,
+                    {
+                        ...evidence,
+                        ...prefixStage3CooldownEvidence('commit', committedCooldown.evidence),
+                    },
+                )
+            }
+            routeCommitted = true
+            committedIndex = observedBoundary.committedCandidateIndex
+            commitStatus = { ...recovery }
+            commitAcceptedSequence = commitCausality.acceptedCall.sequence
+            commitRecordStartedAfter = Math.max(
+                0,
+                commitCausality.acceptedCall.acceptedAt - stage3SwitchObservationSlackMs,
+            )
+            commitRecordStartedBy = sample.now + maxObservationWindowMs
+            // Production clears its stable window when the committed candidate changes.
+            // Live evidence must not combine healthy playback from before and after promotion.
+            stableObservation = restartStage3StableObservation(sample)
+        } else if (recovery.retryAt !== commitStatus.retryAt
+            || recovery.routeCommittedAt !== commitStatus.routeCommittedAt
+            || observedBoundary.committedCandidateIndex !== committedIndex) {
+            return stage3CapabilityResult('FAIL', 'cooldown-not-held', evidence)
+        }
+
+        if (routeCommitted) {
+            const acceptedRouteFailure = assessStage3AcceptedRouteWindow({
+                acceptedCalls: analysis.acceptedCalls,
+                selected,
+                committedCandidateIndex: committedIndex,
+                afterAcceptedSequence: commitAcceptedSequence,
+                observedAt: sample.now,
+            })
+            if (acceptedRouteFailure) {
+                return stage3CapabilityResult(
+                    acceptedRouteFailure.status,
+                    acceptedRouteFailure.reason,
+                    evidence,
+                )
+            }
+        }
+
+        const future = assessStage3FutureRouteObservation({
+            supportedRecords: analysis.supportedRecords,
+            selected,
+            recovery,
+            intentStatus,
+            afterSequence: intentDetectionSequence,
+            ignoredSequences,
+            recordStartedAfter: routeCommitted ? commitRecordStartedAfter : null,
+            recordStartedBy: routeCommitted ? commitRecordStartedBy : null,
+            committedStatus: routeCommitted ? commitStatus : null,
+        })
+        if (future.result) {
+            return stage3CapabilityResult(
+                future.result.status,
+                future.result.reason,
+                evidence,
+            )
+        }
+        const structuralAlternateIndex = future.boundary.phase === 'pending-intent'
+            ? future.boundary.pendingCandidateIndex
+            : future.boundary.committedCandidateIndex
+        if (!isUniqueStage3Candidate(
+            groups,
+            analysis.exactIndex,
+            selected.groupIndex,
+            structuralAlternateIndex,
+        )) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'same-group-alternate-ambiguous', evidence)
+        }
+        if (future.boundary.stableReset === true && !stableProvedBeforeSample) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'stable-reset-unproven', evidence)
+        }
+
+        alternateStarted = future.alternateStarted
+        const hasHealthyAlternateResponse = future.alternateResponded
         if (alternateResponded && !hasHealthyAlternateResponse) {
             return stage3CapabilityResult('INCONCLUSIVE', 'alternate-request-failure-unclassified', evidence)
         }
-        alternateResponded ||= hasHealthyAlternateResponse
-        const unchangedFutureRequest = analysis.supportedRecords.some(record => (
-            record.sequence > switchDetectionSequence
-                && record.match.groupIndex === selected.groupIndex
-                && record.match.candidateIndex === selected.initialCandidateIndex
-        ))
-        if (unchangedFutureRequest) {
-            return stage3CapabilityResult('FAIL', 'future-route-unchanged', evidence)
-        }
+        alternateResponded = hasHealthyAlternateResponse
         if (!sample.signals) {
             signalsUnavailable = true
-        } else if (hasHealthyAlternateResponse && !currentReleased) {
+        } else if (routeCommitted && hasHealthyAlternateResponse && !currentReleased) {
             if (resumeAnchor === null) resumeAnchor = sample.signals.currentTimeSeconds
             else if (sample.signals.currentTimeSeconds >= resumeAnchor + 0.25) playbackResumed = true
         }
-        if (alternateResponded && playbackResumed && !currentReleased) {
+        if (routeCommitted && alternateResponded && playbackResumed && !currentReleased) {
             await hold.releaseAll()
             currentReleased = true
             if (hold.hasReleaseFailure()) {
@@ -1680,15 +2295,23 @@ async function waitForStage3FutureAlternate(
                 observer,
                 groups,
                 selected,
-                switchedIndex,
-                switchStatus,
+                committedIndex,
+                commitStatus,
                 hold,
                 documentId,
-                switchDetectionSequence,
+                intentDetectionSequence,
+                ignoredSequences,
+                commitAcceptedSequence,
+                intentAmbiguousCalls,
+                commitRecordStartedAfter,
+                commitRecordStartedBy,
+                stableObservation,
                 {
-                    ...evidence,
+                    ...accumulatedEvidence,
+                    ...analysis.evidence,
                     alternateRequests: 1,
                     alternateResponses: 1,
+                    routeCommitted: true,
                     playbackResumed: true,
                 },
             )
@@ -1697,22 +2320,21 @@ async function waitForStage3FutureAlternate(
     }
 
     const evidence = {
-        ...initialEvidence,
+        ...accumulatedEvidence,
         ...(lastAnalysis?.evidence ?? {}),
         alternateRequests: alternateStarted ? 1 : 0,
         alternateResponses: alternateResponded ? 1 : 0,
+        routeCommitted,
         playbackResumed,
     }
-    if (!alternateStarted) {
-        return stage3CapabilityResult('INCONCLUSIVE', 'no-interceptable-future-request', evidence)
-    }
-    if (!alternateResponded) {
-        return stage3CapabilityResult('INCONCLUSIVE', 'alternate-request-did-not-respond', evidence)
-    }
-    if (signalsUnavailable || resumeAnchor === null) {
-        return stage3CapabilityResult('INCONCLUSIVE', 'playback-signals-unavailable', evidence)
-    }
-    return stage3CapabilityResult('FAIL', 'playback-did-not-resume', evidence)
+    const timeout = classifyStage3FutureRouteTimeout({
+        alternateStarted,
+        routeCommitted,
+        alternateResponded,
+        signalsUnavailable,
+        resumeAnchor,
+    })
+    return stage3CapabilityResult(timeout.status, timeout.reason, evidence)
 }
 
 async function verifyStage3Cooldown(
@@ -1726,6 +2348,12 @@ async function verifyStage3Cooldown(
     hold,
     documentId,
     switchDetectionSequence,
+    ignoredSequences,
+    commitAcceptedSequence,
+    commitAmbiguousCalls,
+    commitRecordStartedAfter,
+    commitRecordStartedBy,
+    initialStableObservation,
     evidence,
 ) {
     const cooldownRemainingMs = Math.max(0, switchStatus.retryAt - Date.now())
@@ -1734,9 +2362,13 @@ async function verifyStage3Cooldown(
         return stage3CapabilityResult('INCONCLUSIVE', 'cooldown-observation-deadline', evidence)
     }
     const end = Date.now() + cooldownRemainingMs + stage3PollIntervalMs
+    let stableObservation = initialStableObservation
     while (Date.now() < end) {
         const sample = await readStage3CapabilitySample(page, deadline)
-        const analysis = analyzeStage3Transport(groups, observer.snapshot(), sample.hooks)
+        const observerSnapshot = observer.snapshot()
+        const stableProvedBeforeSample = stableObservation.proved
+        stableObservation = advanceStage3StableObservation(stableObservation, sample)
+        const analysis = analyzeStage3Transport(groups, observerSnapshot, sample.hooks)
         if (sample.hooks.documentId !== documentId) {
             return stage3CapabilityResult('FAIL', 'page-reloaded', evidence)
         }
@@ -1745,6 +2377,9 @@ async function verifyStage3Cooldown(
         }
         if (analysis.unsupportedReason) {
             return stage3CapabilityResult('UNSUPPORTED', analysis.unsupportedReason, evidence)
+        }
+        if (analysis.evidence.pageAmbiguousCalls > commitAmbiguousCalls) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'page-exact-call-ambiguous', evidence)
         }
         if (hold.hasAbortedRequest(observer)) {
             return stage3CapabilityResult('INCONCLUSIVE', 'current-request-abort-unclassified', evidence)
@@ -1755,31 +2390,53 @@ async function verifyStage3Cooldown(
         if (hold.hasReleaseFailure()) {
             return stage3CapabilityResult('INCONCLUSIVE', 'fault-route-continue-failed', evidence)
         }
-        const futureRecords = analysis.supportedRecords.filter(record => (
-            record.sequence > switchDetectionSequence
-                && record.match.groupIndex === selected.groupIndex
-        ))
-        if (futureRecords.some(record => (
-            record.match.candidateIndex === selected.initialCandidateIndex
-        ))) {
-            return stage3CapabilityResult('FAIL', 'future-route-unchanged', evidence)
-        }
-        if (!futureRecords.some(record => (
-            record.match.candidateIndex === switchedIndex
-                && record.responded && record.responseOk && !record.failed
-        ))) {
-            return stage3CapabilityResult('INCONCLUSIVE', 'alternate-request-failure-unclassified', evidence)
-        }
         const recovery = sample.status.groups.find(group => group.groupId === selected.groupId)
         if (!recovery || sample.status.contextEpoch !== selected.contextEpoch
             || recovery.generation !== selected.generation) {
             return stage3CapabilityResult('INCONCLUSIVE', 'media-context-changed', evidence)
         }
-        if (recovery.switchAttempts > switchStatus.switchAttempts
-            || recovery.routeRevision !== switchStatus.routeRevision
-            || recovery.candidateIndex !== switchedIndex
-            || typeof recovery.retryAt !== 'number'
-            || recovery.retryAt < switchStatus.retryAt) {
+        const future = assessStage3FutureRouteObservation({
+            supportedRecords: analysis.supportedRecords,
+            selected,
+            recovery,
+            intentStatus: switchStatus,
+            afterSequence: switchDetectionSequence,
+            ignoredSequences,
+            recordStartedAfter: commitRecordStartedAfter,
+            recordStartedBy: commitRecordStartedBy,
+            committedStatus: switchStatus,
+        })
+        if (future.result) {
+            return stage3CapabilityResult(
+                future.result.status,
+                future.result.reason,
+                evidence,
+            )
+        }
+        if (!future.routeCommitted || future.alternateCandidateIndex !== switchedIndex
+            || !future.alternateResponded) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'alternate-request-failure-unclassified', evidence)
+        }
+        const acceptedRouteFailure = assessStage3AcceptedRouteWindow({
+            acceptedCalls: analysis.acceptedCalls,
+            selected,
+            committedCandidateIndex: switchedIndex,
+            afterAcceptedSequence: commitAcceptedSequence,
+            observedAt: sample.now,
+        })
+        if (acceptedRouteFailure) {
+            return stage3CapabilityResult(
+                acceptedRouteFailure.status,
+                acceptedRouteFailure.reason,
+                evidence,
+            )
+        }
+        if (future.boundary.stableReset === true && !stableProvedBeforeSample) {
+            return stage3CapabilityResult('INCONCLUSIVE', 'stable-reset-unproven', evidence)
+        }
+        if (typeof recovery.retryAt !== 'number'
+            || recovery.retryAt !== switchStatus.retryAt
+            || recovery.routeCommittedAt !== switchStatus.routeCommittedAt) {
             return stage3CapabilityResult('FAIL', 'cooldown-not-held', evidence)
         }
         if (sample.now >= switchStatus.retryAt) {
@@ -1798,6 +2455,58 @@ function isEligibleStage3LowBuffer(signals) {
     const nearEnd = signals.durationSeconds !== null
         && signals.durationSeconds - signals.currentTimeSeconds <= 0.5
     return !nearEnd && signals.bufferedAheadSeconds <= 0.5
+}
+
+export function advanceStage3StableObservation(previous, sample) {
+    const signals = sample.signals
+    const eligible = signals && signals.visible === true
+        && !signals.paused && !signals.seeking && !signals.ended
+        && Number.isFinite(signals.currentTimeSeconds)
+        && (signals.durationSeconds === null || Number.isFinite(signals.durationSeconds))
+        && Number.isFinite(signals.bufferedAheadSeconds)
+        && signals.bufferedAheadSeconds >= stage3StableBufferSeconds
+        && (signals.durationSeconds === null
+            || signals.durationSeconds - signals.currentTimeSeconds > 0.5)
+    if (!eligible) {
+        return { startedAt: null, lastAt: null, lastCurrentTimeSeconds: null, proved: false }
+    }
+    if (previous.startedAt === null || previous.lastAt === null
+        || previous.lastCurrentTimeSeconds === null
+        || sample.now < previous.lastAt
+        || sample.now - previous.lastAt > stage3StableObservationMaxGapMs
+        || (sample.now > previous.lastAt
+            && signals.currentTimeSeconds <= previous.lastCurrentTimeSeconds)
+        || (sample.now === previous.lastAt
+            && signals.currentTimeSeconds < previous.lastCurrentTimeSeconds)) {
+        return {
+            startedAt: sample.now,
+            lastAt: sample.now,
+            lastCurrentTimeSeconds: signals.currentTimeSeconds,
+            proved: false,
+        }
+    }
+    if (sample.now === previous.lastAt
+        && signals.currentTimeSeconds === previous.lastCurrentTimeSeconds) return previous
+    return {
+        startedAt: previous.startedAt,
+        lastAt: sample.now,
+        lastCurrentTimeSeconds: signals.currentTimeSeconds,
+        proved: previous.proved
+            || sample.now - previous.startedAt >= stage3StablePlaybackResetMs,
+    }
+}
+
+export function restartStage3StableObservation(sample) {
+    return advanceStage3StableObservation(emptyStage3StableObservation(), sample)
+}
+
+function emptyStage3StableObservation() {
+    return {
+        startedAt: null,
+        lastAt: null,
+        lastCurrentTimeSeconds: null,
+        proved: false,
+    }
 }
 
 function stage3FaultEvidence(initialEvidence, analysis, hold, sawLowBuffer) {

@@ -116,25 +116,62 @@ const protocolAlias = `https:${protocolRelative}`
     const router = makeRouter()
     router.publishGroups([group('ordinary-before-risk', [n1, m1, n2])], true)
     const initial = router.routeExactUrl(n1)
+    const initialRevision = initial.activation.routeRevision
 
     const toN2 = router.advanceRoute(initial.activation)
     assert.equal(toN2.accepted, true)
     assert.equal(toN2.advanced, true)
-    assert.equal(toN2.activation.candidateIndex, 2)
+    assert.equal(toN2.activation.candidateIndex, 0)
+    assert.equal(toN2.activation.routeRevision, initialRevision + 1)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 0, pendingCandidateIndex: 2, attemptedCount: 1 },
+    )
     assert.deepEqual(router.advanceRoute(initial.activation), {
         accepted: false,
         advanced: false,
         exhausted: false,
     })
+    assert.deepEqual(router.advanceRoute(toN2.activation), {
+        accepted: true,
+        advanced: false,
+        exhausted: false,
+        activation: toN2.activation,
+    })
+
+    const discardedN2 = router.prepareExactUrl(n1)
+    assert.equal(discardedN2.decision.url, n2)
+    discardedN2.discard()
+    assert.equal(discardedN2.commit().activation, undefined)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 0, pendingCandidateIndex: 2, attemptedCount: 1 },
+    )
+
     const n2Request = router.routeExactUrl(n1)
     assert.equal(n2Request.url, n2)
     assert.equal(n2Request.routed, true)
+    assert.equal(n2Request.activation.routeRevision, toN2.activation.routeRevision)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 2, pendingCandidateIndex: null, attemptedCount: 2 },
+    )
 
     const toM1 = router.advanceRoute(n2Request.activation)
-    assert.equal(toM1.activation.candidateIndex, 1)
-    assert.equal(router.routeExactUrl(n1).url, m1)
+    assert.equal(toM1.activation.candidateIndex, 2)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 2, pendingCandidateIndex: 1, attemptedCount: 2 },
+    )
+    assert.equal(router.advanceRoute(toM1.activation).exhausted, false)
+    const m1Request = router.routeExactUrl(n1)
+    assert.equal(m1Request.url, m1)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 1, pendingCandidateIndex: null, attemptedCount: 3 },
+    )
 
-    const exhausted = router.advanceRoute(toM1.activation)
+    const exhausted = router.advanceRoute(m1Request.activation)
     assert.equal(exhausted.accepted, true)
     assert.equal(exhausted.advanced, false)
     assert.equal(exhausted.exhausted, true)
@@ -144,14 +181,38 @@ const protocolAlias = `https:${protocolRelative}`
     const reset = router.resetAfterStableRecovery(exhausted.activation)
     assert.equal(reset.accepted, true)
     assert.equal(router.getStatus().groups[0].attemptedCount, 1)
-    assert.equal(router.advanceRoute(reset.activation).activation.candidateIndex, 0)
+    const retainedM1 = router.routeExactUrl(n1)
+    assert.equal(retainedM1.url, m1)
+    const backToN1 = router.advanceRoute(retainedM1.activation)
+    assert.equal(backToN1.activation.candidateIndex, 1)
+    assert.equal(router.getStatus().groups[0].pendingCandidateIndex, 0)
+    const preparedN1 = router.prepareExactUrl(n1)
+    assert.equal(preparedN1.decision.url, n1)
+
+    const preserveM1 = router.resetAfterStableRecovery(backToN1.activation)
+    assert.equal(preserveM1.accepted, true)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 1, pendingCandidateIndex: null, attemptedCount: 1 },
+    )
+    assert.equal(preparedN1.commit().activation, undefined)
+    const stillM1 = router.routeExactUrl(n1)
+    assert.equal(stillM1.url, m1)
+
+    const retriedN1 = router.advanceRoute(stillM1.activation)
+    assert.equal(router.getStatus().groups[0].pendingCandidateIndex, 0)
+    assert.equal(router.routeExactUrl(n1).url, n1)
+    assert.equal(retriedN1.activation.candidateIndex, 1)
 }
 
 {
     const allRiskRouter = makeRouter()
     allRiskRouter.publishGroups([group('all-risk', [m1, m2])], true)
     const first = allRiskRouter.routeExactUrl(m1)
-    assert.equal(allRiskRouter.advanceRoute(first.activation).activation.candidateIndex, 1)
+    const pendingM2 = allRiskRouter.advanceRoute(first.activation)
+    assert.equal(pendingM2.activation.candidateIndex, 0)
+    assert.equal(allRiskRouter.getStatus().groups[0].pendingCandidateIndex, 1)
+    assert.equal(allRiskRouter.routeExactUrl(m1).activation.candidateIndex, 1)
 
     const singleRouter = makeRouter()
     singleRouter.publishGroups([group('single', [n1])], true)
@@ -159,6 +220,29 @@ const protocolAlias = `https:${protocolRelative}`
     const exhausted = singleRouter.advanceRoute(only.activation)
     assert.equal(exhausted.exhausted, true)
     assert.equal(exhausted.activation.candidateIndex, 0)
+}
+
+{
+    const router = makeRouter()
+    router.publishGroups([group('stable-before-commit', [n1, n2])], true)
+    const initial = router.routeExactUrl(n1)
+    const pending = router.advanceRoute(initial.activation)
+    const preparedAlternate = router.prepareExactUrl(n1)
+    assert.equal(preparedAlternate.decision.url, n2)
+
+    const reset = router.resetAfterStableRecovery(pending.activation)
+    assert.equal(reset.accepted, true)
+    assert.deepEqual(
+        committedRouteStatus(router),
+        { candidateIndex: 0, pendingCandidateIndex: null, attemptedCount: 1 },
+    )
+    assert.equal(preparedAlternate.commit().activation, undefined)
+    assert.equal(router.routeExactUrl(n1).url, n1)
+
+    const retried = router.advanceRoute(reset.activation)
+    assert.equal(retried.advanced, true)
+    assert.equal(router.getStatus().groups[0].pendingCandidateIndex, 1)
+    assert.equal(router.routeExactUrl(n1).activation.candidateIndex, 1)
 }
 
 {
@@ -241,6 +325,15 @@ console.log('CDN media request routing tests passed')
 
 function makeRouter() {
     return createCdnMediaRequestRouter({ getLocationProtocol: () => 'https:' })
+}
+
+function committedRouteStatus(router) {
+    const status = router.getStatus().groups[0]
+    return {
+        candidateIndex: status.candidateIndex,
+        pendingCandidateIndex: status.pendingCandidateIndex,
+        attemptedCount: status.attemptedCount,
+    }
 }
 
 function group(key, urls) {
