@@ -4,8 +4,8 @@ title: CDN Three-Stage Delivery
 status: active
 created: 2026-08-05
 updated: 2026-08-07
-branch: wip/cdn-stall-recovery-delivery
-pr:
+branch:
+pr: 14
 supersedes: []
 superseded_by:
 ---
@@ -14,12 +14,14 @@ superseded_by:
 
 ## Summary
 
-- CDN selection 按三个阶段交付。Stage 1 与 Stage 2 的实现范围已经完成并由
-  [PR #13](https://github.com/JoeyTeng/bilibili-helper/pull/13) 交付；Stage 3 在独立
-  WIP 分支实现、评审和合并。
+- CDN selection 按三个阶段交付。Stage 1 与 Stage 2 由
+  [PR #13](https://github.com/JoeyTeng/bilibili-helper/pull/13) 交付；Stage 3 由
+  [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 交付，三个阶段均已进入
+  `dev`。
 - 三个阶段全部合并且 Joey 在 UK-local 环境完成人工播放验收前，整体状态保持
   `active`。
-- 两项条件同时满足前，不得创建稳定版 tag、发布稳定版或刷新 `main`。
+- UK-local 人工播放验收完成且 Joey 明确授权发布前，不得创建稳定版 tag、发布稳定版或
+  刷新 `main`。
 
 ## Stage Status
 
@@ -183,6 +185,11 @@ superseded_by:
 - 最终合并门禁把 `origin/dev@e7b8a988` 到新签名 head 的整个真实 PR merge-base 范围
   作为唯一验收范围，重新执行 secret admission 与 fresh-context Codex review；旧 review
   结果只用于 findings closure，不作为最终清洁结论。
+- 最终签名 head `9835f398` 的 exact-secret admission 为 `clean`，临时清理完整；唯一
+  fresh-context Codex review 结论为 `No findings.`。PR #14 的 CI `check` 通过后以
+  `c1d136e` squash 合并；合并后的 `origin/dev` tree 与受测 head tree
+  `ef97c0d29ba090f8e80ceff6886ad64acb13f42a` 完全一致，GitHub commit verification 为
+  `verified=true` / `reason=valid`。
 
 ## Compatibility Contract
 
@@ -200,7 +207,7 @@ superseded_by:
 
 ## Release Gate
 
-- 三个阶段的实现必须全部合并，稳定发布门禁才可以继续。
+- 三个阶段的实现已经全部合并；稳定发布门禁当前只等待 UK-local 人工验收。
 - 随后必须由 Joey 在 UK-local 环境人工验收播放与恢复行为。
 - 2026-08-06 的仓库 live E2E gate 已通过：BVID `BV17x411w7KC` 在 Chrome
   `151.0.7922.72` 中真实播放推进；2 个 candidate/probed host 均 healthy，probe
@@ -213,13 +220,13 @@ superseded_by:
 - live Stage 3 capability classifier 对同一 BVID 返回 `INCONCLUSIVE` / `exit 3`，原因是
   `no-unique-exact-group`。这正确保留了证据不足与成功之间的边界，不替代受控正向 gate，
   也不表示生产代码失败。
-- 合并与人工条件同时满足前，不创建稳定版 tag、不发布稳定版，也不刷新 `main`。
+- UK-local 人工验收完成且 Joey 明确授权前，不创建稳定版 tag、不发布稳定版，也不刷新
+  `main`。
 
 ## Next Steps
 
-1. Stage 1/2 PR #13 已合并；合并独立 Stage 3 PR，确认三个阶段全部进入 `dev`。
-2. 由 Joey 执行 UK-local 人工播放验收。
-3. 仅在上述门禁通过后恢复稳定 tag/release/`main` 刷新流程。
+1. 由 Joey 执行 UK-local 人工播放验收。
+2. 仅在人工门禁通过并收到明确授权后，恢复稳定 tag/release/`main` 刷新流程。
 
 ## Evidence
 

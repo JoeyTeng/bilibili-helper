@@ -1,9 +1,8 @@
 # CDN Selection Architecture
 
-状态：Stage 1（响应选择）与 Stage 2（本机两阶段探测）已合并；Stage 3（stall
-recovery）已由当前独立 PR 实现并完成本地自动化验证。全部三个阶段合并且 Joey 在 UK-local
-环境完成人工播放验收前，不得创建稳定版 tag、发布稳定版或刷新 `main`。自动 live
-E2E 只能提供辅助证据，不能替代这项人工验收。
+状态：Stage 1（响应选择）、Stage 2（本机两阶段探测）与 Stage 3（stall recovery）
+均已合并到 `dev`。Joey 在 UK-local 环境完成人工播放验收前，不得创建稳定版 tag、
+发布稳定版或刷新 `main`。自动 live E2E 只能提供辅助证据，不能替代这项人工验收。
 
 本文定义 BALH 浏览器端 CDN 选择的规范边界。它适用于 Bilibili 原始 playurl
 响应和 BALH 代理返回的 playurl 响应，也适用于 Vue、`fetch`、`XMLHttpRequest`
@@ -41,8 +40,8 @@ compatibility。新增播放入口时，优先扩展 envelope/adapter 和现有�
    `2 MiB` accounted-prefix 预算允许完整 `64 KiB` 样本时覆盖每个可准入的不同 host；
    Stage 1 成功结果中稳定排名前两名共享剩余 follow-up 预算，每个最多 `512 KiB`，
    并发不超过 `2`。吞吐量与可靠 DASH bitrate margin 是主要证据，TTFB 是次要证据。
-3. **Stage 3（已实现，待合并）**：在当前独立 PR 中实现有确认门槛、冷却与退避的 stall
-   recovery，只重路由未来的 Fetch/XHR 媒体请求，不中止或重载当前请求。
+3. **Stage 3（已完成、已合并）**：实现有确认门槛、冷却与退避的 stall recovery，
+   只重路由未来的 Fetch/XHR 媒体请求，不中止或重载当前请求。
 
 Stage 1/2 的完成不解除稳定发布门禁；完整交付状态以
 `docs/project_journal/2026/08/2026-08-05-cdn-three-stage-delivery-21b2.md` 为准。
@@ -204,7 +203,7 @@ Akamai、`mirrorov` 与 `bcache` 本身都不是 MCDN/PCDN 风险信号。旧版
 - 响应关键路径不得等待探测。首次或无有效缓存时先采用 `safe` 的确定性顺序，
   探测结果只影响下一次 playurl 处理，例如切换清晰度、切换 episode 或刷新后
   重新获取 playurl。Stage 1/2 没有当前媒体 segment request adapter，也不承诺在
-  已开始的播放中即时换路；Stage 3 将只接管之后发起的 Fetch/XHR 媒体请求。
+  已开始的播放中即时换路；Stage 3 只接管之后发起的 Fetch/XHR 媒体请求。
 - 在普通候选中优先使用有效、未过期的 host 分数；MCDN/PCDN 仍保留在最后。
 - `unprobeable` 与已确认失败分开；浏览器无法证明响应可读时不是“CDN 不可用”。
   当前 timeout 计入 `failure`，而媒体/网络 generation 变化导致的主动取消整次
@@ -862,7 +861,7 @@ Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能
 - `cache backend`：可以从内存升级到持久化存储，但 host-only 与隐私字段限制不变。
 - `delivery adapter`：可增加新的 player/global hook，但只能调用共享核心，不能复制
   选择逻辑。
-- `stall recovery`：已按 Stage 3 契约在当前独立 PR 中实现和验收；后续扩展仍不得放宽
+- `stall recovery`：已按 Stage 3 契约实现、验收并合并；后续扩展仍不得放宽
   exact-group、future-request-only、cooldown 或隐私边界。静态 candidate
   pool 只能是非默认实验性排序提示，而且只能引用当前 exact signed candidate group
   中已经存在的候选，不得引入外部 host/URL。任何外部 pool 都需要新的授权与签名
