@@ -85,8 +85,8 @@ superseded_by:
   地址。
 - MCDN/PCDN 是唯一风险降级层，只软降级、不删除；下游播放器继续拥有媒体请求
   fallback。
-- Stage 2 探测只影响之后取得的 playurl；当前播放的 stall recovery 属于独立
-  Stage 3 PR。
+- Stage 2 探测只影响之后取得的 playurl；当前播放的 stall recovery 不属于本工作流，
+  随后由独立 Stage 3 PR #14 交付。
 - 持久化记录只包含 host 级聚合、统一 `v2` cache version、时间、候选集合摘要和
   粗粒度网络提示，不包含 path、query、signed URL、视频或用户标识；日志也不记录
   signed URL。
