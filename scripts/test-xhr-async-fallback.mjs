@@ -56,6 +56,7 @@ const { injectXhr } = await import(pathToFileURL(outFile).href)
 
 await testOpenUrlTransformContract()
 await testTransactionalOpenUrlHooks()
+await testTrustedOpenedReentrantOpenSupersedesOuterRoute()
 await testMappedOpenFailureRollsBackTransaction()
 await testRollbackRestorationFailurePreservesNativeError()
 await testReentrantOpenUrlTransform()
@@ -294,6 +295,71 @@ async function testTransactionalOpenUrlHooks() {
         ])
         assert.equal(NativeXMLHttpRequest.instances[0].snapshotRequest().url, '/transaction-inner-target')
     }
+}
+
+async function testTrustedOpenedReentrantOpenSupersedesOuterRoute() {
+    const settlements = []
+    const attemptedRoutes = []
+    const requestCalls = []
+    let activeRoute
+    const { NativeXMLHttpRequest } = installInjectedXhr({
+        transformOpenUrl(url) {
+            return {
+                url: `${url}-target`,
+                commit() {
+                    settlements.push(`commit:${url}`)
+                    attemptedRoutes.push(url)
+                    activeRoute = url
+                },
+                rollback() {
+                    settlements.push(`rollback:${url}`)
+                },
+            }
+        },
+        transformRequest({ url, container }) {
+            requestCalls.push({ url, method: container.__method })
+            return null
+        },
+        transformResponse() { return null },
+    })
+    const xhr = new window.XMLHttpRequest()
+    const nativeXhr = NativeXMLHttpRequest.instances[0]
+    let reentered = false
+    xhr.addEventListener('readystatechange', () => {
+        if (reentered || xhr.readyState !== 1) return
+        reentered = true
+        xhr.open('GET', '/listener-inner')
+    })
+
+    nativeXhr.dispatchReadyStateChangeOnNextOpen()
+    xhr.open('GET', '/listener-outer')
+
+    assert.deepEqual(nativeXhr.openHistory, [
+        ['GET', '/listener-outer-target'],
+        ['GET', '/listener-inner-target'],
+    ])
+    assert.deepEqual(settlements, [
+        'commit:/listener-inner',
+        'rollback:/listener-outer',
+    ], 'the superseded outer route token must be discarded after native open returns')
+    assert.equal(activeRoute, '/listener-inner')
+    assert.deepEqual(
+        attemptedRoutes,
+        ['/listener-inner'],
+        'only the nested native request may become an attempted active route',
+    )
+    assert.equal(
+        nativeXhr.snapshotRequest().url,
+        '/listener-inner-target',
+        'discarding the outer route must not restore over the nested native request',
+    )
+
+    xhr.send('listener-inner-body')
+    assert.deepEqual(requestCalls, [{
+        url: '/listener-inner-target',
+        method: 'GET',
+    }])
+    assert.equal(nativeXhr.snapshotRequest().requestBody, 'listener-inner-body')
 }
 
 async function testRoutedNativeResponseIdentity() {

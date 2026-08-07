@@ -46,3 +46,17 @@ export function observeFinalCdnPlayUrlResponse<T>(value: T, deliveryOrder?: numb
     observeFinalCdnDelivery(playUrl ?? {}, deliveryOrder)
     return value
 }
+
+/** Observe the page-visible payload immediately before its success callback. */
+export function deliverFinalCdnPlayUrlResponse<T, R>(
+    value: T,
+    deliveryOrder: number | undefined,
+    deliver: (value: T) => R,
+): R {
+    try {
+        observeFinalCdnPlayUrlResponse(value, deliveryOrder)
+    } catch {
+        // Final observation is optional; page delivery remains authoritative.
+    }
+    return deliver(value)
+}

@@ -570,6 +570,17 @@ thenable 不能被当作普通响应对象。当前注入契约不延迟或重�
 `loadend`、`progress` 等其他 native 生命周期事件，因此依赖这些事件读取 BALH replacement
 body 的外部 wrapper 不在单方兼容保证内，组合测试必须如实报告。
 
+jQuery playurl adapter 还有一个更外层的异步交付边界：原始 XHR `DONE` 之后，区域
+代理 Promise 仍可能把 source payload 换成另一组 signed URLs。逻辑请求开始时先取得
+delivery token，并包装该 jQuery 实例已有的 `param.xhr` / `ajaxSettings.xhr` factory；
+token 通过 `WeakMap` 只绑定 factory 实际返回的 transport XHR identity。final observer
+只延迟这个实例的 raw publication，同 path、不同 query 或完全相同 URL 的旁路 XHR
+均不能抢占 token。代理 normalization 与 CDN policy 完成后，最外层边界先发布最终
+payload，再按注册顺序调用 option `success` 和链式 `.done()`；组合使用两种回调、回调
+期间重入注册与交付后的 `.done()` memory 语义都只能看到同一最终对象。若自定义
+jQuery 没有可包装的 XHR factory，页面交付保持 fail-open，最终 payload 使用新的
+completion-order token 覆盖先前 raw observation，而不替换自定义 transport。
+
 ### 幂等性
 
 - 对同一 payload、模式、配置和分数快照，重复运行应得到 byte-equivalent 的 URL

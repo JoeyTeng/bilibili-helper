@@ -10,9 +10,31 @@ const fetchObserverStates = new WeakMap<Function, { active: boolean }>()
 const xhrObserverStates = new WeakMap<Function, { active: boolean }>()
 const fetchSlotGetters = new WeakSet<Function>()
 const xhrSlotGetters = new WeakSet<Function>()
+const deferredXhrDeliveries = new WeakMap<object, number>()
 let installed = false
 let activeFetchObserver: Function | undefined
 let activeXhrObserver: Function | undefined
+
+/**
+ * Bind an already allocated page-delivery token to the exact XHR returned by a
+ * higher-level adapter's transport factory. The XHR observer then leaves final
+ * publication to that adapter after all asynchronous response transforms run.
+ */
+export function deferFinalCdnPlayUrlXhrDelivery<T>(
+    xhr: T,
+    deliveryOrder: number,
+): T {
+    try {
+        if ((typeof xhr === 'object' && xhr !== null) || typeof xhr === 'function') {
+            if (Number.isSafeInteger(deliveryOrder) && deliveryOrder > 0) {
+                deferredXhrDeliveries.set(xhr as object, deliveryOrder)
+            }
+        }
+    } catch {
+        // A hostile/custom XHR remains usable without final-observer deferral.
+    }
+    return xhr
+}
 
 /**
  * Keep one URL-transparent observer outside later Fetch/XHR response wrappers.
@@ -195,6 +217,7 @@ function createXhrObserver(
     const state = { active: false }
     const requestStates = new WeakMap<object, {
         deliveryOrder?: number
+        deferredObservation: boolean
         observedDone: boolean
     }>()
     let Observer: typeof window.XMLHttpRequest
@@ -203,8 +226,9 @@ function createXhrObserver(
         Observer = class FinalCdnObservedXMLHttpRequest extends predecessor {
             constructor() {
                 super()
-                const requestState = { observedDone: false } as {
+                const requestState = { deferredObservation: false, observedDone: false } as {
                     deliveryOrder?: number
+                    deferredObservation: boolean
                     observedDone: boolean
                 }
                 requestStates.set(this, requestState)
@@ -222,7 +246,8 @@ function createXhrObserver(
                         }
                         if (requestState.observedDone) return
                         requestState.observedDone = true
-                        if (requestState.deliveryOrder !== undefined) {
+                        if (requestState.deliveryOrder !== undefined
+                            && !requestState.deferredObservation) {
                             observeFinalXhrResponse(this, requestState.deliveryOrder)
                         }
                     })
@@ -236,22 +261,44 @@ function createXhrObserver(
                 const requestState = requestStates.get(this)
                 if (!requestState) return predecessorOpen.apply(this, args as any)
                 const previousOrder = requestState.deliveryOrder
+                const previousDeferredObservation = requestState.deferredObservation
                 const previousObservedDone = requestState.observedDone
                 let nextOrder: number | undefined
-                if (state.active && isObservedPlayUrl(readXhrOpenUrl(args[1]))) {
+                let deferredOrder: number | undefined
+                const requestUrl = readXhrOpenUrl(args[1])
+                if (state.active && isObservedPlayUrl(requestUrl)) {
                     try {
-                        nextOrder = beginFinalCdnPlayUrlDelivery()
+                        deferredOrder = deferredXhrDeliveries.get(this)
+                        deferredXhrDeliveries.delete(this)
                     } catch {
-                        // Sequencing is optional; native open remains authoritative.
+                        // WeakMap coordination is optional; native open remains authoritative.
+                    }
+                    if (deferredOrder !== undefined) {
+                        nextOrder = deferredOrder
+                    } else {
+                        try {
+                            nextOrder = beginFinalCdnPlayUrlDelivery()
+                        } catch {
+                            // Sequencing is optional; native open remains authoritative.
+                        }
                     }
                 }
                 requestState.deliveryOrder = nextOrder
+                requestState.deferredObservation = deferredOrder !== undefined
                 requestState.observedDone = false
                 try {
                     return predecessorOpen.apply(this, args as any)
                 } catch (error) {
                     if (requestState.deliveryOrder === nextOrder) {
+                        if (deferredOrder !== undefined) {
+                            try {
+                                deferredXhrDeliveries.set(this, deferredOrder)
+                            } catch {
+                                // A retry can fall back to ordinary observation.
+                            }
+                        }
                         requestState.deliveryOrder = previousOrder
+                        requestState.deferredObservation = previousDeferredObservation
                         requestState.observedDone = previousObservedDone
                     }
                     throw error
@@ -337,12 +384,24 @@ function readFetchUrl(input: RequestInfo | URL) {
 }
 
 function isObservedPlayUrl(rawUrl: string | null) {
-    if (!rawUrl) return false
+    return observedPlayUrlRequestKey(rawUrl) !== null
+}
+
+function observedPlayUrlRequestKey(rawUrl: unknown) {
     try {
-        const parsed = new URL(rawUrl, window.location.href)
-        return parsed.protocol === 'https:'
-            && isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname)
+        const value = typeof rawUrl === 'string'
+            ? rawUrl
+            : rawUrl instanceof URL
+                ? rawUrl.href
+                : null
+        if (!value) return null
+        const parsed = new URL(value, window.location.href)
+        if (parsed.protocol !== 'https:'
+            || !isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname)) {
+            return null
+        }
+        return `${parsed.protocol}//${parsed.host}${parsed.pathname}`
     } catch {
-        return false
+        return null
     }
 }

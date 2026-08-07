@@ -102,10 +102,17 @@ superseded_by:
   （包括 status listener 与 mode reader 两个重入点的 supersession fence）、非 JSON XHR
   responseType fail-open，以及“缺失/明显过短 cooldown 必须先判 FAIL”的 classifier
   顺序；每项均有直接回归。
-- `pnpm run check` 在修复树上完整通过；聚合 gate 新增 empty-final-delivery 与 live
-  cooldown assessment 回归，且 build 成功。
+- 最终 `origin/dev..Stage 3 head` 整段 fresh-context review 另确认两个交付边界：jQuery
+  区域代理 Promise 的最终 payload 必须压过内部 raw XHR，且可信 `OPENED` listener
+  同步重入 `open()` 后外层 route transaction 不得提交。修复使用 jQuery transport XHR
+  identity 绑定 request-start token，并在一次 final observation 后统一交付 option
+  `success` / `.done()`；XHR transaction 以 applied generation 拒绝已被内层取代的外层
+  commit。真实 wrapper、旁路 XHR、乱序、组合回调与 inner-open 均有直接回归。
+- `pnpm run check` 在最终 findings 修复树上完整通过；聚合 gate 新增
+  jQuery-final-delivery、empty-final-delivery 与 live cooldown assessment 回归，且 build
+  成功。
 - 受控 Chrome `151.0.7922.108` recovery E2E 在最终修复树重新通过：Fetch grace
-  `3029 ms`、XHR grace `2990 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
+  `3019 ms`、XHR grace `3009 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
   cooldown、predecessor/player identity、cleanup 与隐私门禁均通过。
 - 固定 CDN Switcher `0.1.4` / SHA-256
   `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4` 重新通过两种

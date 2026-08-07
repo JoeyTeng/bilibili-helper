@@ -438,6 +438,15 @@ export function injectXhr({ transformOpenUrl, transformRequest, transformRespons
     function commitOpenTransaction(state, transaction) {
         if (transaction.committed) return
         applyOpenTransaction(state, transaction)
+        if (state.generation !== transaction.appliedGeneration) {
+            // A trusted OPENED listener can synchronously call open() again on
+            // this XHR. The nested request then owns both the native XHR and
+            // the current wrapper generation; only discard the superseded
+            // outer route token without restoring over the nested state.
+            removeOpenTransaction(state, transaction)
+            settleOpenRoute(transaction, 'rollback')
+            return
+        }
         transaction.committed = true
         removeOpenTransaction(state, transaction)
         settleOpenRoute(transaction, 'commit')

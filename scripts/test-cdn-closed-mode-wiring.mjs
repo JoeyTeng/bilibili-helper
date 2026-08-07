@@ -544,6 +544,11 @@ function closedModeStubPlugin() {
             export const rewriteSubtitleWebViewResponse = () => null
         `],
         ['./cdn_playurl', `
+            export function beginFinalCdnPlayUrlDelivery() { return 1 }
+            export function observeFinalCdnPlayUrlResponse(value) { return value }
+            export function deliverFinalCdnPlayUrlResponse(value, deliveryOrder, deliver) {
+                return deliver(value)
+            }
             export function findPlayUrlPayload(value) {
                 const candidates = [
                     value?.result?.video_info,

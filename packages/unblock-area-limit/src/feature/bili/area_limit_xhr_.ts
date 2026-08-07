@@ -21,11 +21,42 @@ import space_account_info_map from '../../feature/bili/space_account_info_map'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
-import { applyCdnPolicyToPlayUrlResponse, findPlayUrlPayload } from './cdn_playurl';
+import {
+    applyCdnPolicyToPlayUrlResponse,
+    beginFinalCdnPlayUrlDelivery,
+    deliverFinalCdnPlayUrlResponse,
+    findPlayUrlPayload,
+} from './cdn_playurl';
 import { isSupportedCdnPlayUrlEndpoint } from './cdn_playurl_endpoint';
 import { prepareCdnRecoveryRequestUrl } from './cdn_recovery_browser';
+import { deferFinalCdnPlayUrlXhrDelivery } from './cdn_final_delivery_observer';
 
 export const area_limit_xhr = (() => {
+    const deferredJqueryXhrFactoryPredecessors = new WeakMap<Function, Function>()
+
+    function bindFinalCdnDeliveryToJqueryXhrFactory(jquery, param, deliveryOrder) {
+        let xhrFactory = typeof param.xhr === 'function'
+            ? param.xhr
+            : jquery.ajaxSettings && typeof jquery.ajaxSettings.xhr === 'function'
+                ? jquery.ajaxSettings.xhr
+                : undefined
+        if (!xhrFactory) return false
+        while (deferredJqueryXhrFactoryPredecessors.has(xhrFactory)) {
+            xhrFactory = deferredJqueryXhrFactoryPredecessors.get(xhrFactory)
+        }
+        const wrappedFactory = function (...args) {
+            const xhr = xhrFactory.apply(this, args)
+            try {
+                return deferFinalCdnPlayUrlXhrDelivery(xhr, deliveryOrder)
+            } catch {
+                return xhr
+            }
+        }
+        deferredJqueryXhrFactoryPredecessors.set(wrappedFactory, xhrFactory)
+        param.xhr = wrappedFactory
+        return true
+    }
+
     function transformCdnRecoveryOpenUrl(url) {
         try {
             const prepared = prepareCdnRecoveryRequestUrl(url, 'GET')
@@ -490,8 +521,9 @@ export const area_limit_xhr = (() => {
 
         function injectAjax() {
             log('injectAjax at:', window.jQuery)
-            let originalAjax = $.ajax;
-            $.ajax = function (arg0, arg1) {
+            const jquery = $;
+            let originalAjax = jquery.ajax;
+            jquery.ajax = function (arg0, arg1) {
                 let param;
                 if (arg1 === undefined) {
                     param = arg0;
@@ -502,11 +534,36 @@ export const area_limit_xhr = (() => {
                 let oriSuccess = param.success;
                 let oriError = param.error;
                 let mySuccess, myError;
+                let finalCdnDeliveryOrder;
+                let observeFinalCdnPlayUrlDelivery = false;
+                const finalDoneCallbacks = [];
+                let finalSuccessDeliveryState = 'pending';
+                let finalSuccessValue;
+                const deliverFinalSuccess = value => {
+                    finalSuccessDeliveryState = 'delivering';
+                    finalSuccessValue = value;
+                    try {
+                        if (oriSuccess) oriSuccess(value);
+                        for (let index = 0; index < finalDoneCallbacks.length; index += 1) {
+                            finalDoneCallbacks[index](value);
+                        }
+                    } finally {
+                        finalSuccessDeliveryState = 'delivered';
+                    }
+                };
                 // 投递结果的transformer, 结果通过oriSuccess/Error投递
                 let dispatchResultTransformer = p => p
                     .then(r => {
                         // debugger
-                        oriSuccess(r)
+                        if (!observeFinalCdnPlayUrlDelivery) {
+                            oriSuccess(r)
+                        } else {
+                            deliverFinalCdnPlayUrlResponse(
+                                r,
+                                finalCdnDeliveryOrder,
+                                deliverFinalSuccess,
+                            )
+                        }
                     })
                     .catch(e => oriError(e))
                 // 转换原始请求的结果的transformer
@@ -535,6 +592,25 @@ export const area_limit_xhr = (() => {
                     || isPgcV1PlayUrlUrl(param.url) // 新的番剧页面playurl接口
                     || (balh_config.enable_in_av && isInterfacePlayUrlUrl(param.url)) // 普通的av页面playurl接口
                 ) {
+                    observeFinalCdnPlayUrlDelivery = true
+                    try {
+                        finalCdnDeliveryOrder = beginFinalCdnPlayUrlDelivery()
+                    } catch {
+                        // Final observation is optional; preserve legacy delivery.
+                    }
+                    if (finalCdnDeliveryOrder !== undefined) {
+                        try {
+                            const bound = bindFinalCdnDeliveryToJqueryXhrFactory(
+                                jquery,
+                                param,
+                                finalCdnDeliveryOrder,
+                            )
+                            if (!bound) finalCdnDeliveryOrder = undefined
+                        } catch {
+                            // Custom jQuery settings remain authoritative.
+                            finalCdnDeliveryOrder = undefined
+                        }
+                    }
                     // 新playrul:
                     // 1. 部分页面参数放在param.data中
                     // 2. 成功时, 返回的结果放到了result中: {"code":0,"message":"success","result":{}}
@@ -660,6 +736,20 @@ export const area_limit_xhr = (() => {
                 // 若外部使用xhr.done()处理结果, 则替换xhr.done()
                 if (!oriSuccess && mySuccess) {
                     xhr.done(mySuccess);
+                }
+                if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                    xhr.done = function (...successCallbacks) {
+                        successCallbacks.forEach(success => {
+                            if (typeof success !== 'function') return;
+                            if (finalSuccessDeliveryState === 'delivered') {
+                                success(finalSuccessValue);
+                            } else {
+                                finalDoneCallbacks.push(success);
+                            }
+                        });
+                        return xhr;
+                    };
+                } else if (!oriSuccess && mySuccess) {
                     xhr.done = function (success) {
                         oriSuccess = success; // 保存外部设置的success函数
                         return xhr;

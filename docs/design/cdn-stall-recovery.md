@@ -83,6 +83,17 @@ two legacy `/player/web_api[/v2]/playurl` paths retained by the existing adapter
 still requires the resolved request to be HTTPS. Unsupported, non-configurable, hostile, or
 unreadable hook descriptors remain fail-open.
 
+A higher-level jQuery adapter may continue transforming a raw XHR result asynchronously, including
+replacing an area-limited source payload with a proxy payload. That logical request allocates its
+delivery token before the jQuery predecessor starts and wraps the existing jQuery `xhr` factory.
+The token is bound by `WeakMap` to the exact transport XHR returned by that factory; URL-wide or
+path-wide suppression is forbidden because a synchronous `beforeSend` / `ajaxSend` side request
+could otherwise steal the token. Only that identity defers its raw `DONE` publication. The outer
+Promise boundary publishes the final proxy-or-source payload once before delivering the same object
+to option `success` and every chained `.done()` callback, including callbacks registered during or
+after delivery. If no safe factory seam exists, page behavior remains authoritative and the outer
+payload uses a fresh completion-order token instead of replacing the custom transport.
+
 Each supported playurl Fetch call / XHR `open()` receives a monotonic delivery order before its
 predecessor starts. All active observation layers for that delivery use the same accepted order;
 superseded inner observers remain transparent. If a newer playurl finishes first, a late older
@@ -328,6 +339,12 @@ stores the routed arguments only after native `open()` succeeds; a throw discard
 mapping and preserves the previous committed request state. The implementation never opens the
 original URL and then reopens the target.
 
+A trusted native `OPENED` event can synchronously re-enter `open()` on the same public XHR. Each
+transaction records the generation it applied before page listeners run. After native `open()`
+returns, route commit is allowed only while that generation is still current. A superseded outer
+transaction settles only its own route token as rollback; it never restores request state over the
+successful inner `open()`, and only the inner URL may become active/attempted.
+
 ## Test and acceptance matrix
 
 ### Deterministic tests
@@ -346,7 +363,10 @@ original URL and then reopens the target.
   `Range`, credentials, body, signal, and fail-open identity;
 - XHR native `open()` once, successful/failed/reentrant open, headers, `Range`, credentials, body,
   abort/reuse generation, transactional commit/discard, subclass/private-field/WeakMap identity,
-  and native response identity;
+  trusted-`OPENED` synchronous inner-open supersession, and native response identity;
+- real jQuery `area_limit_xhr()` delivery with different raw/proxy URLs, request-order tokens,
+  inverse completion, exact transport-identity deferral, same-path/same-URL bypass XHRs, combined
+  option `success` plus chained/late `.done()`, missing factory fallback, and observation failure;
 - supported modern and legacy HTTPS playurl endpoints, newer parsed error delivery clearing old
   groups, and stale transforms preserving an active timer/attempt/override with zero publication;
 - unrelated GETs causing no DOM query, media read, or monitor timer churn while the same exact GET
@@ -386,7 +406,8 @@ When reusing this design in another userscript or player integration:
 
 1. identify the final response boundary, keep inner policy transforms free of global publication,
    compose outside supported downstream transformers, and commit exact groups only for an accepted
-   delivery token before page code consumes the response;
+   delivery token before page code consumes the response; when a high-level adapter continues after
+   raw XHR completion, bind deferral to its exact transport identity rather than a URL-wide scope;
 2. prove that signed URLs remain memory-only and that diagnostics are host/structure-only;
 3. add one pre-predecessor Fetch mapper and one pre-native-open XHR mapper for media routing; keep
    the separate final-response observer URL-transparent and identity-preserving;
