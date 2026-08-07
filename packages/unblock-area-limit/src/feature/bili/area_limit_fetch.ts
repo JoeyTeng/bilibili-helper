@@ -9,6 +9,7 @@ import { balh_config } from "../config"
 import { r } from "../r"
 import { prepareCdnRecoveryRequestUrl } from "./cdn_recovery_browser"
 import { applyCdnPolicyToPlayUrlResponse } from "./cdn_playurl"
+import { isSupportedCdnPlayUrlEndpoint } from "./cdn_playurl_endpoint"
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
 
@@ -216,15 +217,35 @@ function redactSubtitleMetadataUrl(url: string) {
 }
 
 function isPgcPlayUrlUrl(url: string) {
-    return (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
-        || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl')))
-        && !new URL(url, document.location.href).searchParams.get('balh_ajax')
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return parsed?.hostname === 'api.bilibili.com'
+        && (parsed.pathname === '/pgc/player/web/playurl'
+            || parsed.pathname === '/pgc/player/web/v2/playurl')
+        && !parsed.searchParams.get('balh_ajax')
 }
 
 function isOtherPlayUrlUrl(url: string) {
-    return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
-        || url.match(RegExps.url('api.bilibili.com/x/player/wbi/playurl'))
-        || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return !!parsed && (
+        (parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/x/player/playurl'
+                || parsed.pathname === '/x/player/wbi/playurl'))
+        || (parsed.hostname === 'interface.bilibili.com'
+            && parsed.pathname === '/v2/playurl')
+    )
+}
+
+function parseSupportedCdnPlayUrlUrl(url: string) {
+    // Preserve the adapters' existing absolute/protocol-relative HTTP(S)
+    // boundary; endpoint membership itself is shared with the final observer.
+    if (!/^(?:https?:)?\/\//.test(url)) return null
+    try {
+        const parsed = new URL(url, document.location.href)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null
+    } catch {
+        return null
+    }
 }
 
 async function handlePlayUrlCdnFetch(originResponse: Response): Promise<Response> {

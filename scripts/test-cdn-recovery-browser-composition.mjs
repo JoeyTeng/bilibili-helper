@@ -10,15 +10,34 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 globalThis.__testBalhConfig = { cdn_mode: 'auto' }
 globalThis.location = { protocol: 'https:' }
 
+let timerScheduleCount = 0
+let timerClearCount = 0
+let nextTimerHandle = 1
+const scheduledTimers = new Map()
+let now = 0
+Date.now = () => now
+globalThis.setTimeout = (callback, delayMs) => {
+    timerScheduleCount += 1
+    const handle = nextTimerHandle++
+    scheduledTimers.set(handle, { callback, delayMs })
+    return handle
+}
+globalThis.clearTimeout = handle => {
+    timerClearCount += 1
+    scheduledTimers.delete(handle)
+}
+
 class FakeDocument extends EventTarget {
     constructor() {
         super()
         this.visibilityState = 'visible'
         this.videos = []
+        this.queryCount = 0
     }
 
     querySelectorAll(selector) {
         assert.equal(selector, 'video')
+        this.queryCount += 1
         return this.videos
     }
 }
@@ -31,13 +50,16 @@ function createRanges(ranges) {
     }
 }
 
-function createVideo(currentTime) {
+function createVideo(currentTime, counters) {
     return {
         isConnected: true,
         paused: false,
         seeking: false,
         ended: false,
-        currentTime,
+        get currentTime() {
+            counters.mediaReadCount += 1
+            return currentTime
+        },
         duration: 100,
         buffered: createRanges([[0, currentTime + 5]]),
         currentSrc: 'media',
@@ -90,8 +112,10 @@ const group = {
     ],
 }
 
-const firstVideo = createVideo(1)
-const secondVideo = createVideo(2)
+const counters = { mediaReadCount: 0 }
+const firstVideo = createVideo(1, counters)
+const secondVideo = createVideo(2, counters)
+const thirdVideo = createVideo(3, counters)
 documentValue.videos = [firstVideo]
 const monitor = recovery.installCdnRecoveryMonitor()
 assert.ok(monitor, 'the browser composition monitor must install')
@@ -112,6 +136,63 @@ assert.equal(afterReplacement.activeGroupCount, 1)
 assert.equal(afterReplacement.groups[0].state, 'monitoring')
 assert.equal(afterReplacement.groups[0].candidateIndex, 0)
 
+recovery.sampleCdnRecoveryPlayback({
+    visible: true,
+    paused: false,
+    seeking: false,
+    ended: false,
+    currentTimeSeconds: 2,
+    durationSeconds: 100,
+    bufferedAheadSeconds: 0.1,
+})
+const graceTimer = [...scheduledTimers.entries()]
+    .find(([, timer]) => timer.delayMs === 3_000)
+assert.ok(graceTimer, 'low buffer must install the recovery grace timer')
+now = 3_000
+scheduledTimers.delete(graceTimer[0])
+graceTimer[1].callback()
+assert.equal(recovery.getCdnRecoveryStatus().groups[0].candidateIndex, 1)
+
+// Eligibility may be checked before DOM synchronization, but the routed
+// decision must be prepared again afterwards. A replaced player clears the
+// previous context's alternate override before the native request starts.
+documentValue.videos = [thirdVideo]
+const replacementPrepared = recovery.prepareCdnRecoveryRequestUrl(primaryUrl, 'GET')
+assert.equal(recovery.getCdnRecoveryStatus().contextEpoch, 2)
+assert.equal(replacementPrepared.decision.url, primaryUrl)
+assert.ok(replacementPrepared.commit().activation)
+
+const unrelatedBefore = {
+    queryCount: documentValue.queryCount,
+    mediaReadCount: counters.mediaReadCount,
+    timerScheduleCount,
+    timerClearCount,
+}
+const unrelatedUrl = 'https://unrelated.example/telemetry'
+const unrelated = recovery.prepareCdnRecoveryRequestUrl(unrelatedUrl, 'GET')
+assert.deepEqual(unrelated.decision, { url: unrelatedUrl, routed: false })
+assert.deepEqual(unrelated.commit(), { url: unrelatedUrl, routed: false })
+assert.deepEqual({
+    queryCount: documentValue.queryCount,
+    mediaReadCount: counters.mediaReadCount,
+    timerScheduleCount,
+    timerClearCount,
+}, unrelatedBefore, 'an unrelated GET must not wake, sample, or reschedule the monitor')
+
+const exactBefore = {
+    queryCount: documentValue.queryCount,
+    mediaReadCount: counters.mediaReadCount,
+    timerScheduleCount,
+    timerClearCount,
+}
+const exact = recovery.prepareCdnRecoveryRequestUrl(alternateUrl, 'GET')
+assert.equal(exact.decision.url, alternateUrl)
+assert.ok(exact.commit().activation)
+assert.ok(documentValue.queryCount > exactBefore.queryCount, 'an exact GET must wake the monitor')
+assert.ok(counters.mediaReadCount > exactBefore.mediaReadCount, 'an exact GET must sample media')
+assert.ok(timerScheduleCount > exactBefore.timerScheduleCount, 'an exact GET must reschedule polling')
+assert.ok(timerClearCount > exactBefore.timerClearCount, 'an exact GET must invalidate prior polling')
+
 globalThis.__testBalhConfig.cdn_mode = 'safe'
 const disabled = recovery.getCdnRecoveryStatus()
 assert.equal(disabled.enabled, false)
@@ -123,6 +204,20 @@ const reenabled = recovery.getCdnRecoveryStatus()
 assert.equal(reenabled.enabled, true)
 assert.equal(reenabled.activeGroupCount, 0)
 assert.equal(reenabled.groups[0].state, 'unseen')
+
+const protocolRelativeUrl = '//protocol-relative.example/video.m4s?token=alias'
+recovery.publishCdnRecoveryGroups([{
+    ...group,
+    candidates: [{
+        url: protocolRelativeUrl,
+        sourceFields: ['base_url'],
+        riskKinds: [],
+    }],
+}], true)
+const aliasQueryCount = documentValue.queryCount
+const alias = recovery.prepareCdnRecoveryRequestUrl(`https:${protocolRelativeUrl}`, 'get')
+assert.ok(alias.commit().activation, 'the publication-time protocol alias must remain eligible')
+assert.ok(documentValue.queryCount > aliasQueryCount, 'an exact protocol alias must wake the monitor')
 
 monitor.dispose()
 console.log('CDN recovery browser composition tests passed')

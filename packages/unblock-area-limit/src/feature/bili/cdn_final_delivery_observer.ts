@@ -2,14 +2,8 @@ import {
     beginFinalCdnPlayUrlDelivery,
     observeFinalCdnPlayUrlResponse,
 } from './cdn_playurl'
+import { isSupportedCdnPlayUrlEndpoint } from './cdn_playurl_endpoint'
 
-const PLAYURL_PATHS = new Set([
-    '/x/player/playurl',
-    '/x/player/wbi/playurl',
-    '/pgc/player/web/playurl',
-    '/pgc/player/web/v2/playurl',
-    '/pugv/player/web/playurl',
-])
 const REPAIR_DELAYS_MS = [0, 50, 250, 1_000] as const
 
 const fetchObserverStates = new WeakMap<Function, { active: boolean }>()
@@ -293,8 +287,10 @@ function observeFinalXhrResponse(xhr: XMLHttpRequest, deliveryOrder: number) {
     if (!isObservedPlayUrl(responseUrl)) return
 
     try {
+        const responseType = xhr.responseType
+        if (responseType && responseType !== 'json' && responseType !== 'text') return
         const response = xhr.response
-        if (response && typeof response === 'object') {
+        if (isJsonCompatibleResponseObject(response)) {
             observeFinalCdnPlayUrlResponse(response, deliveryOrder)
             return
         }
@@ -310,6 +306,13 @@ function observeFinalXhrResponse(xhr: XMLHttpRequest, deliveryOrder: number) {
     } catch {
         // An unreadable final response must not affect native delivery.
     }
+}
+
+function isJsonCompatibleResponseObject(value: unknown): value is object {
+    if (!value || typeof value !== 'object') return false
+    if (Array.isArray(value)) return true
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
 }
 
 function readXhrOpenUrl(value: unknown) {
@@ -338,8 +341,7 @@ function isObservedPlayUrl(rawUrl: string | null) {
     try {
         const parsed = new URL(rawUrl, window.location.href)
         return parsed.protocol === 'https:'
-            && parsed.hostname === 'api.bilibili.com'
-            && PLAYURL_PATHS.has(parsed.pathname)
+            && isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname)
     } catch {
         return false
     }

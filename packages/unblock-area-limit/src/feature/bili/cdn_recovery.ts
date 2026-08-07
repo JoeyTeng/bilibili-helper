@@ -171,6 +171,7 @@ export function createCdnRecoveryCoordinator(
             return settledRecoveryPreparation({ url, routed: false })
         }
         return {
+            eligible: prepared.eligible,
             decision: prepared.decision,
             commit() {
                 let decision: CdnMediaRouteDecision
@@ -612,6 +613,7 @@ export function createCdnRecoveryCoordinator(
 
 function settledRecoveryPreparation(decision: CdnMediaRouteDecision): PreparedCdnMediaRoute {
     return {
+        eligible: false,
         decision,
         commit: () => decision,
         discard() { },

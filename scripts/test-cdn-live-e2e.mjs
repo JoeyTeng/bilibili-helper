@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assessStage3InitialCooldown } from './cdn-live-e2e-cooldown.mjs'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const userscriptPath = path.join(rootDir, 'dist', 'unblock-area-limit.user.js')
@@ -16,6 +17,9 @@ const stage3FaultWindowTimeoutMs = 22_000
 const stage3FutureRequestTimeoutMs = 12_000
 const stage3CooldownObservationMs = 15_500
 const stage3PollIntervalMs = 200
+const stage3StatusSampleTimeoutMs = 2_000
+const stage3SwitchObservationSlackMs = 500
+const stage3MinimumCooldownMs = 15_000
 const stage3HookSymbol = 'balh.stage3.live-capability'
 const stage3MaxBrowserRequests = 10_000
 const stage3MaxHeldRequests = 32
@@ -859,7 +863,7 @@ async function configureStage3PageHooks(page, deadline, groups) {
 }
 
 async function readStage3CapabilitySample(page, deadline) {
-    const sample = await runStage('stage3-sample', deadline, 2_000, () => page.evaluate(symbolName => {
+    const sample = await runStage('stage3-sample', deadline, stage3StatusSampleTimeoutMs, () => page.evaluate(symbolName => {
         const rawStatus = window.bangumi_area_limit_hack?.getCdnRecoveryStatus?.()
         const status = rawStatus && typeof rawStatus === 'object' ? {
             enabled: rawStatus.enabled,
@@ -1518,15 +1522,24 @@ async function waitForStage3RouteAdvance(
             if (!isUniqueStage3Candidate(groups, analysis.exactIndex, selected.groupIndex, switchedIndex)) {
                 return stage3CapabilityResult('INCONCLUSIVE', 'same-group-alternate-ambiguous', evidence)
             }
-            if (lastUnswitchedNow === null) {
-                return stage3CapabilityResult('INCONCLUSIVE', 'cooldown-anchor-unavailable', evidence)
-            }
-            if (typeof recovery.retryAt !== 'number'
-                || recovery.retryAt < lastUnswitchedNow + 15_000) {
-                return stage3CapabilityResult('FAIL', 'cooldown-not-installed', evidence)
-            }
-            if (recovery.retryAt < sample.now + 15_000) {
-                return stage3CapabilityResult('INCONCLUSIVE', 'cooldown-duration-unprovable', evidence)
+            const cooldown = assessStage3InitialCooldown(
+                {
+                    retryAt: recovery.retryAt,
+                    lastUnswitchedAt: lastUnswitchedNow,
+                    firstSwitchedAt: sample.now,
+                    minimumCooldownMs: stage3MinimumCooldownMs,
+                    maxObservationWindowMs: stage3PollIntervalMs
+                        + stage3StatusSampleTimeoutMs
+                        + stage3SwitchObservationSlackMs,
+                },
+            )
+            const cooldownEvidence = { ...evidence, ...cooldown.evidence }
+            if (cooldown.result) {
+                return stage3CapabilityResult(
+                    cooldown.result.status,
+                    cooldown.result.reason,
+                    cooldownEvidence,
+                )
             }
             return waitForStage3FutureAlternate(
                 page,
@@ -1541,7 +1554,7 @@ async function waitForStage3RouteAdvance(
                 // Requests started before this first switched snapshot cannot be
                 // attributed to the switch without a page-side causal marker.
                 observerSnapshot.sequence,
-                evidence,
+                cooldownEvidence,
             )
         }
         lastUnswitchedNow = sample.now

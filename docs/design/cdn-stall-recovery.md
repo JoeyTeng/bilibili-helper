@@ -58,38 +58,45 @@ standard document + video signals
 ### Publication
 
 The shared CDN runtime already sees `CdnCandidateGroup[]` before Stage 2 flattens candidates by
-URL/host. A BALH policy adapter first publishes its post-policy result. The outer final-response
-observer then republishes after every compatible downstream transformer and before page code can
-consume the delivered playurl response. Therefore a short-lived inner publication cannot become
-the route source for a request derived from the downstream response. The authoritative delivery
-publication follows these rules:
+URL/host. A BALH policy adapter mutates only its private response payload; it does not update the
+candidate view, recovery registry, probe generation, or scheduler. The outer final-response
+observer is the sole committer after every compatible downstream transformer and before page code
+can consume the delivered playurl response. Therefore an inner or stale response has no transient
+global publication to reset current recovery state. The authoritative delivery publication follows
+these rules:
 
 - `safe` / `auto`: publish the post-policy collection, never the pre-policy collection;
 - `original`: publish the collected original order;
 - `manual`: publish the completed manual delivery result, while Stage 3 remains disabled;
-- collection failure: atomically publish an empty registry so stale signed URLs cannot survive.
+- a parsed error envelope without `dash` / `durl`: atomically publish an empty registry with the
+  same delivery token so stale signed URLs cannot survive;
+- collection failure at the accepted final boundary: likewise publish an empty registry, while an
+  unreadable or malformed response remains fail-open and unobserved.
 
 The observer uses assignment-aware Fetch/XHR slots. If another userscript assigns a wrapper after
 BALH, the slot exposes a fresh observer around that wrapper while the wrapper may continue calling
 the exact predecessor it captured. This avoids recursion and makes both load orders converge on
 the downstream response. Fetch awaits and parses only a clone, then returns the exact predecessor
 `Response`; XHR observes `DONE` before page listeners while preserving the public XHR instance and
-native response getters. Only official HTTPS Bilibili playurl paths are inspected. Unsupported,
-non-configurable, hostile, or unreadable hook descriptors remain fail-open.
+native response getters. A shared endpoint classifier covers exact modern host/path pairs plus the
+two legacy `/player/web_api[/v2]/playurl` paths retained by the existing adapter; the final observer
+still requires the resolved request to be HTTPS. Unsupported, non-configurable, hostile, or
+unreadable hook descriptors remain fail-open.
 
 Each supported playurl Fetch call / XHR `open()` receives a monotonic delivery order before its
 predecessor starts. All active observation layers for that delivery use the same accepted order;
 superseded inner observers remain transparent. If a newer playurl finishes first, a late older
-response cannot become authoritative: after its inner BALH adapter settles, the outer observer
-restores the immutable group snapshot from the newest accepted final delivery before returning the
-old response to its caller. A synchronous Vue/hydration delivery receives a new order and likewise
-supersedes any older pending transport. Tokens and snapshots are memory-only and never enter status,
+response cannot become authoritative: its private policy transform may finish, but the stale outer
+token performs zero collection, publication, scheduling, or snapshot restoration before returning
+the old response to its caller. A synchronous Vue/hydration delivery receives a new order and
+likewise supersedes any older pending transport. Tokens are memory-only and never enter status,
 logs, or storage.
 
-Final observation never runs selection or host replacement a second time. It only refreshes the
-Stage 2 candidate view and the Stage 3 exact registry from the already delivered payload. A changed
-final group generation invalidates any transient inner probe/recovery work; repeated byte-identical
-publication is idempotent.
+Final observation never runs selection or host replacement a second time. An accepted token alone
+refreshes the Stage 2 candidate view and the Stage 3 exact registry from the already delivered
+payload. A changed accepted final generation invalidates prior recovery work; stale responses do
+not change generation, activation, timers, attempts, overrides, or probe scheduling. Repeated
+byte-identical publication is idempotent.
 
 An explicit BALH close is stronger than the CDN mode. A fresh closed run installs neither the
 monitor nor final-response observers; the runtime also treats a later in-page close as non-auto so
@@ -152,8 +159,10 @@ Every advance revalidates all five fields. Old generation/revision activations a
 completion signals are no-ops. Exhaustion preserves the last exact candidate and never returns an
 empty or fabricated URL.
 
-Request observation is transactional. `prepareExactUrl()` computes an exact decision and opaque
-token without changing active/attempted state. `commit()` revalidates the context, generation,
+Request observation is transactional. `prepareExactUrl()` computes an exact decision, a
+side-effect-free eligibility bit, and an opaque token without changing active/attempted state.
+Unrelated GETs return before any video query, media sampling, or monitor timer churn. `commit()`
+revalidates the context, generation,
 group, route revision, exact match, and target before observing the request; `discard()` leaves
 routing state untouched. Fetch commits only after its predecessor accepts the call. XHR commits
 only after the single native `open()` returns successfully. This prevents constructor errors,
@@ -162,8 +171,9 @@ creating a request that never existed or undoing a successful inner request.
 
 The native acceptance boundary is itself reentrant: a Fetch predecessor or XHR WebIDL/open path
 can synchronously replace the active video after `prepare()` and before `commit()`. The browser
-adapter therefore synchronizes video identity both before preparation and immediately after native
-acceptance. If that synchronization advances `contextEpoch`, the old token stays stale and BALH
+adapter first uses the router's authoritative reverse index to reject unrelated requests without
+DOM work, then synchronizes video identity for an eligible exact request and again immediately after
+native acceptance. If that synchronization advances `contextEpoch`, the old token stays stale and BALH
 re-observes only the exact URL that was actually accepted, and only when the current router would
 leave that URL unchanged. It never sends a second request or applies a newly computed override to
 an already accepted call.
@@ -193,8 +203,9 @@ The adapter prefers exactly one connected, non-ended video that is currently pla
 not available, it accepts exactly one connected media-bearing video. Multiple equally plausible
 videos are ambiguous and produce no sample. Video replacement starts a new context.
 
-An enabled but inactive monitor may wake to synchronize video identity, but it does not submit a
-playback sample or install the `500 ms` poll until an exact request activates a group. Reentrant
+An enabled but inactive monitor may wake to synchronize video identity only for a uniquely eligible
+exact request or an explicit lifecycle event; unrelated network GETs never wake it. It does not
+submit a playback sample or install the `500 ms` poll until an exact request activates a group. Reentrant
 wakes are drained through a bounded synchronous loop so a second-level wake cannot leave a stale
 video identity; the timer token still guarantees at most one live poll.
 
@@ -336,6 +347,10 @@ original URL and then reopens the target.
 - XHR native `open()` once, successful/failed/reentrant open, headers, `Range`, credentials, body,
   abort/reuse generation, transactional commit/discard, subclass/private-field/WeakMap identity,
   and native response identity;
+- supported modern and legacy HTTPS playurl endpoints, newer parsed error delivery clearing old
+  groups, and stale transforms preserving an active timer/attempt/override with zero publication;
+- unrelated GETs causing no DOM query, media read, or monitor timer churn while the same exact GET
+  still activates and wakes recovery;
 - exact URL absence from storage, status, logs, and thrown diagnostics.
 
 ### Browser gates
@@ -352,7 +367,11 @@ original URL and then reopens the target.
 Stage 3 capability has four explicit terminal results:
 
 - `PASS`: an interceptable future request uses the exact same-group alternate, current request is
-  not aborted/reloaded, playback resumes, and cooldown holds;
+  not aborted/reloaded, playback resumes, and cooldown holds; the initial cooldown proof brackets
+  the switch between the last unswitched and first switched samples instead of adding a fresh full
+  cooldown after detection. The live proof allows at most `2,700 ms` of observation uncertainty:
+  deterministic state-machine tests prove the exact `15,000 ms` minimum, while the live gate can
+  only reject shortening that exceeds its bounded observation interval;
 - `FAIL`: transport is interceptable but a required invariant fails;
 - `UNSUPPORTED`: native media loading bypasses page Fetch/XHR;
 - `INCONCLUSIVE`: no unique request/group, no alternate, or bounded fault injection cannot produce
@@ -365,8 +384,9 @@ and must never fall through to a generic `PASS`. They do not replace UK-local ma
 
 When reusing this design in another userscript or player integration:
 
-1. identify the final response boundary, compose outside supported downstream transformers, and
-   republish the exact groups before page code consumes the response;
+1. identify the final response boundary, keep inner policy transforms free of global publication,
+   compose outside supported downstream transformers, and commit exact groups only for an accepted
+   delivery token before page code consumes the response;
 2. prove that signed URLs remain memory-only and that diagnostics are host/structure-only;
 3. add one pre-predecessor Fetch mapper and one pre-native-open XHR mapper for media routing; keep
    the separate final-response observer URL-transparent and identity-preserving;

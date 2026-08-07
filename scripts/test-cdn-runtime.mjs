@@ -384,16 +384,35 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const oldUrl = 'https://ordering-old.test.bilivideo.com/video.m4s?sig=old'
     const newPolicyUrl = 'https://ordering-new-policy.test.bilivideo.com/video.m4s?sig=policy'
     const newFinalUrl = 'https://ordering-new-final.test.bilivideo.com/video.m4s?sig=final'
+    const newFinalAlternateUrl = 'https://ordering-new-alternate.test.bilivideo.com/video.m4s?sig=alternate'
     const oldGroups = [makeCandidateGroup('ordering-old', [oldUrl])]
     const newPolicyGroups = [makeCandidateGroup('ordering-new-policy', [newPolicyUrl])]
-    const newFinalGroups = [makeCandidateGroup('ordering-new-final', [newFinalUrl])]
+    const newFinalGroups = [makeCandidateGroup('ordering-new-final', [
+        newFinalUrl,
+        newFinalAlternateUrl,
+    ])]
     const oldPayload = { groups: oldGroups }
     const newPolicyPayload = { groups: newPolicyGroups }
     const newFinalPayload = { groups: newFinalGroups }
-    const recovery = createCdnRecoveryCoordinator()
+    const recoveryTimers = new Map()
+    let recoveryTimerId = 0
+    let now = 0
+    const recovery = createCdnRecoveryCoordinator({
+        now: () => now,
+        setTimeout(callback) {
+            const id = ++recoveryTimerId
+            recoveryTimers.set(id, () => {
+                recoveryTimers.delete(id)
+                callback()
+            })
+            return id
+        },
+        clearTimeout(id) {
+            recoveryTimers.delete(id)
+        },
+    })
     const publications = []
     const scheduled = []
-    const fetched = []
     let collections = 0
     let optimizeCalls = 0
     const runtime = makeRuntime({
@@ -416,11 +435,6 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
         scheduleBackground(callback) {
             scheduled.push(callback)
         },
-        fetch: async url => {
-            fetched.push(String(url))
-            return streamResponse([new Uint8Array(1)])
-        },
-        limits: { maxConcurrent: 1, maxStages: 1 },
     })
 
     const oldToken = runtime.beginFinalCdnDelivery()
@@ -428,47 +442,172 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(oldToken, 1)
     assert.equal(newToken, oldToken + 1)
 
-    runtime.applyCdnPolicy(newPolicyPayload)
+    runtime.transformCdnPolicyForFinalDelivery(newPolicyPayload)
+    assert.equal(publications.length, 0)
+    assert.equal(scheduled.length, 0)
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [])
     assert.strictEqual(runtime.observeFinalCdnDelivery(newFinalPayload, newToken), newFinalPayload)
     assert.equal(optimizeCalls, 1)
-    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(newFinalUrl).host])
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [
+        new URL(newFinalAlternateUrl).host,
+        new URL(newFinalUrl).host,
+    ].sort())
 
-    runtime.applyCdnPolicy(oldPayload)
+    const initialRoute = recovery.routeExactUrl(newFinalUrl)
+    assert.equal(initialRoute.routed, false)
+    assert.equal(initialRoute.activation?.candidateIndex, 0)
+    const stalledPlayback = {
+        visible: true,
+        paused: false,
+        seeking: false,
+        ended: false,
+        currentTimeSeconds: 10,
+        durationSeconds: 120,
+        bufferedAheadSeconds: 0.1,
+    }
+    recovery.samplePlayback(stalledPlayback)
+    assert.equal(recovery.getStatus().groups[0].state, 'confirming')
+    assert.equal(recoveryTimers.size, 1)
+    now = 3_000
+    ;[...recoveryTimers.values()][0]()
+    now = 18_000
+    recovery.samplePlayback(stalledPlayback)
+    const overriddenRoute = recovery.routeExactUrl(newFinalUrl)
+    assert.equal(overriddenRoute.routed, true)
+    assert.equal(overriddenRoute.url, newFinalAlternateUrl)
+    const recoveryBeforeStaleResponse = recovery.getStatus()
+    assert.equal(recoveryBeforeStaleResponse.generation, 1)
+    assert.equal(recoveryBeforeStaleResponse.activeGroupCount, 1)
+    assert.deepEqual(recoveryBeforeStaleResponse.groups[0], {
+        groupId: 1,
+        key: 'ordering-new-final',
+        kind: 'dash-video',
+        generation: 1,
+        candidateCount: 2,
+        candidateIndex: 1,
+        attemptedCount: 2,
+        routeRevision: 1,
+        state: 'confirming',
+        switchAttempts: 1,
+        retryAt: 18_000,
+        timerPending: true,
+    })
+    const publicationsBeforeStaleResponse = publications.length
+    const schedulesBeforeStaleResponse = scheduled.length
+    const timersBeforeStaleResponse = [...recoveryTimers.keys()]
+    const probeStatusBeforeStaleResponse = runtime.getCdnProbeStatus()
+
+    runtime.transformCdnPolicyForFinalDelivery(oldPayload)
     assert.equal(optimizeCalls, 2)
-    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(oldUrl).host])
-    assert.deepEqual(
-        publications[publications.length - 1].groups.flatMap(group => (
-            group.candidates.map(candidate => candidate.url)
-        )),
-        [oldUrl],
-    )
+    assert.deepEqual(runtime.getCdnProbeStatus(), probeStatusBeforeStaleResponse)
+    assert.deepEqual(recovery.getStatus(), recoveryBeforeStaleResponse)
+    assert.equal(publications.length, publicationsBeforeStaleResponse)
     const collectionsBeforeStaleCompletion = collections
 
     assert.strictEqual(runtime.observeFinalCdnDelivery(oldPayload, oldToken), oldPayload)
     assert.equal(collections, collectionsBeforeStaleCompletion)
     assert.equal(optimizeCalls, 2)
-    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(newFinalUrl).host])
-    const restoredPublication = publications[publications.length - 1]
-    assert.equal(restoredPublication.enabled, true)
-    assert.deepEqual(
-        restoredPublication.groups.flatMap(group => group.candidates.map(candidate => candidate.url)),
-        [newFinalUrl],
-    )
-    assert.equal(restoredPublication.status.groups[0].key, 'ordering-new-final')
-    assert.deepEqual(
-        publications.map(publication => publication.status.groups[0].key),
-        ['ordering-new-policy', 'ordering-new-final', 'ordering-old', 'ordering-new-final'],
-    )
-    assert.deepEqual(publications.map(publication => publication.status.generation), [1, 2, 3, 4])
-    assert.equal(scheduled.length, 4)
+    assert.deepEqual(runtime.getCdnProbeStatus(), probeStatusBeforeStaleResponse)
+    assert.deepEqual(recovery.getStatus(), recoveryBeforeStaleResponse)
+    assert.equal(publications.length, publicationsBeforeStaleResponse)
+    assert.equal(scheduled.length, schedulesBeforeStaleResponse)
+    assert.deepEqual([...recoveryTimers.keys()], timersBeforeStaleResponse)
+    assert.deepEqual(publications.map(publication => publication.status.groups[0].key), [
+        'ordering-new-final',
+    ])
+    assert.deepEqual(publications.map(publication => publication.status.generation), [1])
+    assert.equal(recovery.routeExactUrl(oldUrl).routed, false)
+    const retainedOverride = recovery.routeExactUrl(newFinalUrl)
+    assert.equal(retainedOverride.routed, true)
+    assert.equal(retainedOverride.url, newFinalAlternateUrl)
+}
 
-    for (const callback of scheduled.slice(0, -1)) callback()
-    await flushMicrotasks()
-    assert.deepEqual(fetched, [])
-    scheduled[scheduled.length - 1]()
-    const probeStatus = await runtime.probeCurrentPlayUrlCdn()
-    assert.deepEqual(fetched, [newFinalUrl])
-    assert.deepEqual(probeStatus.candidateHosts, [new URL(newFinalUrl).host])
+{
+    const oldUrl = 'https://reentrant-old.test.bilivideo.com/video.m4s?sig=old'
+    const newUrl = 'https://reentrant-new.test.bilivideo.com/video.m4s?sig=new'
+    const oldPayload = { groups: [makeCandidateGroup('reentrant-old', [oldUrl])] }
+    const newPayload = { groups: [makeCandidateGroup('reentrant-new', [newUrl])] }
+    const publications = []
+    const scheduled = []
+    let reentered = false
+    const runtime = makeRuntime({
+        getMode: () => 'auto',
+        collectGroups: playUrl => playUrl.groups,
+        optimize() {
+            return { changed: false, groups: 1, diagnostics: [] }
+        },
+        publishRecoveryGroups(groups, enabled) {
+            publications.push({ groups, enabled })
+        },
+        scheduleBackground(callback) {
+            scheduled.push(callback)
+        },
+    })
+    const oldToken = runtime.beginFinalCdnDelivery()
+    const newToken = runtime.beginFinalCdnDelivery()
+    const unsubscribe = runtime.subscribeCdnProbeStatus(status => {
+        if (reentered || !status.candidateHosts.includes(new URL(oldUrl).host)) return
+        reentered = true
+        runtime.observeFinalCdnDelivery(newPayload, newToken)
+    })
+
+    runtime.observeFinalCdnDelivery(oldPayload, oldToken)
+    unsubscribe()
+
+    assert.equal(reentered, true, 'status publication must exercise synchronous final-delivery reentry')
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(newUrl).host])
+    assert.deepEqual(publications.map(publication => publication.groups[0].key), [
+        'reentrant-new',
+    ])
+    assert.equal(publications[0].enabled, true)
+    assert.equal(scheduled.length, 1)
+
+    const publicationsBeforeStaleReplay = publications.length
+    runtime.observeFinalCdnDelivery(oldPayload, oldToken)
+    assert.equal(publications.length, publicationsBeforeStaleReplay)
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(newUrl).host])
+}
+
+{
+    const oldUrl = 'https://mode-reentrant-old.test.bilivideo.com/video.m4s?sig=old'
+    const newUrl = 'https://mode-reentrant-new.test.bilivideo.com/video.m4s?sig=new'
+    const oldPayload = { groups: [makeCandidateGroup('mode-reentrant-old', [oldUrl])] }
+    const newPayload = { groups: [makeCandidateGroup('mode-reentrant-new', [newUrl])] }
+    const publications = []
+    const scheduled = []
+    let runtime
+    let reentered = false
+    runtime = makeRuntime({
+        getMode() {
+            if (!reentered) {
+                reentered = true
+                runtime.observeFinalCdnDelivery(newPayload, newToken)
+            }
+            return 'auto'
+        },
+        collectGroups: playUrl => playUrl.groups,
+        optimize() {
+            return { changed: false, groups: 1, diagnostics: [] }
+        },
+        publishRecoveryGroups(groups, enabled) {
+            publications.push({ groups, enabled })
+        },
+        scheduleBackground(callback) {
+            scheduled.push(callback)
+        },
+    })
+    const oldToken = runtime.beginFinalCdnDelivery()
+    const newToken = runtime.beginFinalCdnDelivery()
+
+    runtime.observeFinalCdnDelivery(oldPayload, oldToken)
+
+    assert.equal(reentered, true, 'mode lookup must exercise synchronous final-delivery reentry')
+    assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(newUrl).host])
+    assert.deepEqual(publications.map(publication => publication.groups[0].key), [
+        'mode-reentrant-new',
+    ])
+    assert.equal(publications[0].enabled, true)
+    assert.equal(scheduled.length, 1)
 }
 
 {
@@ -551,8 +690,9 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     })
 
     const pendingToken = runtime.beginFinalCdnDelivery()
-    runtime.applyCdnPolicy(synchronousPolicyPayload)
+    runtime.transformCdnPolicyForFinalDelivery(synchronousPolicyPayload)
     assert.equal(optimizeCalls, 1)
+    assert.equal(publications.length, 0)
     assert.strictEqual(runtime.observeFinalCdnDelivery(synchronousFinalPayload), synchronousFinalPayload)
     assert.equal(optimizeCalls, 1)
     assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(synchronousFinalUrl).host])
@@ -562,24 +702,21 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     assert.equal(collections, collectionsBeforePendingCompletion)
     assert.equal(optimizeCalls, 1)
     assert.deepEqual(runtime.getCdnProbeStatus().candidateHosts, [new URL(synchronousFinalUrl).host])
-    const restoredPublication = publications[publications.length - 1]
-    assert.equal(restoredPublication.enabled, true)
+    const acceptedPublication = publications[publications.length - 1]
+    assert.equal(acceptedPublication.enabled, true)
     assert.deepEqual(
-        restoredPublication.groups.flatMap(group => group.candidates.map(candidate => candidate.url)),
+        acceptedPublication.groups.flatMap(group => group.candidates.map(candidate => candidate.url)),
         [synchronousFinalUrl],
     )
-    assert.equal(restoredPublication.status.groups[0].key, 'vue-sync-final')
+    assert.equal(acceptedPublication.status.groups[0].key, 'vue-sync-final')
     assert.deepEqual(
         publications.map(publication => publication.status.groups[0].key),
-        ['vue-sync-policy', 'vue-sync-final', 'vue-sync-final'],
+        ['vue-sync-final'],
     )
     assert.equal(runtime.beginFinalCdnDelivery(), pendingToken + 2)
-    assert.equal(scheduled.length, 2)
+    assert.equal(scheduled.length, 1)
 
-    for (const callback of scheduled.slice(0, -1)) callback()
-    await flushMicrotasks()
-    assert.deepEqual(fetched, [])
-    scheduled[scheduled.length - 1]()
+    scheduled[0]()
     const probeStatus = await runtime.probeCurrentPlayUrlCdn()
     assert.deepEqual(fetched, [synchronousFinalUrl])
     assert.deepEqual(probeStatus.candidateHosts, [new URL(synchronousFinalUrl).host])
@@ -1894,6 +2031,37 @@ const signedUrl = 'https://cdn-a.test.bilivideo.com:8443/video/segment.m4s?deadl
     const cachedStatus = await freshRuntime.probeCurrentPlayUrlCdn()
     assert.equal(cachedStatus.source, 'cache')
     assert.equal(cachedFetches, 0)
+
+    let deferredOptions
+    let deferredPublications = 0
+    let deferredSchedules = 0
+    const deferredRuntime = makeRuntime({
+        storage: new MemoryStorage({ [CDN_HEALTH_CACHE_KEY]: freshCacheText }),
+        now: () => now + 1,
+        getMode: () => 'auto',
+        optimize(_playUrl, options) {
+            deferredOptions = options
+            return { changed: false, groups: 1, diagnostics: [] }
+        },
+        publishRecoveryGroups() {
+            deferredPublications += 1
+        },
+        scheduleBackground() {
+            deferredSchedules += 1
+        },
+    })
+    const deferredPayload = { urls: [url] }
+    const deferredToken = deferredRuntime.beginFinalCdnDelivery()
+    deferredRuntime.transformCdnPolicyForFinalDelivery(deferredPayload)
+    assert.equal(deferredOptions.hostHealth['cache.test.bilivideo.com'].samples, 2)
+    assert.deepEqual(deferredRuntime.getCdnProbeStatus().candidateHosts, [])
+    assert.equal(deferredRuntime.getCdnProbeStatus().state, 'idle')
+    assert.equal(deferredPublications, 0)
+    assert.equal(deferredSchedules, 0)
+    deferredRuntime.observeFinalCdnDelivery(deferredPayload, deferredToken)
+    assert.equal(deferredRuntime.getCdnProbeStatus().source, 'cache')
+    assert.equal(deferredPublications, 1)
+    assert.equal(deferredSchedules, 1)
 
     const mismatchStorage = new MemoryStorage({ [CDN_HEALTH_CACHE_KEY]: freshCacheText })
     let mismatchFetches = 0

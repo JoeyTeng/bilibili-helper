@@ -1,7 +1,7 @@
 # CDN Selection Architecture
 
-状态：Stage 1（响应选择）与 Stage 2（本机两阶段探测）的实现及自动化验证已完成；
-Stage 3（stall recovery）由独立后续 PR 交付。全部三个阶段合并且 Joey 在 UK-local
+状态：Stage 1（响应选择）与 Stage 2（本机两阶段探测）已合并；Stage 3（stall
+recovery）已由当前独立 PR 实现并完成本地自动化验证。全部三个阶段合并且 Joey 在 UK-local
 环境完成人工播放验收前，不得创建稳定版 tag、发布稳定版或刷新 `main`。自动 live
 E2E 只能提供辅助证据，不能替代这项人工验收。
 
@@ -41,7 +41,7 @@ compatibility。新增播放入口时，优先扩展 envelope/adapter 和现有�
    `2 MiB` accounted-prefix 预算允许完整 `64 KiB` 样本时覆盖每个可准入的不同 host；
    Stage 1 成功结果中稳定排名前两名共享剩余 follow-up 预算，每个最多 `512 KiB`，
    并发不超过 `2`。吞吐量与可靠 DASH bitrate margin 是主要证据，TTFB 是次要证据。
-3. **Stage 3（计划中）**：在独立后续 PR 中实现有确认门槛、冷却与退避的 stall
+3. **Stage 3（已实现，待合并）**：在当前独立 PR 中实现有确认门槛、冷却与退避的 stall
    recovery，只重路由未来的 Fetch/XHR 媒体请求，不中止或重载当前请求。
 
 Stage 1/2 的完成不解除稳定发布门禁；完整交付状态以
@@ -66,8 +66,9 @@ Stage 1/2 的完成不解除稳定发布门禁；完整交付状态以
 - 不维护一个“英国最快 CDN”名单，也不按时区、语言、IP 地理位置或预设地区
   对 host 加权。
 - 不从 catalog、历史常量或第三方服务生成自动模式候选地址。
-- Stage 1/2 不实现播放卡顿后的在线切换、媒体预取、Range 缓存、Service Worker
-  接管或 WebRTC/P2P 屏蔽；在线切换仅属于计划中的 Stage 3。
+- Stage 1/2 本身不实现播放卡顿后的在线切换；Stage 3 只重路由未来的 exact Fetch/XHR
+  `GET`。三个阶段都不引入媒体预取、Range 缓存、Service Worker 接管或 WebRTC/P2P
+  屏蔽。
 - 不维护旧版 Bilibili CDN Switcher 矩阵；兼容窗口只覆盖 README 固定的单一 latest
   version/SHA-256 snapshot。
 - 不改变 playurl 的授权、画质、编码、音轨或分段边界。
@@ -688,13 +689,20 @@ BALH 源码与兼容记录，不再下载第三方 latest。
   变换后的 exact groups。该观察不得二次运行 selector、替换 `Response` / XHR identity
   或合成 URL；descriptor 无法安全组合时保持 fail-open。
 - playurl Fetch 调用或 XHR `open()` 必须在 predecessor 开始前取得单调 delivery token。
-  新请求先完成后，旧请求晚到不得覆盖 Stage 2 candidates 或 Stage 3 registry；outer
-  observer 必须恢复最近接受的 final group snapshot。同步 Vue/hydration delivery 也会
-  取得新 token，从而使更早的 pending transport 失效。token 与 snapshot 只存在内存。
+  inner policy 只变换私有 payload，不更新 candidates、generation、probe 或 recovery；
+  只有被接受的 outer final token 才提交全局状态。新请求先完成后，旧请求晚到必须
+  零 collection/publication/schedule，不能通过“先发布旧组、再恢复新 snapshot”重置当前
+  activation/timer/override。同步 Vue/hydration delivery 也会取得新 token，从而使更早的
+  pending transport 失效。token 只存在内存。
+- 支持的 playurl endpoint 由一个共享 classifier 定义：现代接口使用精确 host/path，
+  legacy `/player/web_api[/v2]/playurl` 保留已有任意已解析 hostname 的兼容语义；最终
+  observer 只接收解析后的 HTTPS 请求。有效 JSON 错误 envelope 以同 token 发布空组。
 - 显式“关闭脚本”时不安装 monitor/final observer，也不允许已存在的 observer 继续
   安排 auto probe 或启用 recovery；“未配置自定义区域代理”不等同于显式关闭，仍保留
   CDN-only 选择与恢复能力。
-- Fetch/XHR 先 prepare exact route，只有 predecessor 接受 Fetch 调用或 native XHR
+- Fetch/XHR 先从同一 reverse index 取得 side-effect-free eligibility；无关 GET 不查询
+  DOM、不读取媒体属性也不重排 monitor timer。唯一 exact match 才 prepare route，只有
+  predecessor 接受 Fetch 调用或 native XHR
   `open()` 成功后才 commit；构造、同步 predecessor、WebIDL/native `open()` 失败只
   discard，不制造伪请求状态。
 
@@ -807,7 +815,8 @@ Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能
 - `cache backend`：可以从内存升级到持久化存储，但 host-only 与隐私字段限制不变。
 - `delivery adapter`：可增加新的 player/global hook，但只能调用共享核心，不能复制
   选择逻辑。
-- `stall recovery`：按 Stage 3 契约在独立后续 PR 中设计和验收；静态 candidate
+- `stall recovery`：已按 Stage 3 契约在当前独立 PR 中实现和验收；后续扩展仍不得放宽
+  exact-group、future-request-only、cooldown 或隐私边界。静态 candidate
   pool 只能是非默认实验性排序提示，而且只能引用当前 exact signed candidate group
   中已经存在的候选，不得引入外部 host/URL。任何外部 pool 都需要新的授权与签名
   契约，不属于本文定义的 Stage 3。
@@ -819,7 +828,7 @@ Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能
 
 | Reference | 固定版本 | 参考概念 | 本设计的明确差异 |
 | --- | --- | --- | --- |
-| [siwei-yuan/bili-pilot](https://github.com/siwei-yuan/bili-pilot/tree/2baca4178fcfb449d40a30662bcd711c9e4d8121) | commit `2baca4178fcfb449d40a30662bcd711c9e4d8121`, MIT | 完整签名候选、按 representation/segment 规划、MCDN/PCDN 风险元数据、普通候选失败后保留降级候选、fail-open | 不采用其预取/Range cache；stall recovery 留给 Stage 3，默认探测也不发送 Range |
+| [siwei-yuan/bili-pilot](https://github.com/siwei-yuan/bili-pilot/tree/2baca4178fcfb449d40a30662bcd711c9e4d8121) | commit `2baca4178fcfb449d40a30662bcd711c9e4d8121`, MIT | 完整签名候选、按 representation/segment 规划、MCDN/PCDN 风险元数据、普通候选失败后保留降级候选、fail-open | 不采用其预取/Range cache；Stage 3 只改写未来 exact request，默认探测也不发送 Range |
 | [realzza/bilibili-accelerator](https://github.com/realzza/bilibili-accelerator/tree/6cba8c8b23ad01a152d186420081284b6eda1f77) | v0.4.0, commit `6cba8c8b23ad01a152d186420081284b6eda1f77`, MIT | 浏览器本地吞吐探测、`credentials: "omit"`、`cache: "no-store"`、无 Range 的前缀读取与 cancel、Fetch/XHR 组合入口、仅记录 host 的诊断思路 | 不采用静态 candidate pool、地区默认 host 或自动 host synthesis；缓存也不按 timezone/locale 分区 |
 | [SukkaW/Make-Bilibili-Great-Than-Ever-Before](https://github.com/SukkaW/Make-Bilibili-Great-Than-Ever-Before/tree/800ca13061df9b87fb6f38c0b2b2346ebd6812f9) (MBGTEB) | commit `800ca13061df9b87fb6f38c0b2b2346ebd6812f9`, MIT | 从 `baseUrl`/`backupUrl` 为每个 representation 收集关联 URL、识别 MCDN/PCDN 风险、在多入口请求链中匹配媒体对象 | 自动模式不采用随机选择、固定 fallback host、proxy wrapping 或跨响应收集 host；完整签名 URL 始终来自当前候选组 |
 | [MareDevi/bilibili-tui](https://github.com/MareDevi/bilibili-tui/tree/98737ce7d50a317455f4b959bab0d320577298c1) | commit `98737ce7d50a317455f4b959bab0d320577298c1`, MIT | 分别为 video/audio stream 排列候选、按 host 复用短期探测分数、区分延迟/吞吐/可靠性并设置 TTL | 浏览器实现不使用远程 catalog、地区 host 合成、文件系统历史或默认 Range probe；只缓存最小 host 级摘要 |

@@ -3,8 +3,8 @@ id: 20260805-cdn-three-stage-delivery-21b2
 title: CDN Three-Stage Delivery
 status: active
 created: 2026-08-05
-updated: 2026-08-06
-branch: wip/cdn-stall-recovery
+updated: 2026-08-07
+branch: wip/cdn-stall-recovery-delivery
 pr:
 supersedes: []
 superseded_by:
@@ -81,12 +81,43 @@ superseded_by:
   二次运行 selector、不替换 `Response` / XHR identity，也不合成 URL。这样两种加载
   顺序都以页面实际收到的候选作为 Stage 2/3 权威输入。
 - playurl Fetch/XHR 在 predecessor 开始前取得 monotonic delivery token。新请求先完成
-  后，旧 response 晚到只会触发恢复最近接受的 immutable final-group snapshot，不能
-  覆盖当前 candidates/registry；同步 Vue/hydration delivery 同样会 supersede 更早的
-  pending transport。显式关闭脚本则既不安装这些观察器，也不会安排 auto probe。
+  后，inner policy 仅变换私有 payload；只有被接受的 final token 才提交全局状态。旧
+  response 晚到为零 collection/publication/schedule，不会以“旧组 -> snapshot 恢复”重置
+  当前 activation、timer、attempt 或 override；同步 Vue/hydration delivery 同样会
+  supersede 更早的 pending transport。有效 JSON 错误响应以同 token 发布空组，清除旧
+  signed registry。显式关闭脚本则既不安装这些观察器，也不会安排 auto probe。
+- final observer 与 Fetch/XHR adapters 共享现代 exact host/path 加 legacy path 的 endpoint
+  classifier；observer 仍只接收解析后的 HTTPS。无关 GET 在 router eligibility 阶段直接
+  返回，不查询 video DOM、读取媒体属性或重排 monitor timer。
 - 本阶段实现、确定性测试、受控真实 Chrome gate、真实站点 capability classifier 与
   latest CDN Switcher 组合 gate 已完成。`safe` / `original` / `manual`、显式关闭、native
   loader bypass 和证据歧义仍按设计禁用或 fail-open。
+
+## Fresh-context Review Closure — 2026-08-07
+
+- 冻结范围 `dcec657..1d284b` 的本地 fresh-context Codex review 提出 5 项 findings；
+  本分支均已修复并补确定性回归：cooldown 观测区间、有效错误 envelope 空交付、完整
+  supported endpoint classifier、stale response 零全局发布、无关 GET 零 DOM hot-path。
+- 后续聚焦审计又补齐播放器替换后的 decision re-prepare、同步重入 final commit 串行化
+  （包括 status listener 与 mode reader 两个重入点的 supersession fence）、非 JSON XHR
+  responseType fail-open，以及“缺失/明显过短 cooldown 必须先判 FAIL”的 classifier
+  顺序；每项均有直接回归。
+- `pnpm run check` 在修复树上完整通过；聚合 gate 新增 empty-final-delivery 与 live
+  cooldown assessment 回归，且 build 成功。
+- 受控 Chrome `151.0.7922.108` recovery E2E 在最终修复树重新通过：Fetch grace
+  `3029 ms`、XHR grace `2990 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
+  cooldown、predecessor/player identity、cleanup 与隐私门禁均通过。
+- 固定 CDN Switcher `0.1.4` / SHA-256
+  `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4` 重新通过两种
+  load order；Chrome `151.0.7922.108` 中 Fetch/XHR 均为
+  `primary -> primary -> alternate -> alternate`。
+- 真实 Bilibili BVID `BV17x411w7KC` live E2E 重新通过：2 个 candidate/probed host
+  均 healthy，`completed=4` / `total=4`，cache 以 `source="cache"` / `hostCount=2`
+  无网络复用。Stage 3 capability 仍严格返回 `INCONCLUSIVE` / `exit 3`，原因是
+  `no-unique-exact-group`，没有降级为 generic PASS。
+- 修复将形成新的签名 head，并在 `origin/dev@e7b8a988` 上重建最终分支，按真实 PR
+  merge-base 到 new head 的整个范围重新执行 secret admission 与 fresh-context Codex
+  review；旧 review 结果不作为最终清洁结论。
 
 ## Compatibility Contract
 
@@ -97,7 +128,7 @@ superseded_by:
   BALH/CDN Switcher 加载顺序和 Fetch/XHR response transport；只有 post-CDN exact
   candidates 可以激活 future-route recovery。最终合并证据必须来自 strengthened gate
   的完整通过结果，不能沿用候选本来就在目标 host 上的旧 fixture 结果。
-- strengthened gate 已在 Chrome `151.0.7922.72` 通过：`balh->cdn` 与 `cdn->balh`
+- strengthened gate 已在 Chrome `151.0.7922.108` 通过：`balh->cdn` 与 `cdn->balh`
   的 Fetch/XHR 均为 `primary -> primary -> alternate -> alternate`；固定上游身份仍是
   `0.1.4` 与上述 SHA-256。测试同时门禁 post-CDN publication、pre-CDN 零激活、当前
   请求不重放、实际 grace/cooldown、稳定恢复、transport health 与隐私 surface。
@@ -121,7 +152,7 @@ superseded_by:
 
 ## Next Steps
 
-1. 合并 Stage 1/2 PR #13 与独立 Stage 3 PR，确认三个阶段全部进入 `dev`。
+1. Stage 1/2 PR #13 已合并；合并独立 Stage 3 PR，确认三个阶段全部进入 `dev`。
 2. 由 Joey 执行 UK-local 人工播放验收。
 3. 仅在上述门禁通过后恢复稳定 tag/release/`main` 刷新流程。
 

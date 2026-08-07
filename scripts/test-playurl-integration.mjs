@@ -42,7 +42,10 @@ await Promise.all([
             contents: `
                 export { injectFetch, jsonResponse } from './packages/unblock-area-limit/src/feature/bili/area_limit_fetch.ts'
                 export { fixThailandPlayUrlJson } from './packages/unblock-area-limit/src/api/biliplus.ts'
-                export { applyCdnPolicyToPlayUrlResponse } from './packages/unblock-area-limit/src/feature/bili/cdn_playurl.ts'
+                export {
+                    applyCdnPolicyToPlayUrlResponse,
+                    observeFinalCdnPlayUrlResponse,
+                } from './packages/unblock-area-limit/src/feature/bili/cdn_playurl.ts'
                 export { clearCdnHealthCache, getCdnProbeStatus } from './packages/unblock-area-limit/src/feature/bili/cdn_runtime.ts'
             `,
             resolveDir: rootDir,
@@ -68,8 +71,14 @@ const {
     getCdnProbeStatus,
     injectFetch,
     jsonResponse,
+    observeFinalCdnPlayUrlResponse,
 } = await import(pathToFileURL(integrationOutFile).href)
-testWbiEnvelopeCandidateCapture(applyCdnPolicyToPlayUrlResponse, clearCdnHealthCache, getCdnProbeStatus)
+testWbiEnvelopeCandidateCapture(
+    applyCdnPolicyToPlayUrlResponse,
+    observeFinalCdnPlayUrlResponse,
+    clearCdnHealthCache,
+    getCdnProbeStatus,
+)
 await testFetchPgcFallbackCdnPolicy(injectFetch)
 await testThailandUposMode(fixThailandPlayUrlJson, applyCdnPolicyToPlayUrlResponse)
 await testJsonResponseCloneMetadata(jsonResponse)
@@ -383,7 +392,7 @@ function flushPromises() {
     return new Promise(resolve => setTimeout(resolve, 0))
 }
 
-function testWbiEnvelopeCandidateCapture(applyPolicy, clearHealth, getStatus) {
+function testWbiEnvelopeCandidateCapture(applyPolicy, observeFinal, clearHealth, getStatus) {
     config.cdn_mode = 'original'
     clearHealth()
     const signedUrl = 'https://wbi.test.bilivideo.com/media.m4s?w_rid=private&wts=1'
@@ -401,6 +410,12 @@ function testWbiEnvelopeCandidateCapture(applyPolicy, clearHealth, getStatus) {
     const snapshot = structuredClone(response)
     assert.strictEqual(applyPolicy(response), response)
     assert.deepEqual(response, snapshot, 'original mode must preserve the WBI playurl envelope')
+    assert.deepEqual(
+        getStatus().candidateHosts,
+        [],
+        'inner policy transform must defer runtime publication until final delivery',
+    )
+    assert.strictEqual(observeFinal(response), response)
     assert.deepEqual(getStatus().candidateHosts, ['wbi.test.bilivideo.com'])
 }
 

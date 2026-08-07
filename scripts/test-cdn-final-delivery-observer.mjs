@@ -51,6 +51,40 @@ const bundle = await build({
 })
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 let scenarioId = 0
+const supportedPlayUrlEndpoints = [
+    {
+        label: 'x-player',
+        url: 'https://api.bilibili.com/x/player/playurl',
+    },
+    {
+        label: 'x-player-wbi',
+        url: 'https://api.bilibili.com/x/player/wbi/playurl',
+    },
+    {
+        label: 'pgc-player-web',
+        url: 'https://api.bilibili.com/pgc/player/web/playurl',
+    },
+    {
+        label: 'pgc-player-web-v2',
+        url: 'https://api.bilibili.com/pgc/player/web/v2/playurl',
+    },
+    {
+        label: 'pugv-player-web',
+        url: 'https://api.bilibili.com/pugv/player/web/playurl',
+    },
+    {
+        label: 'interface-v2',
+        url: 'https://interface.bilibili.com/v2/playurl',
+    },
+    {
+        label: 'legacy-web-api',
+        url: 'https://bangumi.bilibili.com/player/web_api/playurl',
+    },
+    {
+        label: 'legacy-web-api-v2-any-host',
+        url: 'https://legacy-player.example/player/web_api/v2/playurl',
+    },
+]
 
 try {
     await testFetchCompositionAndRepair()
@@ -91,22 +125,15 @@ async function testFetchCompositionAndRepair() {
 
     const receiver = { name: 'fetch-receiver' }
     const init = { credentials: 'include' }
-    const officialPaths = [
-        '/x/player/playurl',
-        '/x/player/wbi/playurl',
-        '/pgc/player/web/playurl',
-        '/pgc/player/web/v2/playurl',
-        '/pugv/player/web/playurl',
-    ]
-    const officialInputs = officialPaths.map((pathName, index) => {
-        const url = `https://api.bilibili.com${pathName}?fixture=${index}`
+    const observedInputs = supportedPlayUrlEndpoints.map((endpoint, index) => {
+        const url = `${endpoint.url}?fixture=${endpoint.label}`
         if (index === 1) return new URL(url)
         if (index === 2) return new Request(url)
         return url
     })
 
-    for (const [index, input] of officialInputs.entries()) {
-        const payload = { marker: `official-${index}` }
+    for (const [index, input] of observedInputs.entries()) {
+        const payload = { marker: `endpoint-${index}` }
         const response = jsonResponse(payload)
         nextResponse = response
         const delivered = await harness.window.fetch.call(receiver, input, init)
@@ -116,18 +143,44 @@ async function testFetchCompositionAndRepair() {
         assert.strictEqual(calls.at(-1).init, init)
         assert.equal(harness.state.observations.at(-1).marker, payload.marker)
     }
-    assert.equal(harness.state.observations.length, officialPaths.length)
+
+    const protocolRelativePayload = { marker: 'protocol-relative-https' }
+    nextResponse = jsonResponse(protocolRelativePayload)
+    await harness.window.fetch('//interface.bilibili.com/v2/playurl?fixture=protocol-relative')
+    assert.equal(harness.state.observations.at(-1).marker, protocolRelativePayload.marker)
+    const observedEndpointCount = supportedPlayUrlEndpoints.length + 1
+    assert.equal(harness.state.observations.length, observedEndpointCount)
+
+    const securePageHref = harness.window.location.href
+    harness.window.location.href = 'http://www.bilibili.com/video/BV1observer'
+    nextResponse = jsonResponse({ marker: 'protocol-relative-http-ignored' })
+    await harness.window.fetch('//interface.bilibili.com/v2/playurl?fixture=protocol-relative-http')
+    harness.window.location.href = securePageHref
+    assert.equal(
+        harness.state.observations.length,
+        observedEndpointCount,
+        'protocol-relative endpoints resolved to HTTP must be ignored',
+    )
 
     for (const ignoredUrl of [
         'https://www.bilibili.com/x/player/playurl?fixture=page-host',
         'https://api.bilibili.com.example/x/player/playurl?fixture=lookalike-host',
         'http://api.bilibili.com/x/player/playurl?fixture=insecure',
+        'http://interface.bilibili.com/v2/playurl?fixture=insecure-interface',
+        'http://legacy-player.example/player/web_api/playurl?fixture=insecure-legacy',
         'https://api.bilibili.com/x/player/playurl/extra?fixture=path-suffix',
+        'https://interface.bilibili.com/v2/playurl/extra?fixture=interface-path-suffix',
+        'https://legacy-player.example/player/web_api/v2/playurl/extra?fixture=legacy-path-suffix',
         'https://api.bilibili.com/x/player/pagelist?fixture=other-api',
     ]) {
         nextResponse = jsonResponse({ marker: 'ignored' })
         await harness.window.fetch(ignoredUrl)
     }
+    assert.equal(
+        harness.state.deliveryOrder,
+        observedEndpointCount,
+        'non-HTTPS and non-endpoint Fetch calls must not allocate delivery tokens',
+    )
     const malformedResponse = new Response('{"marker":', { headers: { 'content-type': 'application/json' } })
     nextResponse = malformedResponse
     const malformedDelivered = await harness.window.fetch(
@@ -135,7 +188,7 @@ async function testFetchCompositionAndRepair() {
     )
     assert.strictEqual(malformedDelivered, malformedResponse)
     assert.equal(await malformedDelivered.text(), '{"marker":')
-    assert.equal(harness.state.observations.length, officialPaths.length, 'non-playurl and invalid JSON must be ignored')
+    assert.equal(harness.state.observations.length, observedEndpointCount, 'non-playurl and invalid JSON must be ignored')
 
     const publicationFailureResponse = jsonResponse({ marker: 'publication-failure' })
     nextResponse = publicationFailureResponse
@@ -146,7 +199,7 @@ async function testFetchCompositionAndRepair() {
     harness.state.throwObservation = false
     assert.strictEqual(publicationFailureDelivered, publicationFailureResponse)
     assert.equal((await publicationFailureDelivered.json()).marker, 'publication-failure')
-    assert.equal(harness.state.observations.length, officialPaths.length)
+    assert.equal(harness.state.observations.length, observedEndpointCount)
 
     harness.state.observations.length = 0
     const capturedObserver = harness.window.fetch
@@ -224,8 +277,8 @@ async function testFetchOutOfOrderDeliveryTokens() {
     })
     harness.module.installCdnFinalDeliveryObservers()
 
-    const firstUrl = 'https://api.bilibili.com/x/player/playurl?fixture=out-of-order-first'
-    const secondUrl = 'https://api.bilibili.com/x/player/playurl?fixture=out-of-order-second'
+    const firstUrl = 'https://legacy-player.example/player/web_api/v2/playurl?fixture=out-of-order-first'
+    const secondUrl = 'https://interface.bilibili.com/v2/playurl?fixture=out-of-order-second'
     const firstDelivery = harness.window.fetch(firstUrl)
     const secondDelivery = harness.window.fetch(secondUrl)
     assert.deepEqual(pending.map(item => item.input), [firstUrl, secondUrl])
@@ -260,17 +313,17 @@ async function testXhrOutOfOrderDeliveryTokens() {
 
     const firstXhr = new harness.window.XMLHttpRequest()
     const secondXhr = new harness.window.XMLHttpRequest()
-    firstXhr.open('GET', 'https://api.bilibili.com/x/player/playurl?fixture=xhr-out-of-order-first')
-    secondXhr.open('GET', 'https://api.bilibili.com/x/player/playurl?fixture=xhr-out-of-order-second')
+    firstXhr.open('GET', 'https://bangumi.bilibili.com/player/web_api/playurl?fixture=xhr-out-of-order-first')
+    secondXhr.open('GET', 'https://interface.bilibili.com/v2/playurl?fixture=xhr-out-of-order-second')
     assert.equal(harness.state.deliveryOrder, 2, 'XHR tokens must be allocated during open()')
     assert.deepEqual(harness.state.observations, [])
 
     secondXhr.complete({
-        responseURL: 'https://api.bilibili.com/x/player/playurl?fixture=xhr-out-of-order-second-final',
+        responseURL: 'https://interface.bilibili.com/v2/playurl?fixture=xhr-out-of-order-second-final',
         response: { marker: 'xhr-out-of-order-second' },
     })
     firstXhr.complete({
-        responseURL: 'https://api.bilibili.com/x/player/playurl?fixture=xhr-out-of-order-first-final',
+        responseURL: 'https://bangumi.bilibili.com/player/web_api/playurl?fixture=xhr-out-of-order-first-final',
         response: { marker: 'xhr-out-of-order-first' },
     })
     assert.deepEqual(harness.state.observations.map(value => value.marker), [
@@ -421,19 +474,12 @@ async function testXhrComposition(order) {
         })
     })
 
-    const requests = [
-        {
-            requestUrl: 'https://api.bilibili.com/x/player/playurl?fixture=xhr-one',
-            responseUrl: 'https://api.bilibili.com/x/player/playurl?fixture=xhr-one-final',
-            marker: `${order}-one`,
-        },
-        {
-            requestUrl: 'https://api.bilibili.com/pgc/player/web/playurl?fixture=xhr-two',
-            responseUrl: 'https://api.bilibili.com/pgc/player/web/playurl?fixture=xhr-two-final',
-            marker: `${order}-two`,
-            responseAsText: true,
-        },
-    ]
+    const requests = supportedPlayUrlEndpoints.map((endpoint, index) => ({
+        requestUrl: `${endpoint.url}?fixture=xhr-${endpoint.label}`,
+        responseUrl: `${endpoint.url}?fixture=xhr-${endpoint.label}-final`,
+        marker: `${order}-${endpoint.label}`,
+        responseAsText: index % 2 === 1,
+    }))
 
     for (const [index, request] of requests.entries()) {
         const response = request.responseAsText
@@ -459,7 +505,7 @@ async function testXhrComposition(order) {
 
     const expected = requests.map(request => `${request.marker}:downstream`)
     assert.deepEqual(harness.state.observations.map(value => value.marker), expected)
-    assert.equal(native.openReceivers.length, 2, `${order}: the same XHR must support a reused open()`)
+    assert.equal(native.openReceivers.length, requests.length, `${order}: the same XHR must support a reused open()`)
     assert.equal(native.openReceivers.every(receiver => receiver === xhr), true)
     assert.equal(native.completeReceivers.every(receiver => receiver === xhr), true)
     assert.equal(downstream.receivers.every(receiver => receiver === xhr), true)
@@ -473,6 +519,26 @@ async function testXhrComposition(order) {
         response: '{"marker":',
     })
     assert.equal(harness.state.observations.length, observedAfterRequests, `${order}: malformed XHR JSON must be ignored`)
+
+    const nonJsonResponses = [
+        ['blob', new Blob(['{"marker":"blob"}'], { type: 'application/json' })],
+        ['arraybuffer', new ArrayBuffer(8)],
+        ['document', new (class SyntheticDocumentResponse { })()],
+    ]
+    for (const [responseType, response] of nonJsonResponses) {
+        xhr.open('GET', `https://api.bilibili.com/x/player/playurl?fixture=xhr-${responseType}`)
+        xhr.responseType = responseType
+        xhr.complete({
+            responseURL: `https://api.bilibili.com/x/player/playurl?fixture=xhr-${responseType}-final`,
+            response,
+        })
+        assert.equal(
+            harness.state.observations.length,
+            observedAfterRequests,
+            `${order}: ${responseType} XHR response must remain unobserved`,
+        )
+    }
+    xhr.responseType = ''
 
     const pageCallsBeforePublicationFailure = pageReceivers.length
     harness.state.throwObservation = true
@@ -601,6 +667,7 @@ function createNativeXhr() {
             instances.add(this)
             this.readyState = 0
             this.responseURL = ''
+            this.responseType = ''
             this.response = null
             this.responseText = ''
         }
@@ -638,6 +705,8 @@ function createDownstreamXhr(Predecessor, label) {
             this.addEventListener('readystatechange', function () {
                 receivers.push(this)
                 if (this.readyState !== 4) return
+                if (this.responseType && this.responseType !== 'json'
+                    && this.responseType !== 'text') return
                 let response = this.response
                 if (typeof response === 'string') {
                     try {

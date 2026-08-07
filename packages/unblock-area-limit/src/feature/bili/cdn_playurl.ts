@@ -1,7 +1,7 @@
 import {
-    applyCdnPolicy,
     beginFinalCdnDelivery,
     observeFinalCdnDelivery,
+    transformCdnPolicyForFinalDelivery,
 } from './cdn_runtime'
 
 function isPlayUrlPayload(value: any) {
@@ -27,7 +27,7 @@ export function findPlayUrlPayload(value: any) {
 export function applyCdnPolicyToPlayUrlResponse<T>(value: T): T {
     const playUrl = findPlayUrlPayload(value)
     if (playUrl) {
-        applyCdnPolicy(playUrl)
+        transformCdnPolicyForFinalDelivery(playUrl)
     }
     return value
 }
@@ -39,8 +39,10 @@ export function beginFinalCdnPlayUrlDelivery() {
 
 export function observeFinalCdnPlayUrlResponse<T>(value: T, deliveryOrder?: number): T {
     const playUrl = findPlayUrlPayload(value)
-    if (playUrl) {
-        observeFinalCdnDelivery(playUrl, deliveryOrder)
-    }
+    // A valid response from a supported playurl endpoint is authoritative even
+    // when it is an error envelope without media. Publish an empty group set so
+    // the same delivery token clears older candidates and supersedes pending
+    // older successes. Parsing failures never reach this boundary.
+    observeFinalCdnDelivery(playUrl ?? {}, deliveryOrder)
     return value
 }

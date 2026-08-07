@@ -16,6 +16,8 @@ export interface CdnMediaRouteDecision {
 }
 
 export interface PreparedCdnMediaRoute {
+    /** True only when this exact GET uniquely matches the current registry. */
+    readonly eligible: boolean
     readonly decision: CdnMediaRouteDecision
     commit(): CdnMediaRouteDecision
     discard(): void
@@ -209,6 +211,7 @@ export function createCdnMediaRequestRouter(
         let committedDecision = decision
 
         return {
+            eligible: true,
             decision,
             commit() {
                 if (finished) return committedDecision
@@ -373,6 +376,7 @@ export function createCdnMediaRequestRouter(
 
 function settledPreparation(decision: CdnMediaRouteDecision): PreparedCdnMediaRoute {
     return {
+        eligible: false,
         decision,
         commit: () => decision,
         discard() { },

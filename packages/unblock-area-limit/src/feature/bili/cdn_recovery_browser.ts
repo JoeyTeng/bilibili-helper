@@ -94,9 +94,20 @@ export function prepareCdnRecoveryRequestUrl(
     method = 'GET',
 ): PreparedCdnMediaRoute {
     synchronizeRecoveryEnabled()
+    let eligibility: PreparedCdnMediaRoute
+    try {
+        // Eligibility comes from the router's authoritative reverse index and
+        // is side-effect free until commit. Unrelated GETs never touch the DOM.
+        eligibility = recoveryCoordinator.prepareExactUrl(url, method)
+    } catch {
+        return settledPreparation({ url, routed: false })
+    }
+    if (!eligibility.eligible) return eligibility
+    eligibility.discard()
+
     // Synchronize a replaced player before this request can become the first
-    // activation in its new playback context. The wake is synchronous and an
-    // inactive monitor only tracks video identity; it does not poll or sample.
+    // activation in its new playback context. Re-prepare after the wake so a
+    // cleared or newly installed override cannot leak across that boundary.
     wakeDefaultMonitor()
     let prepared: PreparedCdnMediaRoute
     try {
@@ -104,10 +115,12 @@ export function prepareCdnRecoveryRequestUrl(
     } catch {
         return settledPreparation({ url, routed: false })
     }
+    if (!prepared.eligible) return prepared
 
     let state: 'pending' | 'committed' | 'discarded' = 'pending'
     let committedDecision = prepared.decision
     return {
+        eligible: true,
         decision: prepared.decision,
         commit() {
             if (state !== 'pending') return committedDecision
@@ -213,6 +226,7 @@ export function installCdnRecoveryMonitor(): PlayerStallMonitor | null {
 
 function settledPreparation(decision: CdnMediaRouteDecision): PreparedCdnMediaRoute {
     return {
+        eligible: false,
         decision,
         commit: () => decision,
         discard: () => undefined,

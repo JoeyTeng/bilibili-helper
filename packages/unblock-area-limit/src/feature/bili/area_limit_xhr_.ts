@@ -22,6 +22,7 @@ import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
 import { applyCdnPolicyToPlayUrlResponse, findPlayUrlPayload } from './cdn_playurl';
+import { isSupportedCdnPlayUrlEndpoint } from './cdn_playurl_endpoint';
 import { prepareCdnRecoveryRequestUrl } from './cdn_recovery_browser';
 
 export const area_limit_xhr = (() => {
@@ -61,14 +62,57 @@ export const area_limit_xhr = (() => {
     function isCdnPlayUrlUrl(url) {
         if (typeof url !== 'string') return false
         return isWebPlayUrlUrl(url)
-            || url.match(RegExps.url('interface.bilibili.com/v2/playurl'))
-            || url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
-            || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl'))
+            || isInterfacePlayUrlUrl(url)
+            || isPgcPlayUrlUrl(url)
     }
 
     function isWebPlayUrlUrl(url) {
-        return url.match(RegExps.url('api.bilibili.com/x/player/playurl'))
-            || url.match(RegExps.url('api.bilibili.com/x/player/wbi/playurl'))
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/x/player/playurl'
+                || parsed.pathname === '/x/player/wbi/playurl')
+    }
+
+    function isWebV1PlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && parsed.pathname === '/x/player/playurl'
+    }
+
+    function isPgcPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/pgc/player/web/playurl'
+                || parsed.pathname === '/pgc/player/web/v2/playurl')
+    }
+
+    function isPgcV1PlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && parsed.pathname === '/pgc/player/web/playurl'
+    }
+
+    function isInterfacePlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'interface.bilibili.com'
+            && parsed.pathname === '/v2/playurl'
+    }
+
+    function isLegacyPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && (parsed.pathname === '/player/web_api/playurl'
+            || parsed.pathname === '/player/web_api/v2/playurl')
+    }
+
+    function parseSupportedCdnPlayUrlUrl(url) {
+        if (typeof url !== 'string' || !/^(?:https?:)?\/\//.test(url)) return null
+        try {
+            const parsed = new URL(url, document.location.href)
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+            return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null
+        } catch {
+            return null
+        }
     }
 
     return function () {
@@ -264,7 +308,7 @@ export const area_limit_xhr = (() => {
                         }
                         // todo      : 当前只实现了r.const.mode.REPLACE, 需要支持其他模式
                         // 2018-10-14: 等B站全面启用新版再说(;¬_¬)
-                    } else if ((url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl')))
+                    } else if (isPgcPlayUrlUrl(url)
                         && !Strings.getSearchParam(url, 'balh_ajax')) {
                         const reqUrl = new URL(url, document.location.href)
                         const isV1 = reqUrl.pathname === '/pgc/player/web/playurl'
@@ -344,7 +388,7 @@ export const area_limit_xhr = (() => {
                             })
                     }
 
-                    if (url.match(RegExps.url('api.bilibili.com/x/player/playurl')) && balh_config.enable_in_av) {
+                    if (isWebV1PlayUrlUrl(url) && balh_config.enable_in_av) {
                         log('/x/player/playurl')
                         // debugger
                         return bilibiliApis._playurl.asyncAjax(url)
@@ -361,7 +405,7 @@ export const area_limit_xhr = (() => {
                                 return data
                             })
 
-                    } else if (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
+                    } else if (isPgcV1PlayUrlUrl(url)
                         && !Strings.getSearchParam(url, 'balh_ajax')
                         && needRedirect()) {
                         // debugger
@@ -487,17 +531,16 @@ export const area_limit_xhr = (() => {
                                 return json;
                             }
                         })
-                } else if (param.url.match(RegExps.urlPath('/player/web_api/playurl')) // 老的番剧页面playurl接口
-                    || param.url.match(RegExps.urlPath('/player/web_api/v2/playurl')) // 新的番剧页面playurl接口
-                    || param.url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) // 新的番剧页面playurl接口
-                    || (balh_config.enable_in_av && param.url.match(RegExps.url('interface.bilibili.com/v2/playurl'))) // 普通的av页面playurl接口
+                } else if (isLegacyPlayUrlUrl(param.url) // 老、新的番剧页面 playurl 接口
+                    || isPgcV1PlayUrlUrl(param.url) // 新的番剧页面playurl接口
+                    || (balh_config.enable_in_av && isInterfacePlayUrlUrl(param.url)) // 普通的av页面playurl接口
                 ) {
                     // 新playrul:
                     // 1. 部分页面参数放在param.data中
                     // 2. 成功时, 返回的结果放到了result中: {"code":0,"message":"success","result":{}}
                     // 3. 失败时, 返回的结果没变
                     let isNewPlayurl
-                    if (isNewPlayurl = param.url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))) {
+                    if (isNewPlayurl = isPgcV1PlayUrlUrl(param.url)) {
                         if (param.data) {
                             param.url += `?${Object.keys(param.data).map(key => `${key}=${param.data[key]}`).join('&')}`
                             param.data = undefined
