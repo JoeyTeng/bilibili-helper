@@ -3,9 +3,9 @@ id: 20260804-cdn-selection-integration-21b2
 title: CDN Selection Integration (Stages 1 and 2)
 status: completed
 created: 2026-08-04
-updated: 2026-08-06
+updated: 2026-08-07
 branch: wip/cdn-selection-integration
-pr:
+pr: 13
 supersedes: []
 superseded_by:
 ---
@@ -122,23 +122,22 @@ superseded_by:
 
 - 未执行真实 Bilibili 登录态/英国线路的人工播放验收；自动模式不宣称已证明某个
   固定 host 在英国最快。
-- Stage 3 在独立后续 PR 中实现 stall recovery：只在页面可见、未暂停、未 seeking
-  且 low-buffer grace 再确认后触发；exact candidate groups 只存内存，只重路由
-  未来 Fetch/XHR 媒体请求，不 abort/reload 当前请求，并使用 cooldown/backoff
-  避免 ping-pong。MCDN/PCDN 保持最后兜底；静态 pool 只允许作为引用当前 exact
-  signed candidate group 已有 URL 的非默认实验性排序提示。
+- Stage 3 不属于本 Stage 1/2 工作流，随后由
+  [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 交付 stall recovery：
+  只在页面可见、未暂停、未 seeking 且 low-buffer grace 再确认后触发；exact candidate
+  groups 只存内存，只重路由未来 Fetch/XHR 媒体请求，不 abort/reload 当前请求，并使用
+  cooldown/backoff 避免 ping-pong。MCDN/PCDN 保持最后兜底；静态 pool 只允许作为引用
+  当前 exact signed candidate group 已有 URL 的非默认实验性排序提示。
 - Range cache、预取和 Service Worker 接管不属于 Stage 1/2。
 - 不维护旧版 CDN Switcher 兼容矩阵；上游 latest 变化时必须重新验证并更新固定
   version/SHA-256。
 
 ## Next Steps
 
-- Stage 1/2 集成工作流已完成；后续交付转到
+- Stage 1/2 集成工作流已由 PR #13 完成；Stage 3 随后由 PR #14 交付。当前交付状态转到
   `2026-08-05-cdn-three-stage-delivery-21b2.md`。
-- 由独立 PR 完成并合并 Stage 3；三个阶段全部合并后，由 Joey 在 UK-local 环境
-  完成人工播放验收。
-- 在上述两项完成前，不创建稳定版 tag、不发布稳定版，也不刷新 `main`。仓库 live
-  E2E gate 不能替代人工验收。
+- 下一步由 Joey 在 UK-local 环境完成人工播放验收；验收完成后仍须 Joey 明确授权，
+  才能创建稳定版 tag、发布稳定版或刷新 `main`。仓库 live E2E gate 不能替代人工验收。
 
 ## Evidence
 

@@ -207,8 +207,8 @@ superseded_by:
 
 ## Release Gate
 
-- 三个阶段的实现已经全部合并；稳定发布门禁当前只等待 UK-local 人工验收。
-- 随后必须由 Joey 在 UK-local 环境人工验收播放与恢复行为。
+- 三个阶段的实现已经全部合并。下一步由 Joey 在 UK-local 环境人工验收播放与恢复
+  行为；验收完成后仍须 Joey 明确授权，才能解除稳定发布门禁。
 - 2026-08-06 的仓库 live E2E gate 已通过：BVID `BV17x411w7KC` 在 Chrome
   `151.0.7922.72` 中真实播放推进；2 个 candidate/probed host 均 healthy，probe
   attempts 为 `completed=4` / `total=4`，持久化 2 个 host，并在重载后的新 runtime

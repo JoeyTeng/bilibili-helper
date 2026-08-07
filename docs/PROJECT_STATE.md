@@ -5,7 +5,8 @@ Last updated: 2026-08-07
 ## Current State
 
 - CDN selection Stage 1（精确响应选择）、Stage 2（本机两阶段探测）与 Stage 3
-  stall recovery 均已完成并合并到 `dev`；当前只等待 UK-local 人工播放验收。
+  stall recovery 均已完成并合并到 `dev`；下一步是 UK-local 人工播放验收，验收完成后
+  仍须 Joey 明确授权才能发布。
 - 兼容范围仅覆盖 latest Bilibili Video CDN Switcher；当前固定 snapshot 是 `0.1.4`，
   SHA-256 `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
 
