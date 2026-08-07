@@ -256,7 +256,7 @@ active audio/video groups, but their candidates, attempts, cooldowns, and timers
 | `confirming` | playback advances at least `0.25 s` while buffer stays low | remain `confirming`; restart the full grace interval |
 | `confirming` | current grace expires, sample is still eligible/low, and progress stayed below `0.25 s` | advance future route and enter `waiting-retry`; if no candidate remains, enter `exhausted` |
 | `waiting-retry` | `now >= retryAt` | low buffer starts a fresh `confirming`; otherwise `monitoring` |
-| `waiting-retry` / `exhausted` | buffer is at least `3 s` and non-seeking playback advances continuously for `5 s` | reset attempts to the current candidate and reset backoff; do not shorten an existing cooldown |
+| `waiting-retry` / `exhausted` | page is visible, buffer is at least `3 s`, and non-seeking playback advances continuously for `5 s` | reset attempts to the current candidate and reset backoff; do not shorten an existing cooldown |
 | any | context/generation change, active video replacement, leaving `auto`, or explicit disable | invalidate timers/activations and return to `disabled` or `unseen` |
 
 An eligible low-buffer sample is exactly:
@@ -369,7 +369,8 @@ successful inner `open()`, and only the inner URL may become active/attempted.
 
 - state boundaries at `grace - 1`, grace, cooldown, every backoff step, cap, and stable reset;
 - low buffer with real progress; hidden, paused, seeking, ended, near-end, unknown buffer, and
-  low -> healthy -> low transitions;
+  low -> healthy -> low transitions; hidden/unknown visibility exceeding the stable window in both
+  `waiting-retry` and `exhausted` without clearing attempts, followed by a visible stable reset;
 - duplicate signals/timers, context and generation replacement, old activations, and exhaustion;
 - inactive video-identity synchronization, nested reentrant wakes, and replacement during the
   native predecessor window followed by accepted-URL re-observation in the new context;

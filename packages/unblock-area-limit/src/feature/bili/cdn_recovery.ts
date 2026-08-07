@@ -702,7 +702,7 @@ function stablePlaybackTime(signals: PlaybackSignals, timing: CdnRecoveryTiming)
     const currentTime = finiteNumber(signals.currentTimeSeconds)
     const bufferedAhead = finiteNumber(signals.bufferedAheadSeconds)
     if (currentTime === null || bufferedAhead === null || invalidDuration(signals.durationSeconds)) return null
-    if (signals.paused || signals.seeking || signals.ended
+    if (!signals.visible || signals.paused || signals.seeking || signals.ended
         || isNearEnd(currentTime, signals.durationSeconds)
         || bufferedAhead < timing.stableBufferThresholdSeconds) return null
     return currentTime

@@ -238,46 +238,133 @@ for (const scenario of [
     assert.equal(exhausted.candidateIndex, 6)
 }
 
-{
-    const { clock, recovery } = makeActiveRecovery([group('stable', videoUrls.slice(0, 3))])
+for (const hiddenVisibility of [false, null]) {
+    const key = `stable-waiting-hidden-${String(hiddenVisibility)}`
+    const { clock, recovery } = makeActiveRecovery([group(key, videoUrls.slice(0, 3))])
     recovery.routeExactUrl(videoUrls[0])
     recovery.samplePlayback(low())
     clock.advance(3_000)
-    const cooldownDeadline = groupStatus(recovery, 'stable').retryAt
+    const failed = groupStatus(recovery, key)
+    const cooldownDeadline = failed.retryAt
     assert.equal(cooldownDeadline, 18_000)
+    assert.deepEqual(
+        {
+            state: failed.state,
+            switchAttempts: failed.switchAttempts,
+            attemptedCount: failed.attemptedCount,
+            candidateIndex: failed.candidateIndex,
+        },
+        {
+            state: 'waiting-retry',
+            switchAttempts: 1,
+            attemptedCount: 2,
+            candidateIndex: 1,
+        },
+    )
 
-    recovery.samplePlayback(healthy(1))
+    recovery.samplePlayback(healthy(1, { visible: hiddenVisibility }))
+    for (let second = 1; second <= 6; second += 1) {
+        clock.advance(1_000)
+        recovery.samplePlayback(healthy(1 + second, { visible: hiddenVisibility }))
+    }
+    const stillWaiting = groupStatus(recovery, key)
+    assert.deepEqual(
+        {
+            state: stillWaiting.state,
+            switchAttempts: stillWaiting.switchAttempts,
+            attemptedCount: stillWaiting.attemptedCount,
+            candidateIndex: stillWaiting.candidateIndex,
+            retryAt: stillWaiting.retryAt,
+        },
+        {
+            state: 'waiting-retry',
+            switchAttempts: 1,
+            attemptedCount: 2,
+            candidateIndex: 1,
+            retryAt: cooldownDeadline,
+        },
+    )
+
+    recovery.samplePlayback(healthy(8))
     for (let second = 1; second <= 5; second += 1) {
         clock.advance(1_000)
-        recovery.samplePlayback(healthy(1 + second))
+        recovery.samplePlayback(healthy(8 + second))
     }
-    const reset = groupStatus(recovery, 'stable')
+    const reset = groupStatus(recovery, key)
     assert.equal(reset.state, 'waiting-retry')
     assert.equal(reset.switchAttempts, 0)
     assert.equal(reset.attemptedCount, 1)
     assert.equal(reset.retryAt, cooldownDeadline)
 
     clock.advanceTo(cooldownDeadline)
-    recovery.samplePlayback(low(7))
+    recovery.samplePlayback(low(14))
     clock.advance(3_000)
-    assert.equal(groupStatus(recovery, 'stable').candidateIndex, 0)
+    assert.equal(groupStatus(recovery, key).candidateIndex, 0)
     assert.equal(recovery.routeExactUrl(videoUrls[1]).url, videoUrls[0])
 }
 
-{
-    const { clock, recovery } = makeActiveRecovery([group('stable-exhausted', [videoUrls[0]])])
+for (const hiddenVisibility of [false, null]) {
+    const key = `stable-exhausted-hidden-${String(hiddenVisibility)}`
+    const { clock, recovery } = makeActiveRecovery([group(key, videoUrls.slice(0, 2))])
     recovery.routeExactUrl(videoUrls[0])
     recovery.samplePlayback(low())
     clock.advance(3_000)
-    assert.equal(groupStatus(recovery, 'stable-exhausted').state, 'exhausted')
+    const retryAt = groupStatus(recovery, key).retryAt
+    clock.advanceTo(retryAt)
+    recovery.samplePlayback(low(1))
+    clock.advance(3_000)
+    const exhausted = groupStatus(recovery, key)
+    assert.deepEqual(
+        {
+            state: exhausted.state,
+            switchAttempts: exhausted.switchAttempts,
+            attemptedCount: exhausted.attemptedCount,
+            candidateIndex: exhausted.candidateIndex,
+            retryAt: exhausted.retryAt,
+        },
+        {
+            state: 'exhausted',
+            switchAttempts: 1,
+            attemptedCount: 2,
+            candidateIndex: 1,
+            retryAt,
+        },
+    )
 
-    recovery.samplePlayback(healthy(1))
+    recovery.samplePlayback(healthy(2, { visible: hiddenVisibility }))
+    for (let second = 1; second <= 6; second += 1) {
+        clock.advance(1_000)
+        recovery.samplePlayback(healthy(2 + second, { visible: hiddenVisibility }))
+    }
+    const stillExhausted = groupStatus(recovery, key)
+    assert.deepEqual(
+        {
+            state: stillExhausted.state,
+            switchAttempts: stillExhausted.switchAttempts,
+            attemptedCount: stillExhausted.attemptedCount,
+            candidateIndex: stillExhausted.candidateIndex,
+            retryAt: stillExhausted.retryAt,
+        },
+        {
+            state: 'exhausted',
+            switchAttempts: 1,
+            attemptedCount: 2,
+            candidateIndex: 1,
+            retryAt,
+        },
+    )
+
+    recovery.samplePlayback(healthy(9))
     for (let second = 1; second <= 5; second += 1) {
         clock.advance(1_000)
-        recovery.samplePlayback(healthy(1 + second))
+        recovery.samplePlayback(healthy(9 + second))
     }
-    assert.equal(groupStatus(recovery, 'stable-exhausted').state, 'monitoring')
-    assert.equal(groupStatus(recovery, 'stable-exhausted').attemptedCount, 1)
+    const reset = groupStatus(recovery, key)
+    assert.equal(reset.state, 'monitoring')
+    assert.equal(reset.switchAttempts, 0)
+    assert.equal(reset.attemptedCount, 1)
+    assert.equal(reset.candidateIndex, 1)
+    assert.equal(reset.retryAt, retryAt)
 }
 
 {
@@ -481,8 +568,8 @@ function low(currentTimeSeconds = 0, overrides = {}) {
     }
 }
 
-function healthy(currentTimeSeconds) {
-    return low(currentTimeSeconds, { bufferedAheadSeconds: 3 })
+function healthy(currentTimeSeconds, overrides = {}) {
+    return low(currentTimeSeconds, { bufferedAheadSeconds: 3, ...overrides })
 }
 
 function groupStatus(recovery, key) {

@@ -736,7 +736,8 @@ BALH 源码与兼容记录，不再下载第三方 latest。
 
 Stage 3 的实现必须遵循已冻结的设计参数：`0.5 s` low-buffer threshold、`3,000 ms`
 grace、`15,000 ms` 最小 cooldown、从 `5,000 ms` 指数增长且封顶 `60,000 ms` 的
-backoff，以及 `3 s` buffer / `5 s` 连续推进的稳定恢复重置。媒体请求只允许逐字命中
+backoff，以及页面可见时 `3 s` buffer / `5 s` 连续推进的稳定恢复重置；隐藏或未知
+visibility 不得清除失败历史。媒体请求只允许逐字命中
 唯一 representation/segment group；Fetch/XHR 重路由必须保持 method、headers、
 `Range`、credentials、body、signal、native `open()` 状态与 response/XHR identity。
 deterministic fixture、组合兼容、真实 Chromium 与 live capability 的验收矩阵也以同一
