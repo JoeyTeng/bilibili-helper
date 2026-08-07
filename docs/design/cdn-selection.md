@@ -1,8 +1,9 @@
 # CDN Selection Architecture
 
 状态：Stage 1（响应选择）、Stage 2（本机两阶段探测）与 Stage 3（stall recovery）
-均已合并到 `dev`。Joey 在 UK-local 环境完成人工播放验收前，不得创建稳定版 tag、
-发布稳定版或刷新 `main`。自动 live E2E 只能提供辅助证据，不能替代这项人工验收。
+均已合并到 `dev`。Joey 在 UK-local 环境完成人工播放验收并明确授权发布前，不得创建
+稳定版 tag、发布稳定版或刷新 `main`。自动 live E2E 只能提供辅助证据，不能替代这项
+人工验收。
 
 本文定义 BALH 浏览器端 CDN 选择的规范边界。它适用于 Bilibili 原始 playurl
 响应和 BALH 代理返回的 playurl 响应，也适用于 Vue、`fetch`、`XMLHttpRequest`
@@ -815,9 +816,9 @@ Stage 3 通过上述状态机与接缝实现当前播放的保守恢复；其能
   在受控的真实浏览器 userscript harness 中覆盖两种加载顺序。
 - 仓库 live E2E gate 验证真实站点播放推进和本机 probe 行为；它可能因 CORS 得到
   明确 `unprobeable` 或 partial 结果，不能替代人工验收。
-- 只有三个阶段全部合并后，Joey 在 UK-local 环境完成的人工播放验收才能解除稳定
-  tag/release/`main` refresh 门禁；验收只验证本机选择和恢复生效，不断言固定 host
-  获胜。
+- 只有三个阶段全部合并、Joey 在 UK-local 环境完成人工播放验收并明确授权发布后，
+  才能解除稳定 tag/release/`main` refresh 门禁；验收只验证本机选择和恢复生效，
+  不断言固定 host 获胜。
 - 至少覆盖一个普通候选优先、风险候选仍留作播放器 fallback，以及全部候选
   不可测时仍保持可播放 URL 的案例。
 - 精确验证过的 CDN Switcher 版本记录在 README，而不是本文。
