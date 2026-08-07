@@ -537,18 +537,97 @@ export const area_limit_xhr = (() => {
                 let finalCdnDeliveryOrder;
                 let observeFinalCdnPlayUrlDelivery = false;
                 const finalDoneCallbacks = [];
+                const finalDoneGateByXhr = new WeakMap();
                 let finalSuccessDeliveryState = 'pending';
                 let finalSuccessValue;
+                let finalSuccessCallbackArgs;
+                let finalSuccessCallbackContext;
+                let finalSuccessFallbackContext;
+                let finalSuccessFallbackXhr;
+                let optionSuccessCallbacksQueued = false;
+                let rawSuccessResolverBound = false;
+                let rawSuccessResolved = false;
+                const finalSuccessInvocationArgs = () => {
+                    const args = finalSuccessCallbackArgs
+                        ? finalSuccessCallbackArgs.slice()
+                        : [undefined, 'success', finalSuccessFallbackXhr];
+                    args[0] = finalSuccessValue;
+                    return args;
+                };
+                const invokeFinalSuccessCallback = success => success.apply(
+                    rawSuccessResolved ? finalSuccessCallbackContext : finalSuccessFallbackContext,
+                    finalSuccessInvocationArgs(),
+                );
                 const deliverFinalSuccess = value => {
                     finalSuccessDeliveryState = 'delivering';
                     finalSuccessValue = value;
                     try {
-                        if (oriSuccess) oriSuccess(value);
                         for (let index = 0; index < finalDoneCallbacks.length; index += 1) {
-                            finalDoneCallbacks[index](value);
+                            invokeFinalSuccessCallback(finalDoneCallbacks[index]);
                         }
                     } finally {
                         finalSuccessDeliveryState = 'delivered';
+                    }
+                };
+                const enqueueFinalDoneCallback = success => {
+                    if (typeof success !== 'function') return;
+                    if (finalSuccessDeliveryState === 'delivered') {
+                        invokeFinalSuccessCallback(success);
+                    } else {
+                        finalDoneCallbacks.push(success);
+                    }
+                };
+                const enqueueOptionSuccessCallbacks = () => {
+                    if (optionSuccessCallbacksQueued) return;
+                    optionSuccessCallbacksQueued = true;
+                    const register = success => {
+                        if (Array.isArray(success)) {
+                            success.forEach(register);
+                        } else {
+                            enqueueFinalDoneCallback(success);
+                        }
+                    };
+                    register(oriSuccess);
+                };
+                const bindRawSuccessResolver = (xhr, predecessorDone) => {
+                    if (rawSuccessResolverBound) return true;
+                    try {
+                        predecessorDone.call(xhr, mySuccess);
+                        rawSuccessResolverBound = true;
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+                const installFinalDoneGate = xhr => {
+                    try {
+                        if (!xhr || !['object', 'function'].includes(typeof xhr)) return false;
+                        const installedGate = finalDoneGateByXhr.get(xhr);
+                        if (installedGate && xhr.done === installedGate) return true;
+                        const predecessorDone = xhr.done;
+                        if (typeof predecessorDone !== 'function') return false;
+                        if (!oriSuccess && !bindRawSuccessResolver(xhr, predecessorDone)) return false;
+                        const gatedDone = function (...successCallbacks) {
+                            const register = success => {
+                                if (Array.isArray(success)) {
+                                    success.forEach(register);
+                                } else if (success === mySuccess) {
+                                    if (bindRawSuccessResolver(xhr, predecessorDone)) {
+                                        enqueueOptionSuccessCallbacks();
+                                    }
+                                } else {
+                                    enqueueFinalDoneCallback(success);
+                                }
+                            };
+                            successCallbacks.forEach(register);
+                            return xhr;
+                        };
+                        xhr.done = gatedDone;
+                        if (xhr.done !== gatedDone) return false;
+                        finalDoneGateByXhr.set(xhr, gatedDone);
+                        return true;
+                    } catch {
+                        return false;
                     }
                 };
                 // 投递结果的transformer, 结果通过oriSuccess/Error投递
@@ -706,7 +785,13 @@ export const area_limit_xhr = (() => {
                 if (one_api && oriResultTransformer) {
                     // 请求结果通过mySuccess/Error获取, 将其包装成Promise, 方便处理
                     let oriResultPromise = new Promise((resolve, reject) => {
-                        mySuccess = resolve
+                        mySuccess = function (...args) {
+                            if (rawSuccessResolved) return;
+                            rawSuccessResolved = true;
+                            finalSuccessCallbackContext = this;
+                            finalSuccessCallbackArgs = args;
+                            resolve(args[0]);
+                        }
                         myError = reject
                     })
                     if (needRedirect()) {
@@ -722,6 +807,21 @@ export const area_limit_xhr = (() => {
                     }
                 }
 
+                if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                    const oriBeforeSend = param.beforeSend === undefined
+                        ? jquery.ajaxSettings && jquery.ajaxSettings.beforeSend
+                        : param.beforeSend;
+                    param.beforeSend = function (...args) {
+                        finalSuccessFallbackContext = this;
+                        finalSuccessFallbackXhr = args[0];
+                        installFinalDoneGate(args[0]);
+                        if (!oriBeforeSend) return;
+                        const result = oriBeforeSend.apply(this, args);
+                        installFinalDoneGate(args[0]);
+                        return result;
+                    };
+                }
+
                 // 若外部使用param.success处理结果, 则替换param.success
                 if (oriSuccess && mySuccess) {
                     param.success = mySuccess;
@@ -734,22 +834,15 @@ export const area_limit_xhr = (() => {
                 let xhr = originalAjax.apply(this, [param]);
 
                 // 若外部使用xhr.done()处理结果, 则替换xhr.done()
-                if (!oriSuccess && mySuccess) {
-                    xhr.done(mySuccess);
-                }
                 if (observeFinalCdnPlayUrlDelivery && mySuccess) {
-                    xhr.done = function (...successCallbacks) {
-                        successCallbacks.forEach(success => {
-                            if (typeof success !== 'function') return;
-                            if (finalSuccessDeliveryState === 'delivered') {
-                                success(finalSuccessValue);
-                            } else {
-                                finalDoneCallbacks.push(success);
-                            }
-                        });
-                        return xhr;
-                    };
+                    if (!finalSuccessFallbackXhr) finalSuccessFallbackXhr = xhr;
+                    if (finalSuccessFallbackContext === undefined) {
+                        finalSuccessFallbackContext = param.context || param;
+                    }
+                    installFinalDoneGate(xhr);
+                    enqueueOptionSuccessCallbacks();
                 } else if (!oriSuccess && mySuccess) {
+                    xhr.done(mySuccess);
                     xhr.done = function (success) {
                         oriSuccess = success; // 保存外部设置的success函数
                         return xhr;

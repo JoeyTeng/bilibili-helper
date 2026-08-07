@@ -90,9 +90,20 @@ The token is bound by `WeakMap` to the exact transport XHR returned by that fact
 path-wide suppression is forbidden because a synchronous `beforeSend` / `ajaxSend` side request
 could otherwise steal the token. Only that identity defers its raw `DONE` publication. The outer
 Promise boundary publishes the final proxy-or-source payload once before delivering the same object
-to option `success` and every chained `.done()` callback, including callbacks registered during or
-after delivery. If no safe factory seam exists, page behavior remains authoritative and the outer
+to option `success` and every chained `.done()` callback. The adapter installs an idempotent final
+callback gate before invoking user `beforeSend`, repairs it after that hook returns, and retains the
+same gate after `ajax()` returns. Consequently, callbacks registered from `beforeSend`, global
+`ajaxSend`, ordinary chaining, reentrant delivery, or post-delivery Deferred memory all receive the
+same final object in true Deferred registration order. Only the callback data argument changes;
+the Deferred receiver, `textStatus`, and jqXHR argument remain intact. A request without its own
+hook composes the effective `ajaxSettings.beforeSend` instead of shadowing it, including its
+receiver, arguments, return value, and `false` cancellation. Only one internal resolver remains
+bound to the raw predecessor Deferred. If no safe
+factory seam exists, page behavior remains authoritative and the outer
 payload uses a fresh completion-order token instead of replacing the custom transport.
+An already-registered `ajaxPrefilter` that obtains jqXHR before `beforeSend` is outside this gate's
+observable seam. The pinned latest CDN Switcher `0.1.4` does not use that surface; expanding the
+compatibility claim requires a real-jQuery composition gate for the new integration.
 
 Each supported playurl Fetch call / XHR `open()` receives a monotonic delivery order before its
 predecessor starts. All active observation layers for that delivery use the same accepted order;
@@ -366,7 +377,10 @@ successful inner `open()`, and only the inner URL may become active/attempted.
   trusted-`OPENED` synchronous inner-open supersession, and native response identity;
 - real jQuery `area_limit_xhr()` delivery with different raw/proxy URLs, request-order tokens,
   inverse completion, exact transport-identity deferral, same-path/same-URL bypass XHRs, combined
-  option `success` plus chained/late `.done()`, missing factory fallback, and observation failure;
+  option `success` plus `beforeSend`/global-`ajaxSend`/chained/reentrant/late `.done()`, user
+  replacement of the jqXHR gate, global ajax-settings merge/cancellation, Deferred context and full
+  callback arguments, `ajaxSend`-before-transport timing, facade-versus-native transport identity,
+  missing factory fallback, and observation failure;
 - supported modern and legacy HTTPS playurl endpoints, newer parsed error delivery clearing old
   groups, and stale transforms preserving an active timer/attempt/override with zero publication;
 - unrelated GETs causing no DOM query, media read, or monitor timer churn while the same exact GET

@@ -108,11 +108,22 @@ superseded_by:
   identity 绑定 request-start token，并在一次 final observation 后统一交付 option
   `success` / `.done()`；XHR transaction 以 applied generation 拒绝已被内层取代的外层
   commit。真实 wrapper、旁路 XHR、乱序、组合回调与 inner-open 均有直接回归。
+- 新 head 的下一轮整段 review 又发现 jQuery `.done()` gate 若只在 `ajax()` 返回后安装，
+  用户 `beforeSend` 或全局 `ajaxSend` 中更早注册的 callback 仍会读取 raw payload。修复
+  改为在用户 `beforeSend` 前安装、hook 返回后幂等修复、`ajax()` 返回后再次兜底；只把
+  内部 resolver 绑定到 predecessor Deferred 一次。真实生命周期 harness 分离 jqXHR
+  facade 与 native transport，并覆盖 hook receiver/args/return、用户替换 `.done`、
+  `beforeSend`/`ajaxSend`/链式/重入/late memory 的顺序和同一 final object。
+- 提交前生命周期审计继续拦下 global `ajaxSettings.beforeSend` 被 request wrapper 遮蔽、
+  option `success` 被错误固定在早期 `.done()` 之前、Deferred context/三参数丢失，以及
+  fixture 把 native transport 建在 `ajaxSend` 之前四个问题。最终实现按真实注册顺序统一
+  排队，只替换 data；保留 receiver、`textStatus`、jqXHR、全局 hook 合并与 `false` 取消，
+  并用 `beforeSend -> option registration -> ajaxSend -> factory/open/send` 的模型直接回归。
 - `pnpm run check` 在最终 findings 修复树上完整通过；聚合 gate 新增
   jQuery-final-delivery、empty-final-delivery 与 live cooldown assessment 回归，且 build
   成功。
 - 受控 Chrome `151.0.7922.108` recovery E2E 在最终修复树重新通过：Fetch grace
-  `3019 ms`、XHR grace `3009 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
+  `3034 ms`、XHR grace `2992 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
   cooldown、predecessor/player identity、cleanup 与隐私门禁均通过。
 - 固定 CDN Switcher `0.1.4` / SHA-256
   `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4` 重新通过两种
@@ -120,7 +131,9 @@ superseded_by:
   `primary -> primary -> alternate -> alternate`。
 - 真实 Bilibili BVID `BV17x411w7KC` live E2E 重新通过：2 个 candidate/probed host
   均 healthy，`completed=4` / `total=4`，cache 以 `source="cache"` / `hostCount=2`
-  无网络复用。Stage 3 capability 仍严格返回 `INCONCLUSIVE` / `exit 3`，原因是
+  无网络复用。第一次实时页面会话快速返回 `cdn-cache-coverage: not-exercised`；在代码与
+  fixture 不变时立即重试即取得上述完整证据，因此按 live path 未触发处理，而不归类为
+  代码失败。Stage 3 capability 仍严格返回 `INCONCLUSIVE` / `exit 3`，原因是
   `no-unique-exact-group`，没有降级为 generic PASS。
 - 修复将形成新的签名 head，并在 `origin/dev@e7b8a988` 上重建最终分支，按真实 PR
   merge-base 到 new head 的整个范围重新执行 secret admission 与 fresh-context Codex

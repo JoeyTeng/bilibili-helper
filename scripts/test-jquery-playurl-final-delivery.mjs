@@ -120,6 +120,8 @@ async function testRealJqueryWrapperFinalDelivery() {
     const state = createState()
     const proxyRequests = []
     const nativeAjaxRequests = []
+    const cancelledAjaxRequests = []
+    const globalAjaxSendCallbacks = []
     const config = new Proxy({
         blocked_vip: false,
         enable_in_av: true,
@@ -146,40 +148,82 @@ async function testRealJqueryWrapperFinalDelivery() {
     jQuery.ajaxSettings = {
         xhr() { return new windowValue.XMLHttpRequest() },
     }
+    jQuery.ajaxSetup = settings => Object.assign(jQuery.ajaxSettings, settings)
     jQuery.ajax = function originalAjax(param) {
-        param.beforeSend?.()
-        const xhrFactory = typeof param.xhr === 'function'
-            ? param.xhr
-            : jQuery.ajaxSettings.xhr
-        const xhr = xhrFactory
-            ? xhrFactory.call(param)
-            : new windowValue.XMLHttpRequest()
+        const settings = { ...jQuery.ajaxSettings, ...param }
         const doneCallbacks = []
         const failCallbacks = []
-        xhr.done = callback => {
-            doneCallbacks.push(callback)
-            return xhr
+        let transportXhr
+        const jqXHR = {
+            done(...callbacks) {
+                callbacks.forEach(callback => {
+                    if (typeof callback === 'function') doneCallbacks.push(callback)
+                })
+                return jqXHR
+            },
+            fail(...callbacks) {
+                callbacks.forEach(callback => {
+                    if (typeof callback === 'function') failCallbacks.push(callback)
+                })
+                return jqXHR
+            },
+            complete(response) {
+                transportXhr.complete(response)
+            },
         }
-        xhr.fail = callback => {
-            failCallbacks.push(callback)
-            return xhr
+        for (const property of ['readyState', 'response', 'responseText', 'responseURL', 'status']) {
+            Object.defineProperty(jqXHR, property, {
+                configurable: true,
+                enumerable: true,
+                get() { return transportXhr?.[property] },
+            })
         }
-        const record = { param, xhr }
+        const callbackContext = settings.context || settings
+        const beforeSendResult = settings.beforeSend?.call(callbackContext, jqXHR, settings)
+        if (beforeSendResult === false) {
+            cancelledAjaxRequests.push({ beforeSendResult, jqXHR, param: settings })
+            return jqXHR
+        }
+        jqXHR.done(settings.success)
+        jqXHR.fail(settings.error)
+        const ajaxSendEvent = { target: windowValue.document, type: 'ajaxSend' }
+        for (const callback of globalAjaxSendCallbacks) {
+            callback.call(windowValue.document, ajaxSendEvent, jqXHR, settings)
+        }
+        const xhrFactory = typeof settings.xhr === 'function'
+            ? settings.xhr
+            : undefined
+        transportXhr = xhrFactory
+            ? xhrFactory.call(settings)
+            : new windowValue.XMLHttpRequest()
+        const record = {
+            beforeSendResult,
+            jqXHR,
+            originalParam: param,
+            param: settings,
+            predecessorDoneCallbacks: doneCallbacks,
+            transportXhr,
+            xhr: jqXHR,
+        }
         nativeAjaxRequests.push(record)
-        xhr.open('GET', param.url)
-        xhr.addEventListener('readystatechange', () => {
-            if (xhr.readyState !== 4) return
-            if (xhr.status === 200) {
-                param.success?.(xhr.response)
-                for (const callback of doneCallbacks) callback(xhr.response)
+        transportXhr.open('GET', settings.url)
+        transportXhr.addEventListener('readystatechange', () => {
+            if (transportXhr.readyState !== 4) return
+            if (transportXhr.status === 200) {
+                const args = [transportXhr.response, 'success', jqXHR]
+                for (let index = 0; index < doneCallbacks.length; index += 1) {
+                    doneCallbacks[index].apply(callbackContext, args)
+                }
             } else {
-                param.error?.(xhr)
-                for (const callback of failCallbacks) callback(xhr)
+                const args = [jqXHR, 'error', new Error('fixture transport error')]
+                for (let index = 0; index < failCallbacks.length; index += 1) {
+                    failCallbacks[index].apply(callbackContext, args)
+                }
             }
         })
-        xhr.send()
-        if (param.url.includes('request=throw-original-ajax')) throw originalAjaxError
-        return xhr
+        transportXhr.send()
+        if (settings.url.includes('request=throw-original-ajax')) throw originalAjaxError
+        return jqXHR
     }
     windowValue.jQuery = jQuery
     windowValue.$ = jQuery
@@ -224,7 +268,9 @@ async function testRealJqueryWrapperFinalDelivery() {
         )
         proxyRequests[0].resolve(noObserverProxy)
         await flushPromises()
-        assert.strictEqual(noObserverXhr, NativeXMLHttpRequest.instances[0])
+        assert.strictEqual(noObserverXhr, nativeAjaxRequests[0].jqXHR)
+        assert.strictEqual(nativeAjaxRequests[0].transportXhr, NativeXMLHttpRequest.instances[0])
+        assert.notStrictEqual(noObserverXhr, nativeAjaxRequests[0].transportXhr)
         assert.strictEqual(noObserverXhr.response, noObserverRaw)
         assert.deepEqual(state.publications, [{
             deliveryOrder: 1,
@@ -249,6 +295,139 @@ async function testRealJqueryWrapperFinalDelivery() {
         // Match main.ts: jQuery/XHR injection is installed before the outer
         // final-delivery observer, while originalAjax reads the constructor at request time.
         module.installCdnFinalDeliveryObservers()
+
+        const ajaxSettingsBeforeSend = jQuery.ajaxSettings.beforeSend
+        const globalBeforeSendContext = { marker: 'global-before-send-context' }
+        const globalBeforeSendCalls = []
+        const globalBeforeSendCallbacks = []
+        jQuery.ajaxSetup({ beforeSend: function (jqXHR, settings) {
+            globalBeforeSendCalls.push({
+                jqXHR,
+                receiver: this,
+                settings,
+            })
+            jqXHR.done(function (value, textStatus, callbackXhr) {
+                globalBeforeSendCallbacks.push({
+                    callbackXhr,
+                    kind: 'global-before-send-done',
+                    receiver: this,
+                    textStatus,
+                    value,
+                })
+            })
+            return 'global-before-send-result'
+        } })
+        const globalBeforeSendUrl = 'https://bangumi.bilibili.com/player/web_api/playurl?request=global-before-send'
+        const globalBeforeSendOptions = {
+            context: globalBeforeSendContext,
+            url: globalBeforeSendUrl,
+            success(value, textStatus, callbackXhr) {
+                globalBeforeSendCallbacks.push({
+                    callbackXhr,
+                    kind: 'option-success',
+                    receiver: this,
+                    textStatus,
+                    value,
+                })
+            },
+        }
+        assert.equal(
+            Object.hasOwn(globalBeforeSendOptions, 'beforeSend'),
+            false,
+            'the request fixture must rely exclusively on ajaxSettings.beforeSend',
+        )
+        const globalBeforeSendXhr = windowValue.jQuery.ajax(globalBeforeSendOptions)
+        assert.equal(globalBeforeSendCalls.length, 1)
+        assert.strictEqual(globalBeforeSendCalls[0].receiver, globalBeforeSendContext)
+        assert.strictEqual(globalBeforeSendCalls[0].jqXHR, globalBeforeSendXhr)
+        assert.equal(globalBeforeSendCalls[0].settings.url, globalBeforeSendUrl)
+        assert.equal(nativeAjaxRequests[0].beforeSendResult, 'global-before-send-result')
+        assert.strictEqual(globalBeforeSendCalls[0].settings, nativeAjaxRequests[0].param)
+        assert.notStrictEqual(nativeAjaxRequests[0].param, nativeAjaxRequests[0].originalParam)
+        assert.strictEqual(nativeAjaxRequests[0].jqXHR, globalBeforeSendXhr)
+        const globalBeforeSendRaw = restrictedPlayUrl(
+            'global-before-send-origin',
+            'https://global-before-send-origin.example/video.m4s',
+        )
+        globalBeforeSendXhr.complete(globalBeforeSendRaw)
+        await flushPromises()
+        assert.deepEqual(
+            globalBeforeSendCallbacks,
+            [],
+            'ajaxSettings beforeSend and option callbacks must not receive raw payloads',
+        )
+        assert.deepEqual(state.publications, [])
+        const globalBeforeSendProxyRequest = proxyRequests.find(request => (
+            request.url.includes('request=global-before-send')
+        ))
+        assert.ok(globalBeforeSendProxyRequest)
+        const globalBeforeSendProxy = directPlayUrl(
+            'global-before-send-proxy',
+            'https://global-before-send-proxy.example/video.m4s',
+        )
+        globalBeforeSendProxyRequest.resolve(globalBeforeSendProxy)
+        await flushPromises()
+        assert.deepEqual(
+            globalBeforeSendCallbacks.map(call => call.kind),
+            ['global-before-send-done', 'option-success'],
+            'ajaxSettings beforeSend done must retain its earlier Deferred registration order',
+        )
+        for (const call of globalBeforeSendCallbacks) {
+            assert.strictEqual(call.receiver, globalBeforeSendContext)
+            assert.equal(call.textStatus, 'success')
+            assert.strictEqual(call.callbackXhr, globalBeforeSendXhr)
+            assert.strictEqual(call.value, globalBeforeSendProxy)
+        }
+
+        resetState(state)
+        proxyRequests.length = 0
+        nativeAjaxRequests.length = 0
+        cancelledAjaxRequests.length = 0
+        NativeXMLHttpRequest.instances.length = 0
+
+        const cancelledContext = { marker: 'global-before-send-cancel-context' }
+        const cancelledBeforeSendCalls = []
+        let cancelledAjaxSendCalls = 0
+        let cancelledErrorCalls = 0
+        let cancelledSuccessCalls = 0
+        jQuery.ajaxSetup({ beforeSend: function (jqXHR, settings) {
+            cancelledBeforeSendCalls.push({ jqXHR, receiver: this, settings })
+            return false
+        } })
+        globalAjaxSendCallbacks.push(() => { cancelledAjaxSendCalls += 1 })
+        const cancelledUrl = 'https://bangumi.bilibili.com/player/web_api/playurl?request=global-before-send-cancel'
+        const cancelledXhr = windowValue.jQuery.ajax({
+            context: cancelledContext,
+            url: cancelledUrl,
+            error() { cancelledErrorCalls += 1 },
+            success() { cancelledSuccessCalls += 1 },
+        })
+        globalAjaxSendCallbacks.pop()
+        assert.equal(cancelledBeforeSendCalls.length, 1)
+        assert.strictEqual(cancelledBeforeSendCalls[0].receiver, cancelledContext)
+        assert.strictEqual(cancelledBeforeSendCalls[0].jqXHR, cancelledXhr)
+        assert.equal(cancelledBeforeSendCalls[0].settings.url, cancelledUrl)
+        assert.equal(cancelledAjaxRequests.length, 1)
+        assert.strictEqual(cancelledAjaxRequests[0].jqXHR, cancelledXhr)
+        assert.strictEqual(
+            cancelledBeforeSendCalls[0].settings,
+            cancelledAjaxRequests[0].param,
+        )
+        assert.equal(cancelledAjaxRequests[0].beforeSendResult, false)
+        assert.equal(cancelledAjaxSendCalls, 0)
+        assert.equal(cancelledErrorCalls, 0)
+        assert.equal(cancelledSuccessCalls, 0)
+        assert.equal(nativeAjaxRequests.length, 0)
+        assert.equal(NativeXMLHttpRequest.instances.length, 0)
+        assert.equal(proxyRequests.length, 0)
+        assert.deepEqual(state.publications, [])
+        jQuery.ajaxSetup({ beforeSend: ajaxSettingsBeforeSend })
+
+        resetState(state)
+        proxyRequests.length = 0
+        nativeAjaxRequests.length = 0
+        cancelledAjaxRequests.length = 0
+        NativeXMLHttpRequest.instances.length = 0
 
         const successCalls = []
         const errors = []
@@ -280,8 +459,10 @@ async function testRealJqueryWrapperFinalDelivery() {
         assert.equal(nativeAjaxRequests.length, 2)
         assert.strictEqual(olderXhr, nativeAjaxRequests[0].xhr, 'real wrapper must preserve older jqXHR identity')
         assert.strictEqual(newerXhr, nativeAjaxRequests[1].xhr, 'real wrapper must preserve newer jqXHR identity')
-        assert.strictEqual(olderXhr, NativeXMLHttpRequest.instances[0])
-        assert.strictEqual(newerXhr, NativeXMLHttpRequest.instances[1])
+        assert.strictEqual(nativeAjaxRequests[0].transportXhr, NativeXMLHttpRequest.instances[0])
+        assert.strictEqual(nativeAjaxRequests[1].transportXhr, NativeXMLHttpRequest.instances[1])
+        assert.notStrictEqual(olderXhr, nativeAjaxRequests[0].transportXhr)
+        assert.notStrictEqual(newerXhr, nativeAjaxRequests[1].transportXhr)
         assert.deepEqual(nativeAjaxRequests.map(request => request.param.url), [olderUrl, newerUrl])
         assert.equal(proxyRequests.length, 0, 'default mode must wait for each restricted raw response')
         assert.equal(state.deliveryOrder, 2, 'request-start token allocation must follow jQuery request order')
@@ -349,45 +530,126 @@ async function testRealJqueryWrapperFinalDelivery() {
         NativeXMLHttpRequest.instances.length = 0
 
         const combinedCallbacks = []
+        const combinedHookCalls = []
+        const combinedContext = { marker: 'combined-callback-context' }
+        let combinedBeforeSendDoneWrapperCalls = 0
+        const recordCombinedCallback = (
+            kind,
+            receiver,
+            value,
+            textStatus,
+            callbackXhr,
+        ) => {
+            combinedCallbacks.push({
+                authoritativeMarker: state.authoritativeMarker,
+                callbackXhr,
+                kind,
+                publicationCount: state.publications.length,
+                receiver,
+                textStatus,
+                value,
+            })
+        }
         const combinedUrl = 'https://bangumi.bilibili.com/player/web_api/playurl?request=success-and-done'
+        const combinedAjaxSend = function (event, jqXHR, settings) {
+            if (settings.url !== combinedUrl) return
+            combinedHookCalls.push({
+                event,
+                jqXHR,
+                kind: 'ajaxSend',
+                nativeTransportCount: NativeXMLHttpRequest.instances.length,
+                receiver: this,
+                settings,
+            })
+            jqXHR.done(function (value, textStatus, callbackXhr) {
+                recordCombinedCallback(
+                    'done-ajax-send',
+                    this,
+                    value,
+                    textStatus,
+                    callbackXhr,
+                )
+            })
+        }
+        globalAjaxSendCallbacks.push(combinedAjaxSend)
         let combinedXhr
         combinedXhr = windowValue.jQuery.ajax({
+            context: combinedContext,
             url: combinedUrl,
-            success(value) {
-                combinedCallbacks.push({
-                    kind: 'success',
-                    authoritativeMarker: state.authoritativeMarker,
-                    publicationCount: state.publications.length,
-                    value,
+            beforeSend(jqXHR, settings) {
+                combinedHookCalls.push({
+                    jqXHR,
+                    kind: 'beforeSend',
+                    receiver: this,
+                    settings,
                 })
-                combinedXhr.done(reentrantValue => {
-                    combinedCallbacks.push({
-                        kind: 'done-reentrant',
-                        authoritativeMarker: state.authoritativeMarker,
-                        publicationCount: state.publications.length,
-                        value: reentrantValue,
-                    })
+                jqXHR.done(function (value, textStatus, callbackXhr) {
+                    recordCombinedCallback(
+                        'done-before-send',
+                        this,
+                        value,
+                        textStatus,
+                        callbackXhr,
+                    )
+                })
+                const predecessorDone = jqXHR.done
+                jqXHR.done = function (...callbacks) {
+                    combinedBeforeSendDoneWrapperCalls += 1
+                    return predecessorDone.apply(this, callbacks)
+                }
+                return 'combined-before-send-result'
+            },
+            success(value, textStatus, callbackXhr) {
+                recordCombinedCallback('success', this, value, textStatus, callbackXhr)
+                combinedXhr.done(function (reentrantValue, reentrantStatus, reentrantXhr) {
+                    recordCombinedCallback(
+                        'done-reentrant',
+                        this,
+                        reentrantValue,
+                        reentrantStatus,
+                        reentrantXhr,
+                    )
                 })
             },
         })
+        globalAjaxSendCallbacks.pop()
         assert.strictEqual(combinedXhr.done(
-            value => {
-                combinedCallbacks.push({
-                    kind: 'done-first',
-                    authoritativeMarker: state.authoritativeMarker,
-                    publicationCount: state.publications.length,
-                    value,
-                })
+            function (value, textStatus, callbackXhr) {
+                recordCombinedCallback('done-first', this, value, textStatus, callbackXhr)
             },
-            value => {
-                combinedCallbacks.push({
-                    kind: 'done-second',
-                    authoritativeMarker: state.authoritativeMarker,
-                    publicationCount: state.publications.length,
-                    value,
-                })
+            function (value, textStatus, callbackXhr) {
+                recordCombinedCallback('done-second', this, value, textStatus, callbackXhr)
             },
         ), combinedXhr, 'combined success/.done registration must preserve jqXHR identity')
+        assert.deepEqual(combinedHookCalls.map(call => call.kind), ['beforeSend', 'ajaxSend'])
+        assert.strictEqual(combinedHookCalls[0].receiver, combinedContext)
+        assert.strictEqual(combinedHookCalls[0].jqXHR, combinedXhr)
+        assert.strictEqual(combinedHookCalls[0].settings.url, combinedUrl)
+        assert.strictEqual(combinedHookCalls[1].receiver, windowValue.document)
+        assert.equal(
+            combinedHookCalls[1].nativeTransportCount,
+            0,
+            'ajaxSend must run before the intended native transport factory',
+        )
+        assert.deepEqual(combinedHookCalls[1].event, {
+            target: windowValue.document,
+            type: 'ajaxSend',
+        })
+        assert.strictEqual(combinedHookCalls[1].jqXHR, combinedXhr)
+        assert.strictEqual(combinedHookCalls[1].settings.url, combinedUrl)
+        assert.equal(nativeAjaxRequests[0].beforeSendResult, 'combined-before-send-result')
+        assert.equal(
+            combinedBeforeSendDoneWrapperCalls,
+            1,
+            'the repaired gate must forward only the internal raw resolver through a user replacement',
+        )
+        assert.strictEqual(nativeAjaxRequests[0].jqXHR, combinedXhr)
+        assert.notStrictEqual(nativeAjaxRequests[0].transportXhr, combinedXhr)
+        assert.equal(
+            nativeAjaxRequests[0].predecessorDoneCallbacks.length,
+            1,
+            'mySuccess must be the only raw predecessor done callback',
+        )
         const combinedRaw = restrictedPlayUrl(
             'success-and-done-origin',
             'https://success-and-done-origin.example/video.m4s',
@@ -409,7 +671,9 @@ async function testRealJqueryWrapperFinalDelivery() {
             authoritativeMarker: call.authoritativeMarker,
             publicationCount: call.publicationCount,
         })), [
+            { kind: 'done-before-send', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
             { kind: 'success', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
+            { kind: 'done-ajax-send', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
             { kind: 'done-first', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
             { kind: 'done-second', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
             { kind: 'done-reentrant', authoritativeMarker: 'success-and-done-proxy', publicationCount: 1 },
@@ -418,24 +682,29 @@ async function testRealJqueryWrapperFinalDelivery() {
         assert.strictEqual(combinedCallbacks[1].value, combinedProxy)
         assert.strictEqual(combinedCallbacks[2].value, combinedProxy)
         assert.strictEqual(combinedCallbacks[3].value, combinedProxy)
-        assert.strictEqual(combinedXhr.done(value => {
-            combinedCallbacks.push({
-                kind: 'done-late',
-                authoritativeMarker: state.authoritativeMarker,
-                publicationCount: state.publications.length,
-                value,
-            })
+        assert.strictEqual(combinedCallbacks[4].value, combinedProxy)
+        assert.strictEqual(combinedCallbacks[5].value, combinedProxy)
+        for (const call of combinedCallbacks) {
+            assert.strictEqual(call.receiver, combinedContext)
+            assert.equal(call.textStatus, 'success')
+            assert.strictEqual(call.callbackXhr, combinedXhr)
+        }
+        assert.strictEqual(combinedXhr.done(function (value, textStatus, callbackXhr) {
+            recordCombinedCallback('done-late', this, value, textStatus, callbackXhr)
         }), combinedXhr, 'late post-delivery .done registration must preserve jqXHR identity')
         assert.deepEqual({
-            kind: combinedCallbacks[4].kind,
-            authoritativeMarker: combinedCallbacks[4].authoritativeMarker,
-            publicationCount: combinedCallbacks[4].publicationCount,
+            kind: combinedCallbacks[6].kind,
+            authoritativeMarker: combinedCallbacks[6].authoritativeMarker,
+            publicationCount: combinedCallbacks[6].publicationCount,
         }, {
             kind: 'done-late',
             authoritativeMarker: 'success-and-done-proxy',
             publicationCount: 1,
         }, 'late post-delivery .done registration must retain jqXHR memory semantics')
-        assert.strictEqual(combinedCallbacks[4].value, combinedProxy)
+        assert.strictEqual(combinedCallbacks[6].value, combinedProxy)
+        assert.strictEqual(combinedCallbacks[6].receiver, combinedContext)
+        assert.equal(combinedCallbacks[6].textStatus, 'success')
+        assert.strictEqual(combinedCallbacks[6].callbackXhr, combinedXhr)
         assert.strictEqual(combinedXhr.response, combinedRaw)
 
         resetState(state)
@@ -446,6 +715,11 @@ async function testRealJqueryWrapperFinalDelivery() {
         const doneCallbacks = []
         const doneUrl = 'https://bangumi.bilibili.com/player/web_api/playurl?request=done-callback'
         const doneXhr = windowValue.jQuery.ajax({ url: doneUrl })
+        assert.equal(
+            nativeAjaxRequests[0].predecessorDoneCallbacks.length,
+            1,
+            'a done-only request must bind the raw resolver exactly once before gating callbacks',
+        )
         assert.strictEqual(doneXhr.done(value => {
             doneCallbacks.push({
                 observationAttempts: state.observationAttempts,

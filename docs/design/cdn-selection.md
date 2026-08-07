@@ -577,9 +577,20 @@ token 通过 `WeakMap` 只绑定 factory 实际返回的 transport XHR identity�
 只延迟这个实例的 raw publication，同 path、不同 query 或完全相同 URL 的旁路 XHR
 均不能抢占 token。代理 normalization 与 CDN policy 完成后，最外层边界先发布最终
 payload，再按注册顺序调用 option `success` 和链式 `.done()`；组合使用两种回调、回调
-期间重入注册与交付后的 `.done()` memory 语义都只能看到同一最终对象。若自定义
+期间重入注册与交付后的 `.done()` memory 语义都只能看到同一最终对象。final-done
+gate 必须在 jQuery 把 jqXHR 暴露给用户 `beforeSend` 之前安装，并在用户 hook 返回后
+幂等修复，因此 `beforeSend`、全局 `ajaxSend` 和 `ajax()` 返回后注册的 `.done()` 都
+排队等待最终 payload。队列按真实 Deferred 注册顺序交付，例如 `beforeSend .done`、
+option `success`、`ajaxSend .done`、返回后的 `.done`；只替换回调参数中的 data，保留
+Deferred receiver、`textStatus` 与 jqXHR。请求未自带 hook 时仍组合执行
+`ajaxSettings.beforeSend`，并保留其 receiver、参数、返回值和 `false` 取消语义。内部
+raw resolver 只通过被捕获的 predecessor `.done` 绑定一次，不能把页面 callback
+重新挂回 raw Deferred。若自定义
 jQuery 没有可包装的 XHR factory，页面交付保持 fail-open，最终 payload 使用新的
 completion-order token 覆盖先前 raw observation，而不替换自定义 transport。
+已经在 BALH 注入前注册、并在 `beforeSend` 之前直接取得 jqXHR 的 `ajaxPrefilter`
+callback 不在该 gate 可见的拦截面内；当前 latest CDN Switcher `0.1.4` 不使用该表面，
+若未来兼容对象开始依赖它，必须新增真实 jQuery 组合 gate 后再扩展兼容声明。
 
 ### 幂等性
 
