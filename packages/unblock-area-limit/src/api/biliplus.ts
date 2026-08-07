@@ -433,7 +433,17 @@ export async function fixThailandPlayUrlJson(originJson: object) {
         'audio': <any>[]
     }
 
-    const upos = uposMap[balh_config.upos_server || 'hw'] ?? uposMap.hw
+    // Keep Thailand normalization mode-neutral. The shared CDN policy applies a
+    // selected manual host only at the final delivery boundary.
+    const upos = uposMap.hw
+    const preserveOriginalAkamaiBackup = (stream: { backup_url?: string[] }, sourceUrl: string) => {
+        const source = new URL(sourceUrl, document.location.href)
+        if (!source.hostname.includes('akamaized.net')) return
+        const backupUrls = Array.isArray(stream.backup_url) ? stream.backup_url : []
+        if (!backupUrls.includes(sourceUrl)) {
+            stream.backup_url = [...backupUrls, sourceUrl]
+        }
+    }
 
     // 填充音频流数据
     origin.data.video_info.dash_audio.forEach((audio) => {
@@ -445,6 +455,7 @@ export async function fixThailandPlayUrlJson(originJson: object) {
         } else if (url.hostname.includes("akamaized.net")) {
             audio.base_url = new URL(url.pathname + search, `https://${upos}`).href
         }
+        preserveOriginalAkamaiBackup(audio, base_url)
         addNoRefererHost(audio.base_url)
         if (audio.backup_url) {
             audio.backup_url.forEach(u => {
@@ -479,6 +490,7 @@ export async function fixThailandPlayUrlJson(originJson: object) {
             } else if (url.hostname.includes("akamaized.net")) {
                 stream.dash_video.base_url = new URL(url.pathname + search, `https://${upos}`).href
             }
+            preserveOriginalAkamaiBackup(stream.dash_video, base_url)
             addNoRefererHost(stream.dash_video.base_url)
             if (stream.dash_video.backup_url) {
                 stream.dash_video.backup_url.forEach(u => {

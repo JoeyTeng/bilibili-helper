@@ -18,6 +18,8 @@ interface BalhConfig {
     server_bilibili_api_proxy?: string
     mode: string
     flv_prefer_ws: string
+    /** CDN candidate selection policy. Legacy UPOS replacement maps to manual mode. */
+    cdn_mode: string
     upos_server?: string
     /** 开启upos替换时, 是否替换`akamaized.net` */
     upos_replace_akamai?: BOOL
@@ -34,6 +36,15 @@ interface BalhConfig {
 }
 
 const cookies = cookieStorage.all() // 缓存的cookies
+const CDN_MODES = new Set(['original', 'safe', 'auto', 'manual'])
+
+function resolveCdnMode(value: string | undefined, legacyUposServer: string | undefined): string {
+    if (value && CDN_MODES.has(value)) {
+        return value
+    }
+    return legacyUposServer ? 'manual' : 'safe'
+}
+
 export const balh_config: BalhConfig = new Proxy({ /*保存config的对象*/ } as BalhConfig, {
     get: function (target, prop) {
         if (typeof prop !== 'string') throw new TypeError(`unsupported prop: ${String(prop)}`)
@@ -73,6 +84,14 @@ export const balh_config: BalhConfig = new Proxy({ /*保存config的对象*/ } a
                     break
                 case 'flv_prefer_ws':
                     value = r.const.FALSE // 关闭该选项
+                    break
+                case 'cdn_mode':
+                    const resolvedCdnMode = resolveCdnMode(value, cookies.balh_upos_server)
+                    if (resolvedCdnMode !== value) {
+                        value = resolvedCdnMode
+                        // Persist the migration directly instead of re-entering balh_config's Proxy traps.
+                        cookieStorage.balh_cdn_mode = resolvedCdnMode
+                    }
                     break
                 case 'is_closed':
                     if (value == null) {
