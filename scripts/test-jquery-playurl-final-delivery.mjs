@@ -707,6 +707,239 @@ async function testRealJqueryWrapperFinalDelivery() {
         assert.strictEqual(combinedCallbacks[6].callbackXhr, combinedXhr)
         assert.strictEqual(combinedXhr.response, combinedRaw)
 
+        for (const scenario of [
+            {
+                expectedCalls: ['done-before-send-throw'],
+                name: 'done-before-send',
+                throwingCallback: 'done-before-send-throw',
+            },
+            {
+                expectedCalls: ['done-before-send', 'option-success-throw'],
+                name: 'option-success',
+                throwingCallback: 'option-success-throw',
+            },
+            {
+                expectedCalls: [
+                    'done-before-send',
+                    'option-success',
+                    'done-ajax-send',
+                    'done-returned-throw',
+                ],
+                name: 'done-returned',
+                throwingCallback: 'done-returned-throw',
+            },
+        ]) {
+            resetState(state)
+            proxyRequests.length = 0
+            nativeAjaxRequests.length = 0
+            NativeXMLHttpRequest.instances.length = 0
+
+            const callbackContext = { marker: `throw-${scenario.name}-context` }
+            const callbackError = new Error(`fixture ${scenario.name} callback throw`)
+            const callbackCalls = []
+            const errorCalls = []
+            const scheduledRethrows = []
+            const unhandledRejections = []
+            const originalWindowSetTimeout = windowValue.setTimeout
+            const onUnhandledRejection = reason => { unhandledRejections.push(reason) }
+            windowValue.setTimeout = callback => {
+                scheduledRethrows.push(callback)
+                return scheduledRethrows.length
+            }
+            process.on('unhandledRejection', onUnhandledRejection)
+
+            const recordCallback = function (
+                kind,
+                value,
+                textStatus,
+                callbackXhr,
+            ) {
+                callbackCalls.push({
+                    callbackXhr,
+                    kind,
+                    receiver: this,
+                    textStatus,
+                    value,
+                })
+                if (kind === scenario.throwingCallback) throw callbackError
+            }
+            const throwingUrl = `https://bangumi.bilibili.com/player/web_api/playurl?request=callback-throw-${scenario.name}`
+            const ajaxSendCallback = function (event, jqXHR, settings) {
+                if (settings.url !== throwingUrl) return
+                jqXHR.done(function (value, textStatus, callbackXhr) {
+                    recordCallback.call(
+                        this,
+                        'done-ajax-send',
+                        value,
+                        textStatus,
+                        callbackXhr,
+                    )
+                })
+            }
+            globalAjaxSendCallbacks.push(ajaxSendCallback)
+
+            try {
+                let throwingXhr
+                throwingXhr = windowValue.jQuery.ajax({
+                    context: callbackContext,
+                    url: throwingUrl,
+                    beforeSend(jqXHR) {
+                        jqXHR.done(function (value, textStatus, callbackXhr) {
+                            recordCallback.call(
+                                this,
+                                scenario.name === 'done-before-send'
+                                    ? 'done-before-send-throw'
+                                    : 'done-before-send',
+                                value,
+                                textStatus,
+                                callbackXhr,
+                            )
+                        })
+                    },
+                    error(...args) { errorCalls.push({ args, receiver: this }) },
+                    success(value, textStatus, callbackXhr) {
+                        const kind = scenario.name === 'option-success'
+                            ? 'option-success-throw'
+                            : 'option-success'
+                        recordCallback.call(this, kind, value, textStatus, callbackXhr)
+                        if (scenario.name === 'done-returned') {
+                            throwingXhr.done(function (
+                                reentrantValue,
+                                reentrantStatus,
+                                reentrantXhr,
+                            ) {
+                                recordCallback.call(
+                                    this,
+                                    'done-reentrant-after-throw',
+                                    reentrantValue,
+                                    reentrantStatus,
+                                    reentrantXhr,
+                                )
+                            })
+                        }
+                    },
+                })
+                globalAjaxSendCallbacks.pop()
+                assert.strictEqual(throwingXhr.done(
+                    function (value, textStatus, callbackXhr) {
+                        recordCallback.call(
+                            this,
+                            scenario.name === 'done-returned'
+                                ? 'done-returned-throw'
+                                : 'done-returned',
+                            value,
+                            textStatus,
+                            callbackXhr,
+                        )
+                    },
+                    function (value, textStatus, callbackXhr) {
+                        recordCallback.call(
+                            this,
+                            'done-returned-after-throw',
+                            value,
+                            textStatus,
+                            callbackXhr,
+                        )
+                    },
+                ), throwingXhr)
+
+                const raw = restrictedPlayUrl(
+                    `callback-throw-${scenario.name}-origin`,
+                    `https://callback-throw-${scenario.name}-origin.example/video.m4s`,
+                )
+                throwingXhr.complete(raw)
+                await flushPromises()
+                assert.deepEqual(callbackCalls, [], 'raw delivery must invoke no page success callbacks')
+                assert.deepEqual(errorCalls, [])
+                assert.deepEqual(state.publications, [])
+                assert.equal(scheduledRethrows.length, 0)
+                assert.equal(proxyRequests.length, 1)
+
+                const final = directPlayUrl(
+                    `callback-throw-${scenario.name}-proxy`,
+                    `https://callback-throw-${scenario.name}-proxy.example/video.m4s`,
+                )
+                proxyRequests[0].resolve(final)
+                await flushPromises()
+                await flushPromises()
+
+                assert.deepEqual(
+                    callbackCalls.map(call => call.kind),
+                    scenario.expectedCalls,
+                    'a thrown done callback must stop the remaining Deferred callback list',
+                )
+                for (const call of callbackCalls) {
+                    assert.strictEqual(call.receiver, callbackContext)
+                    assert.equal(call.textStatus, 'success')
+                    assert.strictEqual(call.callbackXhr, throwingXhr)
+                    assert.strictEqual(call.value, final)
+                }
+                assert.deepEqual(errorCalls, [], 'success callback errors must not invoke AJAX error')
+                assert.equal(state.publications.length, 1)
+                assert.equal(state.publications[0].marker, `callback-throw-${scenario.name}-proxy`)
+                assert.equal(proxyRequests.length, 1)
+                assert.equal(scheduledRethrows.length, 1)
+                assert.deepEqual(unhandledRejections, [])
+
+                throwingXhr.done(function () {
+                    callbackCalls.push({ kind: 'done-late-after-throw' })
+                })
+                assert.deepEqual(
+                    callbackCalls.map(call => call.kind),
+                    scenario.expectedCalls,
+                    'an interrupted once-memory callback list must not resume for late done',
+                )
+                assert.throws(
+                    () => scheduledRethrows[0](),
+                    error => error === callbackError,
+                    'the exact callback error must be rethrown outside the Promise chain',
+                )
+                assert.equal(state.publications.length, 1)
+                assert.equal(proxyRequests.length, 1)
+                assert.deepEqual(errorCalls, [])
+                assert.deepEqual(unhandledRejections, [])
+                assert.strictEqual(throwingXhr.response, raw)
+            } finally {
+                if (globalAjaxSendCallbacks.at(-1) === ajaxSendCallback) {
+                    globalAjaxSendCallbacks.pop()
+                }
+                process.off('unhandledRejection', onUnhandledRejection)
+                windowValue.setTimeout = originalWindowSetTimeout
+            }
+        }
+
+        resetState(state)
+        proxyRequests.length = 0
+        nativeAjaxRequests.length = 0
+        NativeXMLHttpRequest.instances.length = 0
+
+        const transformFailureErrors = []
+        let transformFailureSuccessCalls = 0
+        const transformFailureScheduledTasks = []
+        const originalWindowSetTimeout = windowValue.setTimeout
+        windowValue.setTimeout = callback => {
+            transformFailureScheduledTasks.push(callback)
+            return transformFailureScheduledTasks.length
+        }
+        try {
+            const transformFailureXhr = windowValue.jQuery.ajax({
+                url: 'https://bangumi.bilibili.com/player/web_api/playurl?request=transform-failure',
+                error(error) { transformFailureErrors.push(error) },
+                success() { transformFailureSuccessCalls += 1 },
+            })
+            transformFailureXhr.complete(null)
+            await flushPromises()
+            await flushPromises()
+            assert.equal(transformFailureErrors.length, 1)
+            assert.ok(transformFailureErrors[0] instanceof TypeError)
+            assert.equal(transformFailureSuccessCalls, 0)
+            assert.equal(transformFailureScheduledTasks.length, 0)
+            assert.equal(proxyRequests.length, 0)
+            assert.deepEqual(state.publications, [])
+        } finally {
+            windowValue.setTimeout = originalWindowSetTimeout
+        }
+
         resetState(state)
         proxyRequests.length = 0
         nativeAjaxRequests.length = 0

@@ -91,6 +91,8 @@ try {
     await testFetchOutOfOrderDeliveryTokens()
     await testXhrOutOfOrderDeliveryTokens()
     await testUnknownAccessorFailOpen()
+    await testFetchPostInstallAccessorReplacement()
+    await testXhrPostInstallAccessorReplacement()
     await testXhrComposition('observer-first')
     await testXhrComposition('downstream-first')
 } finally {
@@ -423,6 +425,128 @@ async function testUnknownAccessorFailOpen() {
     assert.deepEqual(harness.state.observationOrders, [])
     assert.equal(fetchSetterCalls, 0)
     assert.equal(xhrSetterCalls, 0)
+}
+
+async function testFetchPostInstallAccessorReplacement() {
+    const calls = []
+    const rawResponse = jsonResponse({ marker: 'fetch-accessor-raw' })
+    const finalResponse = jsonResponse({ marker: 'fetch-accessor-final' })
+    const predecessor = function (input, init) {
+        calls.push({ receiver: this, input, init })
+        return Promise.resolve(rawResponse)
+    }
+    const harness = await createHarness('fetch-post-install-accessor', {
+        fetch: predecessor,
+        XMLHttpRequest: class extends EventTarget { },
+    })
+    harness.module.installCdnFinalDeliveryObservers()
+
+    const capturedObserver = harness.window.fetch
+    const receiver = { name: 'fetch-post-install-accessor-receiver' }
+    const init = { credentials: 'include' }
+    const requestUrl = 'https://api.bilibili.com/x/player/playurl?fixture=fetch-post-install-accessor'
+    let getterCalls = 0
+    let setterCalls = 0
+    let wrapperCalls = 0
+    const wrapper = async function (input, requestInit) {
+        wrapperCalls += 1
+        const response = await capturedObserver.call(this, input, requestInit)
+        assert.strictEqual(response, rawResponse)
+        return finalResponse
+    }
+    const getter = () => {
+        getterCalls += 1
+        return wrapper
+    }
+    const setter = () => {
+        setterCalls += 1
+    }
+    Object.defineProperty(harness.window, 'fetch', {
+        configurable: true,
+        enumerable: true,
+        get: getter,
+        set: setter,
+    })
+
+    harness.runTimer(0)
+    const repairedDescriptor = Object.getOwnPropertyDescriptor(harness.window, 'fetch')
+    assert.strictEqual(repairedDescriptor.get, getter)
+    assert.strictEqual(repairedDescriptor.set, setter)
+    assert.equal(getterCalls, 0, 'Fetch repair must not invoke an unknown getter')
+    assert.equal(setterCalls, 0, 'Fetch repair must not write through an unknown setter')
+
+    const publicFetch = harness.window.fetch
+    assert.strictEqual(publicFetch, wrapper)
+    const delivered = await publicFetch.call(receiver, requestUrl, init)
+    assert.strictEqual(delivered, finalResponse, 'the accessor wrapper must preserve its final Response identity')
+    assert.equal(getterCalls, 1)
+    assert.equal(setterCalls, 0)
+    assert.equal(wrapperCalls, 1, 'the accessor wrapper must run exactly once without recursion')
+    assert.deepEqual(calls, [{ receiver, input: requestUrl, init }])
+    assert.equal(harness.state.deliveryOrder, 0, 'the stale Fetch observer must not allocate a token')
+    assert.deepEqual(harness.state.observations, [], 'the stale Fetch observer must not publish raw JSON')
+    assert.deepEqual(harness.state.observationOrders, [])
+}
+
+async function testXhrPostInstallAccessorReplacement() {
+    const native = createNativeXhr()
+    const harness = await createHarness('xhr-post-install-accessor', {
+        fetch: () => Promise.resolve(jsonResponse({ marker: 'unused' })),
+        XMLHttpRequest: native.XMLHttpRequest,
+    })
+    harness.module.installCdnFinalDeliveryObservers()
+
+    const capturedObserver = harness.window.XMLHttpRequest
+    let getterCalls = 0
+    let setterCalls = 0
+    let wrapperCalls = 0
+    function AccessorXMLHttpRequest(...args) {
+        wrapperCalls += 1
+        return Reflect.construct(capturedObserver, args, new.target)
+    }
+    AccessorXMLHttpRequest.prototype = capturedObserver.prototype
+    const getter = () => {
+        getterCalls += 1
+        return AccessorXMLHttpRequest
+    }
+    const setter = () => {
+        setterCalls += 1
+    }
+    Object.defineProperty(harness.window, 'XMLHttpRequest', {
+        configurable: true,
+        enumerable: true,
+        get: getter,
+        set: setter,
+    })
+
+    harness.runTimer(0)
+    const repairedDescriptor = Object.getOwnPropertyDescriptor(harness.window, 'XMLHttpRequest')
+    assert.strictEqual(repairedDescriptor.get, getter)
+    assert.strictEqual(repairedDescriptor.set, setter)
+    assert.equal(getterCalls, 0, 'XHR repair must not invoke an unknown getter')
+    assert.equal(setterCalls, 0, 'XHR repair must not write through an unknown setter')
+
+    const PublicXMLHttpRequest = harness.window.XMLHttpRequest
+    assert.strictEqual(PublicXMLHttpRequest, AccessorXMLHttpRequest)
+    const xhr = new PublicXMLHttpRequest()
+    assert.equal(xhr instanceof PublicXMLHttpRequest, true)
+    assert.equal(xhr instanceof capturedObserver, true)
+    assert.equal(xhr instanceof native.XMLHttpRequest, true)
+    assert.equal(native.instances.has(xhr), true)
+    xhr.open('GET', 'https://api.bilibili.com/x/player/playurl?fixture=xhr-post-install-accessor')
+    xhr.complete({
+        responseURL: 'https://api.bilibili.com/x/player/playurl?fixture=xhr-post-install-accessor-final',
+        response: { marker: 'xhr-accessor-raw' },
+    })
+
+    assert.equal(getterCalls, 1)
+    assert.equal(setterCalls, 0)
+    assert.equal(wrapperCalls, 1, 'the accessor constructor must run exactly once without recursion')
+    assert.deepEqual(native.openReceivers, [xhr])
+    assert.deepEqual(native.completeReceivers, [xhr])
+    assert.equal(harness.state.deliveryOrder, 0, 'the stale XHR observer must not allocate a token')
+    assert.deepEqual(harness.state.observations, [], 'the stale XHR observer must not publish raw JSON')
+    assert.deepEqual(harness.state.observationOrders, [])
 }
 
 async function testXhrComposition(order) {

@@ -78,17 +78,20 @@ function installFetchObserverSlot() {
     try {
         descriptor = Object.getOwnPropertyDescriptor(window, 'fetch')
         if (descriptor?.get && fetchSlotGetters.has(descriptor.get)) return
-        current = window.fetch
+
+        if (descriptor && !('value' in descriptor)) {
+            // An unknown accessor may call an observer it captured before replacing
+            // our slot. Do not invoke or write through it: make that predecessor
+            // transparent because the slot can no longer be safely owned.
+            deactivateFetchObserver()
+            return
+        }
+        current = descriptor ? descriptor.value : window.fetch
     } catch {
+        // An unreadable descriptor or slot does not prove replacement.
         return
     }
     if (typeof current !== 'function') return
-
-    if (descriptor && !('value' in descriptor)) {
-        // Writing the getter result back through an unknown setter can create
-        // wrapper -> observer -> wrapper recursion. Preserve that accessor.
-        return
-    }
     let exposed = exposeFetchObserver(current)
     if (descriptor && !descriptor.configurable) {
         try {
@@ -152,8 +155,7 @@ function createFetchObserver(predecessor: typeof window.fetch): typeof window.fe
 
 function exposeFetchObserver(value: typeof window.fetch): typeof window.fetch {
     if (activeFetchObserver && activeFetchObserver !== value) {
-        const previousState = fetchObserverStates.get(activeFetchObserver)
-        if (previousState) previousState.active = false
+        deactivateFetchObserver()
     }
     const observer = fetchObserverStates.has(value) ? value : createFetchObserver(value)
     const state = fetchObserverStates.get(observer)
@@ -162,23 +164,32 @@ function exposeFetchObserver(value: typeof window.fetch): typeof window.fetch {
     return observer
 }
 
+function deactivateFetchObserver() {
+    if (!activeFetchObserver) return
+    const state = fetchObserverStates.get(activeFetchObserver)
+    if (state) state.active = false
+}
+
 function installXhrObserverSlot() {
     let current: typeof window.XMLHttpRequest
     let descriptor: PropertyDescriptor | undefined
     try {
         descriptor = Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest')
         if (descriptor?.get && xhrSlotGetters.has(descriptor.get)) return
-        current = window.XMLHttpRequest
+
+        if (descriptor && !('value' in descriptor)) {
+            // An unknown accessor may construct through an observer it captured
+            // before replacing our slot. Preserve it without invoking its getter,
+            // and make the captured predecessor transparent.
+            deactivateXhrObserver()
+            return
+        }
+        current = descriptor ? descriptor.value : window.XMLHttpRequest
     } catch {
+        // An unreadable descriptor or slot does not prove replacement.
         return
     }
     if (typeof current !== 'function') return
-
-    if (descriptor && !('value' in descriptor)) {
-        // Writing the getter result back through an unknown setter can create
-        // constructor recursion. Preserve that accessor.
-        return
-    }
     let exposed = exposeXhrObserver(current)
     if (descriptor && !descriptor.configurable) {
         try {
@@ -314,14 +325,19 @@ function createXhrObserver(
 
 function exposeXhrObserver(value: typeof window.XMLHttpRequest): typeof window.XMLHttpRequest {
     if (activeXhrObserver && activeXhrObserver !== value) {
-        const previousState = xhrObserverStates.get(activeXhrObserver)
-        if (previousState) previousState.active = false
+        deactivateXhrObserver()
     }
     const observer = xhrObserverStates.has(value) ? value : createXhrObserver(value)
     const state = xhrObserverStates.get(observer)
     if (state) state.active = true
     activeXhrObserver = observer
     return observer
+}
+
+function deactivateXhrObserver() {
+    if (!activeXhrObserver) return
+    const state = xhrObserverStates.get(activeXhrObserver)
+    if (state) state.active = false
 }
 
 function observeFinalXhrResponse(xhr: XMLHttpRequest, deliveryOrder: number) {

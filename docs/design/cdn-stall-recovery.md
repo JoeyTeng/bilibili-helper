@@ -81,7 +81,11 @@ the downstream response. Fetch awaits and parses only a clone, then returns the 
 native response getters. A shared endpoint classifier covers exact modern host/path pairs plus the
 two legacy `/player/web_api[/v2]/playurl` paths retained by the existing adapter; the final observer
 still requires the resolved request to be HTTPS. Unsupported, non-configurable, hostile, or
-unreadable hook descriptors remain fail-open.
+unreadable hook descriptors remain fail-open. If a scheduled repair finds a post-install unknown
+accessor, it neither invokes the getter nor writes the setter; instead it deactivates the previously
+captured Fetch/XHR observer so a wrapper that retained that predecessor becomes transparent and
+cannot publish a pre-transform response. Calls made between replacement and the repair remain a
+bounded race, and replacement after the last scheduled repair is not automatically discovered.
 
 A higher-level jQuery adapter may continue transforming a raw XHR result asynchronously, including
 replacing an area-limited source payload with a proxy payload. That logical request allocates its
@@ -101,6 +105,9 @@ receiver, arguments, return value, and `false` cancellation. Only one internal r
 bound to the raw predecessor Deferred. If no safe
 factory seam exists, page behavior remains authoritative and the outer
 payload uses a fresh completion-order token instead of replacing the custom transport.
+An exception thrown by a page `success` / `.done()` callback stops the remaining once-memory list,
+is rethrown with the exact error in a separate browser task, and never enters the AJAX `error`
+callback or becomes a Promise rejection. Final observation is committed before that callback runs.
 An already-registered `ajaxPrefilter` that obtains jqXHR before `beforeSend` is outside this gate's
 observable seam. The pinned latest CDN Switcher `0.1.4` does not use that surface; expanding the
 compatibility claim requires a real-jQuery composition gate for the new integration.
@@ -380,7 +387,10 @@ successful inner `open()`, and only the inner URL may become active/attempted.
   option `success` plus `beforeSend`/global-`ajaxSend`/chained/reentrant/late `.done()`, user
   replacement of the jqXHR gate, global ajax-settings merge/cancellation, Deferred context and full
   callback arguments, `ajaxSend`-before-transport timing, facade-versus-native transport identity,
+  callback exceptions stopping the list without AJAX-error conversion or Promise rejection,
   missing factory fallback, and observation failure;
+- post-install unknown Fetch/XHR accessor replacement, scheduled repair without getter/setter
+  invocation, captured-predecessor deactivation, zero raw publication, and identity/call counts;
 - supported modern and legacy HTTPS playurl endpoints, newer parsed error delivery clearing old
   groups, and stale transforms preserving an active timer/attempt/override with zero publication;
 - unrelated GETs causing no DOM query, media read, or monitor timer churn while the same exact GET

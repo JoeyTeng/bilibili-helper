@@ -565,8 +565,17 @@ export const area_limit_xhr = (() => {
                         for (let index = 0; index < finalDoneCallbacks.length; index += 1) {
                             invokeFinalSuccessCallback(finalDoneCallbacks[index]);
                         }
-                    } finally {
-                        finalSuccessDeliveryState = 'delivered';
+                    } catch (error) {
+                        finalSuccessDeliveryState = 'failed';
+                        throw error;
+                    }
+                    finalSuccessDeliveryState = 'delivered';
+                };
+                const rethrowFinalSuccessCallbackError = error => {
+                    try {
+                        window.setTimeout(() => { throw error }, 0);
+                    } catch {
+                        // Callback errors must never become AJAX transport errors.
                     }
                 };
                 const enqueueFinalDoneCallback = success => {
@@ -631,20 +640,27 @@ export const area_limit_xhr = (() => {
                     }
                 };
                 // 投递结果的transformer, 结果通过oriSuccess/Error投递
-                let dispatchResultTransformer = p => p
-                    .then(r => {
-                        // debugger
-                        if (!observeFinalCdnPlayUrlDelivery) {
-                            oriSuccess(r)
-                        } else {
-                            deliverFinalCdnPlayUrlResponse(
-                                r,
-                                finalCdnDeliveryOrder,
-                                deliverFinalSuccess,
-                            )
-                        }
-                    })
-                    .catch(e => oriError(e))
+                let dispatchResultTransformer = p => {
+                    if (!observeFinalCdnPlayUrlDelivery) {
+                        return p
+                            .then(r => oriSuccess(r))
+                            .catch(e => oriError(e));
+                    }
+                    return p.then(
+                        r => {
+                            try {
+                                deliverFinalCdnPlayUrlResponse(
+                                    r,
+                                    finalCdnDeliveryOrder,
+                                    deliverFinalSuccess,
+                                );
+                            } catch (error) {
+                                rethrowFinalSuccessCallbackError(error);
+                            }
+                        },
+                        e => oriError(e),
+                    );
+                }
                 // 转换原始请求的结果的transformer
                 let oriResultTransformer
                 let oriResultTransformerWhenProxyError

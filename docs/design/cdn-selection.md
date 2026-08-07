@@ -588,6 +588,9 @@ raw resolver 只通过被捕获的 predecessor `.done` 绑定一次，不能把�
 重新挂回 raw Deferred。若自定义
 jQuery 没有可包装的 XHR factory，页面交付保持 fail-open，最终 payload 使用新的
 completion-order token 覆盖先前 raw observation，而不替换自定义 transport。
+页面 `success` / `.done()` 抛错时，先前 final observation 保持已提交，当前 once-memory
+callback list 在抛错点停止；原始异常在独立 browser task 重抛，不得进入 AJAX `error`
+或变成 Promise rejection。
 已经在 BALH 注入前注册、并在 `beforeSend` 之前直接取得 jqXHR 的 `ajaxPrefilter`
 callback 不在该 gate 可见的拦截面内；当前 latest CDN Switcher `0.1.4` 不使用该表面，
 若未来兼容对象开始依赖它，必须新增真实 jQuery 组合 gate 后再扩展兼容声明。
@@ -719,6 +722,9 @@ BALH 源码与兼容记录，不再下载第三方 latest。
 - 支持的 playurl endpoint 由一个共享 classifier 定义：现代接口使用精确 host/path，
   legacy `/player/web_api[/v2]/playurl` 保留已有任意已解析 hostname 的兼容语义；最终
   observer 只接收解析后的 HTTPS 请求。有效 JSON 错误 envelope 以同 token 发布空组。
+- 后置未知 Fetch/XHR accessor 的 repair 不执行 getter/setter，而是停用被捕获的旧
+  observer，避免 wrapper 再发布 raw 响应；替换到 repair 之间和最后一次 repair 之后的
+  晚期替换是明确的 fail-open 边界。
 - 显式“关闭脚本”时不安装 monitor/final observer，也不允许已存在的 observer 继续
   安排 auto probe 或启用 recovery；“未配置自定义区域代理”不等同于显式关闭，仍保留
   CDN-only 选择与恢复能力。

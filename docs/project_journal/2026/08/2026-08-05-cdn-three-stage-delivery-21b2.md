@@ -119,11 +119,17 @@ superseded_by:
   fixture 把 native transport 建在 `ajaxSend` 之前四个问题。最终实现按真实注册顺序统一
   排队，只替换 data；保留 receiver、`textStatus`、jqXHR、全局 hook 合并与 `false` 取消，
   并用 `beforeSend -> option registration -> ajaxSend -> factory/open/send` 的模型直接回归。
+- 冻结范围 `e7b8a988..38a3c1e9` 的正式 fresh-context review 又提出 2 项 P2：后置未知
+  accessor repair 必须停用被 wrapper 捕获的旧 Fetch/XHR observer；页面 `.done()` 抛错
+  不能被 Promise catch 误报为 AJAX error。修复对未知 accessor 保持 getter/setter 零调用
+  并保守停用 predecessor；成功 callback list 在抛错点停止，exact error 由独立 task
+  重抛。Fetch/XHR accessor 与 early/option/returned callback throw 都有直接回归；新的
+  签名 head 仍需重新执行完整测试、secret admission 与整段 fresh-context review。
 - `pnpm run check` 在最终 findings 修复树上完整通过；聚合 gate 新增
   jQuery-final-delivery、empty-final-delivery 与 live cooldown assessment 回归，且 build
   成功。
 - 受控 Chrome `151.0.7922.108` recovery E2E 在最终修复树重新通过：Fetch grace
-  `3034 ms`、XHR grace `2992 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
+  `3019 ms`、XHR grace `2992 ms`，两者均保持 current request、只把 future exact route 切到 alternate，
   cooldown、predecessor/player identity、cleanup 与隐私门禁均通过。
 - 固定 CDN Switcher `0.1.4` / SHA-256
   `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4` 重新通过两种
@@ -131,9 +137,10 @@ superseded_by:
   `primary -> primary -> alternate -> alternate`。
 - 真实 Bilibili BVID `BV17x411w7KC` live E2E 重新通过：2 个 candidate/probed host
   均 healthy，`completed=4` / `total=4`，cache 以 `source="cache"` / `hostCount=2`
-  无网络复用。第一次实时页面会话快速返回 `cdn-cache-coverage: not-exercised`；在代码与
-  fixture 不变时立即重试即取得上述完整证据，因此按 live path 未触发处理，而不归类为
-  代码失败。Stage 3 capability 仍严格返回 `INCONCLUSIVE` / `exit 3`，原因是
+  无网络复用。两个较早 pre-fix 树的第一次实时页面会话曾快速返回
+  `cdn-cache-coverage: not-exercised`，在代码与 fixture 不变时立即重试即取得完整证据；
+  formal-review fixes 后的最终树第一次即通过。因此前两次按 live path 未触发记录，不归类
+  为代码失败。Stage 3 capability 仍严格返回 `INCONCLUSIVE` / `exit 3`，原因是
   `no-unique-exact-group`，没有降级为 generic PASS。
 - 修复将形成新的签名 head，并在 `origin/dev@e7b8a988` 上重建最终分支，按真实 PR
   merge-base 到 new head 的整个范围重新执行 secret admission 与 fresh-context Codex
