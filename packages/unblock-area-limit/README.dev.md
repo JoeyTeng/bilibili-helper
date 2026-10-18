@@ -25,6 +25,63 @@ key为`'balh_server'`，可选的`value`为：
 1. `undefined`：默认代理服务器
 2. `'https://www.your_server.com'`：自定义的代理服务器
 
+### CDN 选择模式
+
+`key`为`'balh_cdn_mode'`，可选的`value`为：
+
+1. `'safe'`：仅保守后移被识别为 MCDN/PCDN 风险层的候选；
+2. `'auto'`：额外使用当前浏览器的有界两阶段后台测速与 host-only `v2` cache；
+3. `'original'`：保留平台原始候选顺序；
+4. `'manual'`：启用旧的 UPOS 主机替换。
+
+`balh_cdn_mode` 未设置或值无效时会解析为 `'safe'`；仅当检测到旧版 `balh_upos_server` 配置时迁移为 `'manual'`。迁移结果会写回 `balh_cdn_mode` cookie。
+
+`auto` 的主动探测以候选实际 URL 为准，只准入 `bilivideo.com`、`bilivideo.cn`、
+`bilivideo.net` 的 label-bound 域及精确 Bilibili Akamai 主机；不信任旁路 host
+metadata，也不跟随重定向。未准入候选仍保留给播放器回退，但不读写 host health。
+请求固定 `credentials: "omit"` 且默认不发送 `Range`；CORS 不可读结果是
+`unprobeable`，不是 CDN 失败。
+
+Stage 1 probe 在动态 `2 MiB` accounted-prefix 预算允许完整 `64 KiB` 样本时覆盖
+每个可准入的不同 host，并发不超过 `2`；成功结果中稳定排名前两名共享 Stage 2
+剩余预算，每个 follow-up 最多 `512 KiB`。吞吐量与可靠 DASH bitrate margin 是主要
+证据，TTFB 是次要证据。请求/阶段默认边界约为 `2–4 s`，取消后的清理最多再给
+`250 ms`。reader 返回的完整 chunk 可以让当前 batch 的 raw JavaScript/transport
+实收量超出动态预算；只有 clip 到剩余预算的前缀进入计分，raw observed bytes 会
+停止后续请求，accounted-prefix 总量仍硬限制在 `2 MiB`。
+
+持久化 cache schema 是 `v2`、TTL 是 `20 min`，候选 host 集合或粗粒度网络提示变化
+即失效。不完整、`budget-limited`、`unprobeable` 或无法证明清理安全的轮次不持久化。
+cache、日志与诊断都不保存完整 signed URL、path、query 或签名。
+
+Vue、Fetch、XHR 与 `/x/player/wbi/playurl` response 复用同一 CDN adapter；WBI 只
+处理响应，禁止 proxy、重发或重新签署 `w_rid` / `wts`。只有 `'manual'` 允许显式
+legacy UPOS host rewrite。
+
+主动测试当前视频 CDN：
+
+```javascript
+await bangumi_area_limit_hack.testCurrentVideoCdn({ force: true })
+```
+
+清除 CDN 健康缓存：
+
+```javascript
+bangumi_area_limit_hack.clearCdnHealthCache()
+```
+
+Stage 1（响应适配）、Stage 2（上述探测）和 Stage 3 均已完成并合并。Stage 3
+遵循以下边界：
+只有页面可见、播放器未暂停/未 seeking 且 low-buffer grace 再确认后才判定 stall；
+候选组只在内存保存，只重路由未来 Fetch/XHR 媒体请求，不 abort/reload 当前请求，
+并使用 cooldown/backoff 避免 ping-pong。MCDN/PCDN 保持最后兜底；静态 candidate
+pool 只允许作为非默认实验性排序提示，并且只能引用当前 exact signed candidate
+group 中已经存在的 URL。
+
+Joey 完成 UK-local 人工播放验收并明确授权发布前，稳定 tag/release 与 `main` 刷新
+均被阻塞。仓库 live E2E gate 只能提供自动辅助证据，不能替代人工验收；精确命令由
+根 README 维护。
+
 ### 登录/登出
 
 在控制台执行:

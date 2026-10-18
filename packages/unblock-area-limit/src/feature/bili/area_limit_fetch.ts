@@ -1,13 +1,15 @@
 import { access_key_param_if_exist } from "../../api/bilibili-utils"
 import { BiliPlusApi, fixMobiPlayUrlJson, fixThailandPlayUrlJson, generateMobiPlayUrlParams, getMobiPlayUrl } from "../../api/biliplus"
 import { Async, Promise as NativePromise } from "../../util/async"
-import { Converters, uposMap } from "../../util/converters"
 import { log, util_debug, util_warn } from "../../util/log"
 import { Objects } from "../../util/objects"
 import { RegExps } from "../../util/regexps"
 import { Strings } from "../../util/strings"
 import { balh_config } from "../config"
-import { FALSE, r } from "../r"
+import { r } from "../r"
+import { prepareCdnRecoveryRequestUrl } from "./cdn_recovery_browser"
+import { applyCdnPolicyToPlayUrlResponse } from "./cdn_playurl"
+import { isSupportedCdnPlayUrlEndpoint } from "./cdn_playurl_endpoint"
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from "./subtitle_web_view"
 import space_account_info_map from "./space_account_info_map"
 
@@ -17,15 +19,35 @@ const proxyPlayUrlRequestTimeout = 8000
 const transientProxyRetryDelays = [500, 1200]
 const entitlementProxyRetryDelays = [700, 1600]
 
-export function injectFetch() {
+export function injectFetch({ cdnOnly = false }: { cdnOnly?: boolean } = {}) {
     const originFetch = window.fetch;
-    window.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const request = rewriteSubtitleMetadataFetchInput(input, init)
-        const originResponse = await originFetch(request.input, request.init)
+    window.fetch = async function (this: any, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = cdnOnly
+            ? { input, init, url: getFetchUrl(input) }
+            : rewriteSubtitleMetadataFetchInput(input, init)
+        const routed = prepareCdnRecoveryFetchInput(request.input, request.init)
+        let originResult: Promise<Response>
+        try {
+            originResult = originFetch.call(this, routed.input, request.init)
+        } catch (error) {
+            routed.discard()
+            throw error
+        }
+        routed.commit()
+        const originResponse = await originResult
         const url = request.url
         if (url) {
+            if (cdnOnly) {
+                if (isPgcPlayUrlUrl(url) || isOtherPlayUrlUrl(url)) {
+                    return handlePlayUrlCdnFetch(originResponse)
+                }
+                return originResponse
+            }
             if (isPgcPlayUrlUrl(url)) {
                 return handlePgcPlayUrlFetch(url, originResponse)
+            }
+            if (isOtherPlayUrlUrl(url)) {
+                return handlePlayUrlCdnFetch(originResponse)
             }
             if (url.match(RegExps.url('api.bilibili.com/x/space/wbi/acc/info?'))) {
                 const json = await originResponse.json()
@@ -44,7 +66,7 @@ export function injectFetch() {
                     const response = rewriteSubtitleWebViewResponse(buffer, { generateSub: true })
                     if (response) {
                         log('/x/v2/subtitle/web/view', 'generated subtitle by fetch')
-                        return new Response(response, responseInit(originResponse))
+                        return rebuiltResponse(response, originResponse)
                     }
                 } catch (error) {
                     log('/x/v2/subtitle/web/view fetch rewrite failed', error)
@@ -68,6 +90,57 @@ export function injectFetch() {
         }
         return originResponse
     }
+}
+
+function prepareCdnRecoveryFetchInput(input: RequestInfo | URL, init?: RequestInit) {
+    const unchanged = {
+        input,
+        commit() { },
+        discard() { },
+    }
+    let prepared: ReturnType<typeof prepareCdnRecoveryRequestUrl> | undefined
+    try {
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+        if (!isGetMethod(method)) return unchanged
+
+        const url = getFetchUrl(input)
+        if (!url) return unchanged
+
+        prepared = prepareCdnRecoveryRequestUrl(url, method)
+        const decision = prepared.decision
+        let routedInput: RequestInfo | URL = input
+        if (decision.routed && typeof decision.url === 'string' && decision.url !== url) {
+            if (typeof input === 'string') routedInput = decision.url
+            else if (input instanceof URL) routedInput = new URL(decision.url, document.location.href)
+            else if (input instanceof Request) routedInput = new Request(decision.url, input)
+            else {
+                prepared.discard()
+                return unchanged
+            }
+        }
+
+        return {
+            input: routedInput,
+            commit: () => prepared!.commit(),
+            discard: () => prepared!.discard(),
+        }
+    } catch (_) {
+        try {
+            prepared?.discard()
+        } catch {
+            // The original predecessor call remains authoritative.
+        }
+        // Recovery routing is best-effort; the predecessor retains native Fetch behavior.
+    }
+    return unchanged
+}
+
+function isGetMethod(method: unknown): method is string {
+    return typeof method === 'string'
+        && method.length === 3
+        && (method[0] === 'G' || method[0] === 'g')
+        && (method[1] === 'E' || method[1] === 'e')
+        && (method[2] === 'T' || method[2] === 't')
 }
 
 function rewriteSubtitleMetadataFetchInput(input: RequestInfo | URL, init?: RequestInit) {
@@ -144,9 +217,46 @@ function redactSubtitleMetadataUrl(url: string) {
 }
 
 function isPgcPlayUrlUrl(url: string) {
-    return (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
-        || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl')))
-        && !new URL(url, document.location.href).searchParams.get('balh_ajax')
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return parsed?.hostname === 'api.bilibili.com'
+        && (parsed.pathname === '/pgc/player/web/playurl'
+            || parsed.pathname === '/pgc/player/web/v2/playurl')
+        && !parsed.searchParams.get('balh_ajax')
+}
+
+function isOtherPlayUrlUrl(url: string) {
+    const parsed = parseSupportedCdnPlayUrlUrl(url)
+    return !!parsed && (
+        (parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/x/player/playurl'
+                || parsed.pathname === '/x/player/wbi/playurl'))
+        || (parsed.hostname === 'interface.bilibili.com'
+            && parsed.pathname === '/v2/playurl')
+    )
+}
+
+function parseSupportedCdnPlayUrlUrl(url: string) {
+    // Preserve the adapters' existing absolute/protocol-relative HTTP(S)
+    // boundary; endpoint membership itself is shared with the final observer.
+    if (!/^(?:https?:)?\/\//.test(url)) return null
+    try {
+        const parsed = new URL(url, document.location.href)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null
+    } catch {
+        return null
+    }
+}
+
+async function handlePlayUrlCdnFetch(originResponse: Response): Promise<Response> {
+    try {
+        const json = await originResponse.clone().json()
+        applyCdnPolicyToPlayUrlResponse(json)
+        return jsonResponse(json, originResponse)
+    } catch (error) {
+        util_warn('fetch playurl CDN selection failed', error)
+        return originResponse
+    }
 }
 
 async function handlePgcPlayUrlFetch(url: string, originResponse: Response): Promise<Response> {
@@ -161,7 +271,8 @@ async function handlePgcPlayUrlFetch(url: string, originResponse: Response): Pro
     const isV1 = reqUrl.pathname === '/pgc/player/web/playurl'
     const originPlayUrl = getPlayUrlPayload(originJson, isV1)
     if (!balh_config.blocked_vip && !originJson?.code && !isAreaLimitForPlayUrl(originPlayUrl)) {
-        return originResponse
+        applyCdnPolicyToPlayUrlResponse(originJson)
+        return jsonResponse(originJson, originResponse)
     }
     try {
         const proxiedPlayUrl = await fetchPgcPlayUrlByProxy(reqUrl)
@@ -179,6 +290,7 @@ async function handlePgcPlayUrlFetch(url: string, originResponse: Response): Pro
         if (isEntitlementProxyError(error)) {
             return jsonResponse(proxyErrorResponse(error), originResponse)
         }
+        applyCdnPolicyToPlayUrlResponse(originJson)
         return jsonResponse(originJson, originResponse)
     }
 }
@@ -420,58 +532,8 @@ function normalizeProxyPlayUrl(playUrl: any) {
     if (playUrl.dash) {
         Objects.convertKeyToSnakeCase(playUrl.dash)
     }
-    let normalized = playUrl
-    if (!window.__balh_app_only__ && balh_config.upos_server) {
-        normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
-    }
-    preferNonAkamaiDashUrls(normalized?.dash)
-    return normalized
-}
-
-function preferNonAkamaiDashUrls(dash: any) {
-    if (!dash) return
-    const streams = [
-        ...(Array.isArray(dash.video) ? dash.video : []),
-        ...(Array.isArray(dash.audio) ? dash.audio : []),
-        ...(Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []),
-    ]
-    if (dash.flac?.audio) streams.push(dash.flac.audio)
-    for (const stream of streams) {
-        preferNonAkamaiStreamUrls(stream)
-    }
-}
-
-function preferNonAkamaiStreamUrls(stream: any) {
-    if (!stream || typeof stream !== 'object') return
-    const baseUrl = stream.base_url ?? stream.baseUrl
-    const backupUrls = [
-        ...(Array.isArray(stream.backup_url) ? stream.backup_url : []),
-        ...(Array.isArray(stream.backupUrl) ? stream.backupUrl : []),
-    ]
-    const urls = uniqueStrings([baseUrl, ...backupUrls])
-    if (urls.length < 2) return
-    const nonAkamaiUrls = urls.filter(url => !isAkamaiUrl(url))
-    if (!nonAkamaiUrls.length) return
-    const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)]
-    const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls
-    stream.base_url = nextBaseUrl
-    stream.baseUrl = nextBaseUrl
-    stream.backup_url = nextBackupUrls
-    stream.backupUrl = nextBackupUrls
-}
-
-function uniqueStrings(items: any[]) {
-    const seen = new Set<string>()
-    return items.filter((item): item is string => {
-        if (typeof item !== 'string' || !item) return false
-        if (seen.has(item)) return false
-        seen.add(item)
-        return true
-    })
-}
-
-function isAkamaiUrl(url: string) {
-    return /(^|\/\/)[^/]*akamaized\.net\//.test(url)
+    applyCdnPolicyToPlayUrlResponse(playUrl)
+    return playUrl
 }
 
 function isBangumiPage() {
@@ -566,21 +628,78 @@ function getFetchUrl(input: RequestInfo | URL): string | undefined {
     return undefined
 }
 
-function responseInit(response: Response): ResponseInit {
-    return {
-        headers: response.headers,
-        status: response.status,
-        statusText: response.statusText,
+type ResponseMetadata = Pick<Response, 'url' | 'redirected' | 'type'>
+
+const staleRebuiltBodyHeaders = [
+    'accept-ranges',
+    'content-digest',
+    'content-encoding',
+    'content-length',
+    'content-md5',
+    'content-range',
+    'digest',
+    'etag',
+    'last-modified',
+    'repr-digest',
+    'transfer-encoding',
+]
+const rebuiltResponseMetadata = new WeakMap<Response, ResponseMetadata>()
+
+function responseMetadata(response: Response): ResponseMetadata {
+    return rebuiltResponseMetadata.get(response) || {
+        url: response.url,
+        redirected: response.redirected,
+        type: response.type,
     }
 }
 
-function jsonResponse(json: unknown, response: Response): Response {
+function rebuiltResponseHeaders(response: Response): Headers {
     const headers = new Headers(response.headers)
-    headers.set('content-type', 'application/json; charset=utf-8')
-    return new Response(JSON.stringify(json), {
-        ...responseInit(response),
+    for (const header of staleRebuiltBodyHeaders) {
+        headers.delete(header)
+    }
+    return headers
+}
+
+function rebuiltResponse(body: BodyInit | null, response: Response, headers = rebuiltResponseHeaders(response)): Response {
+    const rewritten = new Response(body, {
         headers,
+        status: response.status,
+        statusText: response.statusText,
     })
+    return preserveResponseMetadata(rewritten, responseMetadata(response))
+}
+
+function preserveResponseMetadata(response: Response, metadata: ResponseMetadata): Response {
+    const nativeClone = response.clone
+    rebuiltResponseMetadata.set(response, metadata)
+    for (const key of ['url', 'redirected', 'type'] as const) {
+        try {
+            Object.defineProperty(response, key, { configurable: true, value: metadata[key] })
+        } catch (_) {
+            // The rewritten body remains usable when a browser rejects metadata shadowing.
+        }
+    }
+    try {
+        Object.defineProperty(response, 'clone', {
+            configurable: true,
+            writable: true,
+            value: function (this: Response) {
+                const cloned = nativeClone.call(this)
+                const receiverMetadata = rebuiltResponseMetadata.get(this)
+                return receiverMetadata ? preserveResponseMetadata(cloned, receiverMetadata) : cloned
+            },
+        })
+    } catch (_) {
+        // The original rewritten response remains usable when clone shadowing is rejected.
+    }
+    return response
+}
+
+export function jsonResponse(json: unknown, response: Response): Response {
+    const headers = rebuiltResponseHeaders(response)
+    headers.set('content-type', 'application/json; charset=utf-8')
+    return rebuiltResponse(JSON.stringify(json), response, headers)
 }
 
 export function injectFetch4Mobile() {

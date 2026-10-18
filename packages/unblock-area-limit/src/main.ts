@@ -37,6 +37,10 @@ function scriptContent() {
     bili.hide_adblock_tips()
 
     bili.area_limit_xhr()
+    if (!balh_config.is_closed) {
+        bili.installCdnRecoveryMonitor()
+        bili.installCdnFinalDeliveryObservers()
+    }
 
     bili.remove_pre_ad()
 
@@ -56,6 +60,7 @@ function scriptContent() {
             'mode:', balh_config.mode,
             'blocked_vip:', balh_config.blocked_vip,
             'server:', balh_config.server,
+            'cdn_mode:', balh_config.cdn_mode,
             'upos_server:', balh_config.upos_server,
             'flv_prefer_ws:', balh_config.flv_prefer_ws,
             'remove_pre_ad:', balh_config.remove_pre_ad,
@@ -85,6 +90,10 @@ function scriptContent() {
             },
             showSettings: settings.show,
             _setupSettings: settings.setup,
+            testCurrentVideoCdn: bili.probeCurrentPlayUrlCdn,
+            clearCdnHealthCache: bili.clearCdnHealthCache,
+            getCdnProbeStatus: bili.getCdnProbeStatus,
+            getCdnRecoveryStatus: bili.getCdnRecoveryStatus,
             set1080P: function () {
                 const settings = JSON.parse(localStorage.bilibili_player_settings)
                 const oldQuality = settings.setting_config.defquality

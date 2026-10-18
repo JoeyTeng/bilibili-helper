@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { Objects } from '../../util/objects'
-import { Converters, uposMap } from '../../util/converters';
+import { Converters } from '../../util/converters';
 import { _ } from '../../util/react'
 import { Async, Promise } from '../../util/async';
 import { r, _t } from '../../feature/r'
@@ -21,13 +21,143 @@ import space_account_info_map from '../../feature/bili/space_account_info_map'
 import { removeEpAreaLimit } from '../../feature/bili/area_limit_for_vue'
 import { isSubtitleBodyUrl, rewriteSubtitleBodyJson, rewriteSubtitleMetadataUrl, rewriteSubtitleWebViewResponse } from './subtitle_web_view'
 import { injectXhr as injectXhrImpl } from '../../util/inject-xhr';
+import {
+    applyCdnPolicyToPlayUrlResponse,
+    beginFinalCdnPlayUrlDelivery,
+    deliverFinalCdnPlayUrlResponse,
+    findPlayUrlPayload,
+} from './cdn_playurl';
+import { isSupportedCdnPlayUrlEndpoint } from './cdn_playurl_endpoint';
+import { prepareCdnRecoveryRequestUrl } from './cdn_recovery_browser';
+import { deferFinalCdnPlayUrlXhrDelivery } from './cdn_final_delivery_observer';
 
 export const area_limit_xhr = (() => {
+    const deferredJqueryXhrFactoryPredecessors = new WeakMap<Function, Function>()
+
+    function bindFinalCdnDeliveryToJqueryXhrFactory(jquery, param, deliveryOrder) {
+        let xhrFactory = typeof param.xhr === 'function'
+            ? param.xhr
+            : jquery.ajaxSettings && typeof jquery.ajaxSettings.xhr === 'function'
+                ? jquery.ajaxSettings.xhr
+                : undefined
+        if (!xhrFactory) return false
+        while (deferredJqueryXhrFactoryPredecessors.has(xhrFactory)) {
+            xhrFactory = deferredJqueryXhrFactoryPredecessors.get(xhrFactory)
+        }
+        const wrappedFactory = function (...args) {
+            const xhr = xhrFactory.apply(this, args)
+            try {
+                return deferFinalCdnPlayUrlXhrDelivery(xhr, deliveryOrder)
+            } catch {
+                return xhr
+            }
+        }
+        deferredJqueryXhrFactoryPredecessors.set(wrappedFactory, xhrFactory)
+        param.xhr = wrappedFactory
+        return true
+    }
+
+    function transformCdnRecoveryOpenUrl(url) {
+        try {
+            const prepared = prepareCdnRecoveryRequestUrl(url, 'GET')
+            return {
+                url: prepared.decision.url,
+                commit: () => prepared.commit(),
+                rollback: () => prepared.discard(),
+            }
+        } catch {
+            return url
+        }
+    }
+
+    function injectCdnOnlyXhr() {
+        injectXhrImpl({
+            transformOpenUrl: transformCdnRecoveryOpenUrl,
+            transformRequest: () => null,
+            transformResponse: ({ url, response, xhr }) => {
+                if (!isCdnPlayUrlUrl(url)) return null
+                try {
+                    const json = response !== null && typeof response === 'object'
+                        ? JSON.parse(JSON.stringify(response))
+                        : JSON.parse(xhr.responseText)
+                    if (!findPlayUrlPayload(json)) return null
+                    return applyCdnPolicyToPlayUrlResponse(json)
+                } catch (error) {
+                    util_warn('XHR playurl CDN-only selection failed', error)
+                    return null
+                }
+            },
+        })
+    }
+
+    function isCdnPlayUrlUrl(url) {
+        if (typeof url !== 'string') return false
+        return isWebPlayUrlUrl(url)
+            || isInterfacePlayUrlUrl(url)
+            || isPgcPlayUrlUrl(url)
+    }
+
+    function isWebPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/x/player/playurl'
+                || parsed.pathname === '/x/player/wbi/playurl')
+    }
+
+    function isWebV1PlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && parsed.pathname === '/x/player/playurl'
+    }
+
+    function isPgcPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && (parsed.pathname === '/pgc/player/web/playurl'
+                || parsed.pathname === '/pgc/player/web/v2/playurl')
+    }
+
+    function isPgcV1PlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'api.bilibili.com'
+            && parsed.pathname === '/pgc/player/web/playurl'
+    }
+
+    function isInterfacePlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && parsed.hostname === 'interface.bilibili.com'
+            && parsed.pathname === '/v2/playurl'
+    }
+
+    function isLegacyPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url)
+        return !!parsed && (parsed.pathname === '/player/web_api/playurl'
+            || parsed.pathname === '/player/web_api/v2/playurl')
+    }
+
+    function parseSupportedCdnPlayUrlUrl(url) {
+        if (typeof url !== 'string' || !/^(?:https?:)?\/\//.test(url)) return null
+        try {
+            const parsed = new URL(url, document.location.href)
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+            return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null
+        } catch {
+            return null
+        }
+    }
+
     return function () {
-        if (isClosed()) return
+        if (isClosed()) {
+            if (!balh_config.is_closed && !balh_config.server_custom) {
+                injectFetch({ cdnOnly: true })
+                injectCdnOnlyXhr()
+            }
+            return
+        }
         injectFetch()
         function injectXhr() {
             injectXhrImpl({
+                transformOpenUrl: transformCdnRecoveryOpenUrl,
                 /// {@template xhr_transform_response}
                 /// 转换响应数据, 处理简单的情况
                 /// - url: 响应的url
@@ -196,15 +326,30 @@ export const area_limit_xhr = (() => {
                         log('/subtitle', url);
                         const json = JSON.parse(xhr.responseText);
                         return rewriteSubtitleBodyJson(json, url);
-                    } else if (url.match(RegExps.url('api.bilibili.com/x/player/playurl'))) {
-                        log('/x/player/playurl', 'origin', `block: ${container.__block_response}`, xhr.response)
+                    } else if (isWebPlayUrlUrl(url)) {
+                        log(new URL(url, document.location.href).pathname, 'origin', `block: ${container.__block_response}`)
+                        try {
+                            const json = xhr.response !== null && typeof xhr.response === 'object'
+                                ? JSON.parse(JSON.stringify(xhr.response))
+                                : JSON.parse(xhr.responseText)
+                            return applyCdnPolicyToPlayUrlResponse(json)
+                        } catch (error) {
+                            util_warn('XHR playurl CDN selection failed', error)
+                            return null
+                        }
                         // todo      : 当前只实现了r.const.mode.REPLACE, 需要支持其他模式
                         // 2018-10-14: 等B站全面启用新版再说(;¬_¬)
-                    } else if (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) || url.match(RegExps.url('api.bilibili.com/pgc/player/web/v2/playurl'))
+                    } else if (isPgcPlayUrlUrl(url)
                         && !Strings.getSearchParam(url, 'balh_ajax')) {
                         const reqUrl = new URL(url, document.location.href)
                         const isV1 = reqUrl.pathname === '/pgc/player/web/playurl'
-                        let json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                        let json
+                        try {
+                            json = typeof xhr.response === 'object' ? xhr.response : JSON.parse(xhr.responseText)
+                        } catch (error) {
+                            util_warn('XHR PGC playurl CDN selection failed', error)
+                            return null
+                        }
                         if (!container.__redirect || (!isV1 && isAreaLimitForPlayUrl(json.result))) { // 请求没有被重定向, 则需要检测结果是否有区域限制
                             if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json.result)) {
                                 areaLimit(true)
@@ -226,6 +371,7 @@ export const area_limit_xhr = (() => {
                                 areaLimit(false)
                             }
                         }
+                        return applyCdnPolicyToPlayUrlResponse(json)
                         // 同上
                     } else if (url.match(RegExps.url('api.bilibili.com/pgc/view/web/freya/season'))) {
                         /* 一起看放映室用这个api来识别区域限制 */
@@ -273,7 +419,7 @@ export const area_limit_xhr = (() => {
                             })
                     }
 
-                    if (url.match(RegExps.url('api.bilibili.com/x/player/playurl')) && balh_config.enable_in_av) {
+                    if (isWebV1PlayUrlUrl(url) && balh_config.enable_in_av) {
                         log('/x/player/playurl')
                         // debugger
                         return bilibiliApis._playurl.asyncAjax(url)
@@ -290,7 +436,7 @@ export const area_limit_xhr = (() => {
                                 return data
                             })
 
-                    } else if (url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))
+                    } else if (isPgcV1PlayUrlUrl(url)
                         && !Strings.getSearchParam(url, 'balh_ajax')
                         && needRedirect()) {
                         // debugger
@@ -375,8 +521,9 @@ export const area_limit_xhr = (() => {
 
         function injectAjax() {
             log('injectAjax at:', window.jQuery)
-            let originalAjax = $.ajax;
-            $.ajax = function (arg0, arg1) {
+            const jquery = $;
+            let originalAjax = jquery.ajax;
+            jquery.ajax = function (arg0, arg1) {
                 let param;
                 if (arg1 === undefined) {
                     param = arg0;
@@ -387,13 +534,133 @@ export const area_limit_xhr = (() => {
                 let oriSuccess = param.success;
                 let oriError = param.error;
                 let mySuccess, myError;
+                let finalCdnDeliveryOrder;
+                let observeFinalCdnPlayUrlDelivery = false;
+                const finalDoneCallbacks = [];
+                const finalDoneGateByXhr = new WeakMap();
+                let finalSuccessDeliveryState = 'pending';
+                let finalSuccessValue;
+                let finalSuccessCallbackArgs;
+                let finalSuccessCallbackContext;
+                let finalSuccessFallbackContext;
+                let finalSuccessFallbackXhr;
+                let optionSuccessCallbacksQueued = false;
+                let rawSuccessResolverBound = false;
+                let rawSuccessResolved = false;
+                const finalSuccessInvocationArgs = () => {
+                    const args = finalSuccessCallbackArgs
+                        ? finalSuccessCallbackArgs.slice()
+                        : [undefined, 'success', finalSuccessFallbackXhr];
+                    args[0] = finalSuccessValue;
+                    return args;
+                };
+                const invokeFinalSuccessCallback = success => success.apply(
+                    rawSuccessResolved ? finalSuccessCallbackContext : finalSuccessFallbackContext,
+                    finalSuccessInvocationArgs(),
+                );
+                const deliverFinalSuccess = value => {
+                    finalSuccessDeliveryState = 'delivering';
+                    finalSuccessValue = value;
+                    try {
+                        for (let index = 0; index < finalDoneCallbacks.length; index += 1) {
+                            invokeFinalSuccessCallback(finalDoneCallbacks[index]);
+                        }
+                    } catch (error) {
+                        finalSuccessDeliveryState = 'failed';
+                        throw error;
+                    }
+                    finalSuccessDeliveryState = 'delivered';
+                };
+                const rethrowFinalSuccessCallbackError = error => {
+                    try {
+                        window.setTimeout(() => { throw error }, 0);
+                    } catch {
+                        // Callback errors must never become AJAX transport errors.
+                    }
+                };
+                const enqueueFinalDoneCallback = success => {
+                    if (typeof success !== 'function') return;
+                    if (finalSuccessDeliveryState === 'delivered') {
+                        invokeFinalSuccessCallback(success);
+                    } else {
+                        finalDoneCallbacks.push(success);
+                    }
+                };
+                const enqueueOptionSuccessCallbacks = () => {
+                    if (optionSuccessCallbacksQueued) return;
+                    optionSuccessCallbacksQueued = true;
+                    const register = success => {
+                        if (Array.isArray(success)) {
+                            success.forEach(register);
+                        } else {
+                            enqueueFinalDoneCallback(success);
+                        }
+                    };
+                    register(oriSuccess);
+                };
+                const bindRawSuccessResolver = (xhr, predecessorDone) => {
+                    if (rawSuccessResolverBound) return true;
+                    try {
+                        predecessorDone.call(xhr, mySuccess);
+                        rawSuccessResolverBound = true;
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+                const installFinalDoneGate = xhr => {
+                    try {
+                        if (!xhr || !['object', 'function'].includes(typeof xhr)) return false;
+                        const installedGate = finalDoneGateByXhr.get(xhr);
+                        if (installedGate && xhr.done === installedGate) return true;
+                        const predecessorDone = xhr.done;
+                        if (typeof predecessorDone !== 'function') return false;
+                        if (!oriSuccess && !bindRawSuccessResolver(xhr, predecessorDone)) return false;
+                        const gatedDone = function (...successCallbacks) {
+                            const register = success => {
+                                if (Array.isArray(success)) {
+                                    success.forEach(register);
+                                } else if (success === mySuccess) {
+                                    if (bindRawSuccessResolver(xhr, predecessorDone)) {
+                                        enqueueOptionSuccessCallbacks();
+                                    }
+                                } else {
+                                    enqueueFinalDoneCallback(success);
+                                }
+                            };
+                            successCallbacks.forEach(register);
+                            return xhr;
+                        };
+                        xhr.done = gatedDone;
+                        if (xhr.done !== gatedDone) return false;
+                        finalDoneGateByXhr.set(xhr, gatedDone);
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
                 // 投递结果的transformer, 结果通过oriSuccess/Error投递
-                let dispatchResultTransformer = p => p
-                    .then(r => {
-                        // debugger
-                        oriSuccess(r)
-                    })
-                    .catch(e => oriError(e))
+                let dispatchResultTransformer = p => {
+                    if (!observeFinalCdnPlayUrlDelivery) {
+                        return p
+                            .then(r => oriSuccess(r))
+                            .catch(e => oriError(e));
+                    }
+                    return p.then(
+                        r => {
+                            try {
+                                deliverFinalCdnPlayUrlResponse(
+                                    r,
+                                    finalCdnDeliveryOrder,
+                                    deliverFinalSuccess,
+                                );
+                            } catch (error) {
+                                rethrowFinalSuccessCallbackError(error);
+                            }
+                        },
+                        e => oriError(e),
+                    );
+                }
                 // 转换原始请求的结果的transformer
                 let oriResultTransformer
                 let oriResultTransformerWhenProxyError
@@ -416,17 +683,35 @@ export const area_limit_xhr = (() => {
                                 return json;
                             }
                         })
-                } else if (param.url.match(RegExps.urlPath('/player/web_api/playurl')) // 老的番剧页面playurl接口
-                    || param.url.match(RegExps.urlPath('/player/web_api/v2/playurl')) // 新的番剧页面playurl接口
-                    || param.url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl')) // 新的番剧页面playurl接口
-                    || (balh_config.enable_in_av && param.url.match(RegExps.url('interface.bilibili.com/v2/playurl'))) // 普通的av页面playurl接口
+                } else if (isLegacyPlayUrlUrl(param.url) // 老、新的番剧页面 playurl 接口
+                    || isPgcV1PlayUrlUrl(param.url) // 新的番剧页面playurl接口
+                    || (balh_config.enable_in_av && isInterfacePlayUrlUrl(param.url)) // 普通的av页面playurl接口
                 ) {
+                    observeFinalCdnPlayUrlDelivery = true
+                    try {
+                        finalCdnDeliveryOrder = beginFinalCdnPlayUrlDelivery()
+                    } catch {
+                        // Final observation is optional; preserve legacy delivery.
+                    }
+                    if (finalCdnDeliveryOrder !== undefined) {
+                        try {
+                            const bound = bindFinalCdnDeliveryToJqueryXhrFactory(
+                                jquery,
+                                param,
+                                finalCdnDeliveryOrder,
+                            )
+                            if (!bound) finalCdnDeliveryOrder = undefined
+                        } catch {
+                            // Custom jQuery settings remain authoritative.
+                            finalCdnDeliveryOrder = undefined
+                        }
+                    }
                     // 新playrul:
                     // 1. 部分页面参数放在param.data中
                     // 2. 成功时, 返回的结果放到了result中: {"code":0,"message":"success","result":{}}
                     // 3. 失败时, 返回的结果没变
                     let isNewPlayurl
-                    if (isNewPlayurl = param.url.match(RegExps.url('api.bilibili.com/pgc/player/web/playurl'))) {
+                    if (isNewPlayurl = isPgcV1PlayUrlUrl(param.url)) {
                         if (param.data) {
                             param.url += `?${Object.keys(param.data).map(key => `${key}=${param.data[key]}`).join('&')}`
                             param.data = undefined
@@ -450,10 +735,10 @@ export const area_limit_xhr = (() => {
                             if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl(json)) {
                                 areaLimit(true)
                                 return one_api.asyncAjax(param.url)
-                                    .catch(e => json)
+                                    .catch(e => applyCdnPolicyToPlayUrlResponse(json))
                             } else {
                                 areaLimit(false)
-                                return json
+                                return applyCdnPolicyToPlayUrlResponse(json)
                             }
                         })
                     const oriDispatchResultTransformer = dispatchResultTransformer
@@ -479,7 +764,7 @@ export const area_limit_xhr = (() => {
                                     result: r
                                 }
                             }
-                            return r
+                            return applyCdnPolicyToPlayUrlResponse(r)
                         })
                         .compose(oriDispatchResultTransformer)
                 } else if (param.url.match(RegExps.url('interface.bilibili.com/player?'))) {
@@ -516,7 +801,13 @@ export const area_limit_xhr = (() => {
                 if (one_api && oriResultTransformer) {
                     // 请求结果通过mySuccess/Error获取, 将其包装成Promise, 方便处理
                     let oriResultPromise = new Promise((resolve, reject) => {
-                        mySuccess = resolve
+                        mySuccess = function (...args) {
+                            if (rawSuccessResolved) return;
+                            rawSuccessResolved = true;
+                            finalSuccessCallbackContext = this;
+                            finalSuccessCallbackArgs = args;
+                            resolve(args[0]);
+                        }
                         myError = reject
                     })
                     if (needRedirect()) {
@@ -532,6 +823,21 @@ export const area_limit_xhr = (() => {
                     }
                 }
 
+                if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                    const oriBeforeSend = param.beforeSend === undefined
+                        ? jquery.ajaxSettings && jquery.ajaxSettings.beforeSend
+                        : param.beforeSend;
+                    param.beforeSend = function (...args) {
+                        finalSuccessFallbackContext = this;
+                        finalSuccessFallbackXhr = args[0];
+                        installFinalDoneGate(args[0]);
+                        if (!oriBeforeSend) return;
+                        const result = oriBeforeSend.apply(this, args);
+                        installFinalDoneGate(args[0]);
+                        return result;
+                    };
+                }
+
                 // 若外部使用param.success处理结果, 则替换param.success
                 if (oriSuccess && mySuccess) {
                     param.success = mySuccess;
@@ -544,7 +850,14 @@ export const area_limit_xhr = (() => {
                 let xhr = originalAjax.apply(this, [param]);
 
                 // 若外部使用xhr.done()处理结果, 则替换xhr.done()
-                if (!oriSuccess && mySuccess) {
+                if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                    if (!finalSuccessFallbackXhr) finalSuccessFallbackXhr = xhr;
+                    if (finalSuccessFallbackContext === undefined) {
+                        finalSuccessFallbackContext = param.context || param;
+                    }
+                    installFinalDoneGate(xhr);
+                    enqueueOptionSuccessCallbacks();
+                } else if (!oriSuccess && mySuccess) {
                     xhr.done(mySuccess);
                     xhr.done = function (success) {
                         oriSuccess = success; // 保存外部设置的success函数
@@ -1141,11 +1454,7 @@ export const area_limit_xhr = (() => {
                                 // dash中的字段全部变成了类似C语言的下划线风格...
                                 Objects.convertKeyToSnakeCase(data.dash)
                             }
-                            // 替换后大多数bangumi下的视频都会报CROS错误
-                            if (!window.__balh_app_only__ && balh_config.upos_server) {
-                                return Converters.replaceUpos(data, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai)
-                            }
-                            return data
+                            return applyCdnPolicyToPlayUrlResponse(data)
                         })
                 }
             })

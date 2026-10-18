@@ -91,11 +91,67 @@ Chrome 80+上有可能出现的问题，详见：https://github.com/ipcjs/bilibi
 
 ### 播放卡顿？
 
-#### “替换upos视频服务器”选项
+#### 视频 CDN 选择
+
+设置页的“视频 CDN”有四种模式：
+
+1. `safe`（默认）：保留 B 站返回的完整签名 URL，只稳定后移被识别为 MCDN/PCDN 风险层的候选；如果全部候选都有风险，则保留原始顺序。
+2. `auto`：在 `safe` 基础上，以当前浏览器和当地网络为准做有预算的两阶段后台测速，结果仅用于之后取得的播放地址。这也是英国等海外地区推荐试用的模式。
+3. `original`：完全保留 B 站原始候选顺序。
+4. `manual`：保留旧的“替换 UPOS 视频服务器”功能，仅供显式手动选择。
+
+自动选择不会猜测或拼接 CDN 域名，不会修改 URL 的路径、查询参数或签名，也不会把不同清晰度、音轨或分段的候选混在一起。Vue、Fetch、XHR 和 WBI playurl response 共用这条规则；`/x/player/wbi/playurl` 只处理返回的响应，BALH 不代理该请求，也不会重新计算或签署 `w_rid` / `wts`。只有显式选择 `manual` 才会运行旧版 UPOS host rewrite。
+
+后台测速只会请求实际 URL 命中的受信任 Bilibili 媒体域名，不跟随重定向；IP、localhost、私网风格、未知域名、已知外部 PCDN 域和带 userinfo 的候选仍保留给播放器回退，但不会由 BALH 主动请求。选择器的软风险分类与网络准入是两条独立边界：命中受信任 `bilivideo.*` namespace 的 MCDN/`mirror14b`/`302` 风格 host 仍可参与本机测量，其风险标签只限制排序层级。请求固定使用 `credentials: "omit"`，默认不发送 `Range`。CORS 或浏览器策略使响应正文不可读时，候选只会标记为 `unprobeable`（无法测量），不会被判定为失效。
+
+每轮 Stage 1 probe 会在动态 `2 MiB` 预算允许完整 `64 KiB` 样本时覆盖每个可准入的不同 host；成功结果中稳定排名前两名共享剩余 follow-up 预算，每个最多 `512 KiB`，并发最多 `2`。吞吐量与可靠 DASH bitrate margin 是主要证据，TTFB 是次要证据。请求和阶段通常限制在约 `2–4 s`，取消后的清理最多另给 `250 ms`。浏览器可能一次交付超过当前剩余量的完整 chunk，所以当前 batch 的 raw JavaScript/transport 实收量可以超出动态预算；只有 clip 到剩余预算的前缀进入计分，raw observed bytes 会阻止后续请求，整轮 accounted prefix 始终严格不超过 `2 MiB`。
+
+host-only 持久化 cache 使用 `v2` schema 和 `20 min` TTL，并在候选 host 集合或粗粒度网络提示变化时失效。它只保存已准入 host（hostname 加显式非默认 port）级别的聚合测量，不保存完整 URL、path、query 或签名；日志和诊断也不记录 signed URL。不完整、预算受限、不可测或无法证明清理安全的轮次不会持久化。
+
+即使没有配置自定义区域代理，只要没有显式选择“关闭脚本”，CDN 模式仍会处理平台已经返回的可播放地址；显式关闭脚本会同时禁用区域解锁与 CDN 选择。
+
+可以在设置页点击“测试当前视频 CDN”运行上述有界两阶段 probe。在 `auto` 模式下，
+Stage 3 为页面 Fetch/XHR 能看到的 exact media `GET` 监测播放停顿：只有页面可见、
+未暂停或 seek、buffer 不超过 `0.5 s`，并连续 `3 s` 缺少有效播放推进时，才为之后的
+请求切到同一候选组的下一个完整签名 URL。它绝不 abort、reload、reopen 或重放当前
+请求；最小 `15 s` cooldown 和有上限的指数 backoff 防止来回切换。浏览器原生 media
+loader 绕过 Fetch/XHR 时不在自动恢复范围内。MCDN/PCDN 始终是最后兜底；静态
+candidate pool 不属于当前交付。
+
+当兼容的第三方脚本在 BALH 之后继续变换 playurl response 时，BALH 会在页面收到响应
+前透明观察最终 payload，并仅用其中的完整 exact candidates 刷新恢复 registry；不会
+再次排序、替换 `Response` / XHR 对象或拼接 URL。最新版 CDN Switcher 的两种加载顺序
+均由下列固定 snapshot gate 覆盖。
+
+仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。三个阶段已经全部合并；Joey 完成人工验收并明确授权发布前，不得创建稳定版 tag、发布稳定版或刷新 `main`。精确 live E2E 命令由仓库根 README 维护。
+
+#### CDN Switcher 兼容性
+
+| 项目 | 已验证版本 | 验证日期 | 范围 |
+| --- | --- | --- | --- |
+| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.4` | 2026-08-06 | 当前 latest；Fetch/XHR、两种脚本加载顺序与 future-route recovery |
+
+上游身份固定为 Greasy Fork script `500213`，latest 下载地址是
+`https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.user.js`。
+canonical latest metadata 地址是
+`https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.meta.js`；
+兼容测试要求 metadata 与源码中的身份和版本完全一致。
+userscript metadata 身份固定为 `@name Bilibili Video CDN Switcher` 与
+`@namespace mailto:1332019995@qq.com`。
+本次验证的 `0.1.4` 源文件 SHA-256 为
+`261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
+
+仓库只保证上表中“当前 latest”的单一固定 snapshot，不维护 CDN Switcher 旧版本兼容矩阵。打稳定版 tag 前应显式运行下列命令：它会从 Greasy Fork 临时下载上游 latest 脚本，不在本仓库复制其源码；若 latest 版本或原始源码 bytes/SHA-256 变更，测试会要求先重新验证并更新此表。tag 触发的 release workflow 不再读取这个可变上游，避免已经冻结的 tag 因第三方后续更新而无法重跑。
+
+```bash
+pnpm run test:cdn-switcher:latest
+```
+
+#### “替换 UPOS 视频服务器”选项（手动模式）
 
 **目前似乎存在替换upos后加载不出视频的问题！设为“不替换”可关闭该功能。**
 
-在设置中有个“替换upos视频服务器”选项，针对大陆的视频有效果，可以试下。
+在 CDN 模式中选择 `manual` 后，才会使用“替换 UPOS 视频服务器”选项。该功能会修改主机名，只作为旧功能兼容保留。
 
 #### 改hosts
 

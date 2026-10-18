@@ -3,7 +3,7 @@ import { access_key_param_if_exist } from "../../api/bilibili-utils"
 import { BiliPlusApi, fixMobiPlayUrlJson, fixThailandPlayUrlJson, generateMobiPlayUrlParams, getMobiPlayUrl } from "../../api/biliplus"
 import { Async, Promise as NativePromise } from "../../util/async"
 import { BalhDb } from "../../util/balh-db"
-import { Converters, uposMap } from "../../util/converters"
+import { Converters } from "../../util/converters"
 import { cookieStorage } from "../../util/cookie"
 import { util_init } from "../../util/initiator"
 import { log, util_warn } from "../../util/log"
@@ -15,9 +15,13 @@ import { ifNotNull } from "../../util/utils"
 import { Windows } from "../../util/windows"
 import { balh_config, isClosed } from "../config"
 import { util_page } from "../page"
-import { FALSE, r } from "../r"
+import { r } from "../r"
 import pageTemplate from './bangumi-play-page-template.html'
 import { bilibili_login } from "./bilibili_login"
+import {
+    applyCdnPolicyToPlayUrlResponse,
+    observeFinalCdnPlayUrlResponse,
+} from "./cdn_playurl"
 
 let callbackCount = 1000
 function appendScript(
@@ -444,8 +448,102 @@ function removeSeasonAreaLimit(season: StringAnyObject | undefined) {
     }
 }
 
+function clonePlayInfoJson<T>(value: T): T {
+    if (!value || typeof value !== 'object') return value
+    return JSON.parse(JSON.stringify(value))
+}
+
+function createPlayInfoDelivery<T>(rawValue: T): T {
+    const cloneWithPlayInfoAliases = () => {
+        const delivery = clonePlayInfoJson(rawValue)
+        const playInfo = delivery as any
+        if (playInfo?.result?.video_info && playInfo?.video_info) {
+            playInfo.video_info = playInfo.result.video_info
+        }
+        return delivery
+    }
+    let delivery: T
+    try {
+        delivery = cloneWithPlayInfoAliases()
+    } catch (error) {
+        util_warn('clone playinfo delivery failed', error)
+        return rawValue
+    }
+    try {
+        applyCdnPolicyToPlayUrlResponse(delivery)
+        observeFinalCdnPlayUrlResponse(delivery)
+        return delivery
+    } catch (error) {
+        util_warn('apply CDN policy to playinfo failed', error)
+        try {
+            return cloneWithPlayInfoAliases()
+        } catch (cloneError) {
+            util_warn('clone fail-open playinfo failed', cloneError)
+            return rawValue
+        }
+    }
+}
+
+const cdnOnlyDeliveryAccessors = new WeakSet<Function>()
+
+function installCdnOnlyPlayInfoDelivery(property: '__playinfo__' | '__PLAYURL_HYDRATE_DATA__') {
+    const target = window as any
+    const descriptor = Object.getOwnPropertyDescriptor(target, property)
+    if ((descriptor?.get && cdnOnlyDeliveryAccessors.has(descriptor.get))
+        || (descriptor?.set && cdnOnlyDeliveryAccessors.has(descriptor.set))) return
+
+    if (descriptor && !descriptor.configurable) {
+        if ('value' in descriptor && descriptor.writable) {
+            target[property] = createPlayInfoDelivery(descriptor.value)
+            util_warn('cannot watch non-configurable CDN-only playinfo; transformed current value only', property)
+        } else {
+            util_warn('cannot watch non-configurable CDN-only playinfo', property)
+        }
+        return
+    }
+
+    if (descriptor && !('value' in descriptor)) {
+        const getter = descriptor.get
+            ? function (this: any) { return createPlayInfoDelivery(descriptor.get!.call(this)) }
+            : undefined
+        const setter = descriptor.set
+            ? function (this: any, value: any) {
+                descriptor.set!.call(this, value)
+            }
+            : undefined
+        if (getter) cdnOnlyDeliveryAccessors.add(getter)
+        if (setter) cdnOnlyDeliveryAccessors.add(setter)
+        Object.defineProperty(target, property, {
+            configurable: true,
+            enumerable: descriptor.enumerable,
+            get: getter,
+            set: setter,
+        })
+        return
+    }
+
+    let delivery = createPlayInfoDelivery(descriptor?.value)
+    const getter = () => delivery
+    const setter = descriptor?.writable === false
+        ? undefined
+        : (value: any) => { delivery = createPlayInfoDelivery(value) }
+    cdnOnlyDeliveryAccessors.add(getter)
+    if (setter) cdnOnlyDeliveryAccessors.add(setter)
+    Object.defineProperty(target, property, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        get: getter,
+        set: setter,
+    })
+}
+
 export function area_limit_for_vue() {
-    if (isClosed()) return
+    if (balh_config.is_closed) return
+    if (isClosed()) {
+        installCdnOnlyPlayInfoDelivery('__playinfo__')
+        installCdnOnlyPlayInfoDelivery('__PLAYURL_HYDRATE_DATA__')
+        return
+    }
 
     if (!(
         (util_page.av() && balh_config.enable_in_av) || util_page.new_bangumi()
@@ -503,7 +601,8 @@ export function area_limit_for_vue() {
         history.replaceState = wrapHistory(history.replaceState as typeof history.pushState, true)
     }
     function replacePlayInfo() {
-        const initialPlayInfo = window.__playinfo__
+        const initialPlayInfo = createPlayInfoDelivery(window.__playinfo__)
+        ;(window as any).__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery((window as any).__PLAYURL_HYDRATE_DATA__)
         log("window.__playinfo__", initialPlayInfo)
         window.__playinfo__origin = initialPlayInfo
         let playinfo: any = undefined
@@ -511,7 +610,7 @@ export function area_limit_for_vue() {
         let currentPlayInfoEpId: string | undefined
         let currentPlayInfoRequestId = 0
         let playerStatusRequestId: number | undefined
-        const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v1:'
+        const proxyPlayInfoCachePrefix = 'balh_proxy_playinfo_v2:'
         const proxyPlayInfoReloadPrefix = 'balh_proxy_playinfo_reload_v1:'
         const proxyPlayInfoCacheTtl = 10 * 60 * 1000
         const proxyPlayUrlRequestTimeout = 8000
@@ -803,7 +902,10 @@ export function area_limit_for_vue() {
                 })
                 try {
                     player.updateRequestConfig({
-                        reqHttpPlayUrlInfo: () => NativePromise.resolve({ status: 200, data: value }),
+                        reqHttpPlayUrlInfo: () => NativePromise.resolve({
+                            status: 200,
+                            data: createPlayInfoDelivery(value),
+                        }),
                     })
                     const result = player.reload()
                     if (result?.catch) {
@@ -894,54 +996,7 @@ export function area_limit_for_vue() {
             if (playUrl.dash) {
                 Objects.convertKeyToSnakeCase(playUrl.dash)
             }
-            let normalized = playUrl
-            if (!window.__balh_app_only__ && balh_config.upos_server) {
-                normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE)
-            }
-            preferNonAkamaiDashUrls(normalized?.dash)
-            return normalized
-        }
-        function preferNonAkamaiDashUrls(dash: any) {
-            if (!dash) return
-            const streams = [
-                ...(Array.isArray(dash.video) ? dash.video : []),
-                ...(Array.isArray(dash.audio) ? dash.audio : []),
-                ...(Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []),
-            ]
-            if (dash.flac?.audio) streams.push(dash.flac.audio)
-            for (const stream of streams) {
-                preferNonAkamaiStreamUrls(stream)
-            }
-        }
-        function preferNonAkamaiStreamUrls(stream: any) {
-            if (!stream || typeof stream !== 'object') return
-            const baseUrl = stream.base_url ?? stream.baseUrl
-            const backupUrls = [
-                ...(Array.isArray(stream.backup_url) ? stream.backup_url : []),
-                ...(Array.isArray(stream.backupUrl) ? stream.backupUrl : []),
-            ]
-            const urls = uniqueStrings([baseUrl, ...backupUrls])
-            if (urls.length < 2) return
-            const nonAkamaiUrls = urls.filter(url => !isAkamaiUrl(url))
-            if (!nonAkamaiUrls.length) return
-            const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)]
-            const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls
-            stream.base_url = nextBaseUrl
-            stream.baseUrl = nextBaseUrl
-            stream.backup_url = nextBackupUrls
-            stream.backupUrl = nextBackupUrls
-        }
-        function uniqueStrings(items: any[]) {
-            const seen = new Set<string>()
-            return items.filter((item): item is string => {
-                if (typeof item !== 'string' || !item) return false
-                if (seen.has(item)) return false
-                seen.add(item)
-                return true
-            })
-        }
-        function isAkamaiUrl(url: string) {
-            return /(^|\/\/)[^/]*akamaized\.net\//.test(url)
+            return playUrl
         }
         function isTransientProxyError(error: any) {
             const message = describeProxyError(error)
@@ -983,7 +1038,11 @@ export function area_limit_for_vue() {
             retryIndex = 0,
             preferredError?: any,
         ): Promise<T> {
+            if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                return NativePromise.reject(new Error('stale proxy playurl'))
+            }
             return request().catch(error => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) return NativePromise.reject(error)
                 const nextPreferredError = choosePreferredProxyError(preferredError, error)
                 const delay = getProxyRetryDelay(error, retryIndex)
                 if (delay === undefined) return NativePromise.reject(nextPreferredError)
@@ -1066,6 +1125,9 @@ export function area_limit_for_vue() {
             })
             let lastCandidateError: any
             const requestCandidate = (index: number): Promise<any> => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                    return NativePromise.reject(new Error('stale proxy playurl'))
+                }
                 const candidate = candidates[index]
                 if (!candidate) return NativePromise.reject(lastCandidateError || new Error('proxy playurl failed'))
                 const candidateParams = new URLSearchParams(params)
@@ -1093,6 +1155,9 @@ export function area_limit_for_vue() {
                 })()
                 return requestProxyCandidateWithRetry(candidate, epId, requestId, () => requestProxyJson(url)
                     .then(json => {
+                        if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                            return NativePromise.reject(new Error('stale proxy playurl'))
+                        }
                         const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info
                             ? fixThailandPlayUrlJson(json)
                             : window.__balh_app_only__ === true && json?.type === 'DASH'
@@ -1102,6 +1167,10 @@ export function area_limit_for_vue() {
                     }).then(({ json, playUrl }) => {
                         const normalizedPlayUrl = normalizeProxyPlayUrl(playUrl)
                         if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || (shouldUseMobiPlayUrl && normalizedPlayUrl?.dash)) && normalizedPlayUrl?.dash) {
+                            if (!shouldApplyProxyPlayInfo(value, requestId)) {
+                                return NativePromise.reject(new Error('stale proxy playurl'))
+                            }
+                            const resultValue = clonePlayInfoJson(value)
                             log('replace playinfo by proxy success', {
                                 epId,
                                 proxyHost: redactProxyHost(candidate.proxyHost),
@@ -1109,22 +1178,23 @@ export function area_limit_for_vue() {
                                 videoCount: normalizedPlayUrl.dash?.video?.length,
                                 audioCount: normalizedPlayUrl.dash?.audio?.length,
                             })
-                            value.result.play_video_type = 'dash'
-                            delete value.result.play_check
-                            value.result.video_info = normalizedPlayUrl
-                            value.video_info = normalizedPlayUrl
-                            removePlayInfoAreaLimit(value)
-                            storeBangumiArea(value, candidate.area)
+                            resultValue.result.play_video_type = 'dash'
+                            delete resultValue.result.play_check
+                            resultValue.result.video_info = normalizedPlayUrl
+                            resultValue.video_info = normalizedPlayUrl
+                            removePlayInfoAreaLimit(resultValue)
+                            storeBangumiArea(resultValue, candidate.area)
                             playerStatusForRequest(epId, requestId, '解析成功，正在启动播放器', {
                                 detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
                                 state: 'success',
                             })
-                            hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId)
-                            return value
+                            hidePlayerStatusWhenVideoReady(getPlayInfoEpId(resultValue), requestId)
+                            return resultValue
                         }
                         return NativePromise.reject(json)
                     }))
                     .catch(error => {
+                    if (!isCurrentPlayInfoRequest(epId, requestId)) return NativePromise.reject(error)
                     lastCandidateError = choosePreferredProxyError(lastCandidateError, error)
                     playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
                         detail: `${candidate.label}失败：${describeProxyError(error)}`,
@@ -1226,13 +1296,13 @@ export function area_limit_for_vue() {
                             if (!pendingPlayInfo) {
                                 return NativePromise.reject(new Error('proxy playurl missing'))
                             }
-                            return pendingPlayInfo.then(value => {
-                                if (pendingRequestId !== currentPlayInfoRequestId) {
+                            return pendingPlayInfo.then(rawValue => {
+                                if (!shouldApplyProxyPlayInfo(rawValue, pendingRequestId)) {
                                     return NativePromise.reject(new Error('stale proxy playurl'))
                                 }
-                                cachePlayInfo(value, false)
-                                ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
-                                return { status: 200, data: value }
+                                cachePlayInfo(rawValue, false)
+                                ;(window as any).__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(rawValue)
+                                return { status: 200, data: createPlayInfoDelivery(rawValue) }
                             })
                             .catch(error => {
                                 util_warn('replace playinfo by proxy failed', error)
@@ -1275,7 +1345,7 @@ export function area_limit_for_vue() {
                     state: 'success',
                 })
                 cachePlayInfo(cachedPlayInfo, false)
-                ;(window as any).__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo
+                ;(window as any).__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(cachedPlayInfo)
                 deferNanoCreatePlayer(NativePromise.resolve(cachedPlayInfo), cachedPlayInfo, requestId)
                 const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo)
                 reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3000 : 0)
@@ -1292,13 +1362,13 @@ export function area_limit_for_vue() {
             cachePlayInfo(value, false)
             deferNanoCreatePlayer(playInfoPromise, value, requestId)
             const pendingRequestId = requestId
-            playInfoPromise.then(value => {
-                if (!shouldApplyProxyPlayInfo(value, pendingRequestId)) return
-                cachePlayInfo(value, false)
-                ;(window as any).__PLAYURL_HYDRATE_DATA__ = value
-                storeProxyPlayInfo(value)
-                const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(value)
-                reloadOnceAfterProxyReady(value, playerReloadScheduled ? 3000 : 0)
+            playInfoPromise.then(rawValue => {
+                if (!shouldApplyProxyPlayInfo(rawValue, pendingRequestId)) return
+                storeProxyPlayInfo(rawValue)
+                cachePlayInfo(rawValue, false)
+                ;(window as any).__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(rawValue)
+                const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(rawValue)
+                reloadOnceAfterProxyReady(rawValue, playerReloadScheduled ? 3000 : 0)
             }).catch(error => util_warn('replace hydration playinfo failed', error))
             return true
         }
@@ -1322,10 +1392,11 @@ export function area_limit_for_vue() {
             }
         }
         function cachePlayInfo(value: any, updateCurrentPromise = true) {
-            playinfo = value
+            playinfo = createPlayInfoDelivery(value)
             if (value && updateCurrentPromise) {
                 setCurrentPlayInfoPromise(NativePromise.resolve(value), getPlayInfoEpId(value))
             }
+            return playinfo
         }
         replaceHydrationPlayInfo(initialPlayInfo)
         // 将__playinfo__置空, 让播放器去重新加载它...

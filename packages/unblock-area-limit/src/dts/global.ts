@@ -3,6 +3,8 @@ interface BalhInterface {
     showSettings: () => void
     /** 安装设置按钮 */
     _setupSettings: () => void
+    /** URL-free structural status for automatic CDN stall recovery. */
+    getCdnRecoveryStatus: () => import('../feature/bili/cdn_recovery').CdnRecoveryStatus
 }
 
 declare global {

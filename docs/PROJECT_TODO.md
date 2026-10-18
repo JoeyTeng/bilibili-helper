@@ -1,13 +1,24 @@
 # Project TODO
 
-Last updated: 2026-06-05
+Last updated: 2026-08-07
 
 ## Backlog
+
+- [ ] 由 Joey 在 UK-local 环境执行人工播放验收。自动 live
+  E2E 不能替代该门禁。
+- [ ] **Blocked:** Joey 完成人工验收并明确授权发布前，不创建稳定版 tag、发布稳定版
+  或刷新 `main`。
 
 - [ ] Add a guided issue template link for diagnostic reports.
   - Keep the current report copy flow local-only, but prefill issue title/body only when the payload is small enough for a URL.
 
 ## Completed
+
+- [x] 完成并合并 CDN selection Stage 3 stall recovery。
+  - [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 完成 future-request-only
+    recovery、测试与可复用设计记录；三个 CDN selection 阶段现已全部进入 `dev`。
+  - 约束与交付证据见
+    [CDN Three-Stage Delivery](project_journal/2026/08/2026-08-05-cdn-three-stage-delivery-21b2.md)。
 
 - [x] Add an in-script diagnostic report attachment flow.
   - Users can download a sanitized report from the settings panel, copy a short summary, and attach the report file to a GitHub issue.
