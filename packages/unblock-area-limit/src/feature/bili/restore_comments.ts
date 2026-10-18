@@ -1,7 +1,27 @@
 const moduleSelector = '#comment-module'
 const componentSelector = 'bili-comments'
 const bangumiPath = /^\/bangumi\/play\/(?:ep|ss)\d+\/?$/
+const commentsHiddenKey = 'balh_hide_comments'
+export const commentsPreferenceEvent = 'balh-comments-preference-change'
 let stopCurrent: (() => void) | undefined
+
+export function readBangumiCommentsHidden(): boolean {
+    try {
+        return window.localStorage.getItem(commentsHiddenKey) === 'true'
+    } catch {
+        return false
+    }
+}
+
+export function writeBangumiCommentsHidden(hidden: boolean): boolean {
+    try {
+        window.localStorage.setItem(commentsHiddenKey, String(hidden))
+    } catch {
+        return false
+    }
+    window.dispatchEvent(new CustomEvent(commentsPreferenceEvent, { detail: hidden }))
+    return true
+}
 
 /** Restore only a hidden comments container with a valid native comments component.
  * Bilibili's native API still controls closed, login, and permission requirements.
@@ -11,7 +31,7 @@ export function restoreBangumiComments(root: ParentNode = document): boolean {
     const module = root instanceof Element && root.matches(moduleSelector)
         ? root : root.querySelector<HTMLElement>(moduleSelector)
     if (!module) return false
-    return hasValidComponent(module) && restoreDisplay(module as HTMLElement)
+    return hasValidComponent(module) && applyVisibility(module as HTMLElement)
 }
 
 export function startRestoreBangumiComments(enabled: boolean): () => void {
@@ -41,7 +61,7 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
         if (activeModule === module) return
         detachModule()
         activeModule = module
-        if (hasValidComponent(module)) restoreDisplay(module as HTMLElement)
+        if (hasValidComponent(module)) applyVisibility(module as HTMLElement)
         childObserver = new MutationObserver(records => {
             const addedValidComponent = records.some(record => Array.from(record.addedNodes).some(containsValidComponent))
             const updatedValidParams = records.some(record => record.type === 'attributes'
@@ -49,12 +69,12 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
                 && record.target.matches(componentSelector)
                 && validParams(record.target))
             if ((addedValidComponent || updatedValidParams) && hasValidComponent(module)) {
-                restoreDisplay(module as HTMLElement)
+                applyVisibility(module as HTMLElement)
             }
         })
         childObserver.observe(module, { childList: true, attributes: true, attributeFilter: ['data-params'], subtree: true })
         styleObserver = new MutationObserver(() => {
-            if (hasValidComponent(module)) restoreDisplay(module as HTMLElement)
+            if (hasValidComponent(module)) applyVisibility(module as HTMLElement)
         })
         styleObserver.observe(module, { attributes: true, attributeFilter: ['style'] })
     }
@@ -75,12 +95,27 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
     const existing = document.querySelector(moduleSelector)
     if (existing) watchModule(existing)
 
+    const onPreferenceChange = () => {
+        if (activeModule && hasValidComponent(activeModule)) applyVisibility(activeModule as HTMLElement)
+    }
+    const onStorage = (event: StorageEvent) => {
+        if (event.key !== commentsHiddenKey && event.key !== null) return
+        onPreferenceChange()
+    }
+    const onPageShow = () => onPreferenceChange()
+    window.addEventListener(commentsPreferenceEvent, onPreferenceChange)
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('pageshow', onPageShow)
+
     const cleanup = () => {
         if (stopped) return
         stopped = true
         discover.disconnect()
         detachModule()
         window.removeEventListener('pagehide', onPageHide)
+        window.removeEventListener(commentsPreferenceEvent, onPreferenceChange)
+        window.removeEventListener('storage', onStorage)
+        window.removeEventListener('pageshow', onPageShow)
         if (stopCurrent === cleanup) stopCurrent = undefined
     }
     const onPageHide = (event: PageTransitionEvent) => {
@@ -101,7 +136,12 @@ function validParams(component: Element): boolean {
 function hasValidComponent(module: ParentNode): boolean {
     return Array.from(module.querySelectorAll<HTMLElement>(componentSelector)).some(validParams)
 }
-function restoreDisplay(module: HTMLElement): boolean {
+function applyVisibility(module: HTMLElement): boolean {
+    if (readBangumiCommentsHidden()) {
+        if (module.style.getPropertyValue('display') === 'none' && module.style.getPropertyPriority('display') === 'important') return false
+        module.style.setProperty('display', 'none', 'important')
+        return true
+    }
     if (module.style.getPropertyValue('display') !== 'none') return false
     module.style.removeProperty('display')
     return true

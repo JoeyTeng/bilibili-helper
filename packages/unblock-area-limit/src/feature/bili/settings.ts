@@ -8,6 +8,7 @@ import { r } from "../r"
 import { util_ui_msg } from '../../util/message'
 import { bilibili_login } from "./bilibili_login"
 import { createDiagnosticArtifacts, downloadDiagnosticReport } from "./diagnostics"
+import { commentsPreferenceEvent, readBangumiCommentsHidden, writeBangumiCommentsHidden } from "./restore_comments"
 import css from './settings.css'
 
 const balh_feature_runPing = function () {
@@ -253,6 +254,7 @@ export function settings() {
 
     function _showSettings() {
         document.body.appendChild(settingsDOM);
+        refreshCommentsPreferenceControl()
         var form = settingsDOM.querySelector('form')!;
         // elements包含index的属性, 和以name命名的属性, 其中以name命名的属性是不可枚举的, 只能通过这种方式获取出来
         Object.getOwnPropertyNames(form.elements).forEach(function (name) {
@@ -319,6 +321,30 @@ export function settings() {
 
         balh_config[name.replace('balh_', '')] = value
         log(name, ' => ', value);
+    }
+
+    function refreshCommentsPreferenceControl() {
+        const hidden = readBangumiCommentsHidden()
+        const button = settingsDOM?.querySelector<HTMLButtonElement>('#balh-comments-toggle')
+        const status = settingsDOM?.querySelector<HTMLElement>('#balh-comments-state')
+        if (button) button.textContent = hidden ? '显示评论区' : '关闭评论区'
+        if (status) status.textContent = hidden ? '评论区当前已关闭。' : '评论区当前已显示。'
+    }
+
+    function onCommentsPreferenceClick() {
+        const error = settingsDOM.querySelector<HTMLElement>('#balh-comments-error')
+        const nextHidden = !readBangumiCommentsHidden()
+        if (!writeBangumiCommentsHidden(nextHidden)) {
+            if (error) error.textContent = '保存失败，请重试。'
+            refreshCommentsPreferenceControl()
+            return
+        }
+        if (error) error.textContent = ''
+        refreshCommentsPreferenceControl()
+    }
+
+    function onCommentsStorageChange(event: StorageEvent) {
+        if (event.key === 'balh_hide_comments' || event.key === null) refreshCommentsPreferenceControl()
     }
 
     // On first click:
@@ -506,6 +532,18 @@ export function settings() {
                     _('label', { style: { flex: 1 } }, [_('input', { type: 'radio', name: 'balh_mode', value: r.const.mode.REPLACE }), _('text', '替换：在需要时处理番剧')]),
                     _('label', { style: { flex: 1 } }, [_('input', { type: 'radio', name: 'balh_mode', value: r.const.mode.REDIRECT }), _('text', '重定向：完全代理所有番剧')])
                 ]), _('br'),
+                _('div', { id: 'balh-comments-setting', role: 'group', 'aria-label': '番剧评论区设置' }, [
+                    _('text', '番剧评论区： '),
+                    _('button', {
+                        id: 'balh-comments-toggle',
+                        type: 'button',
+                        'aria-describedby': 'balh-comments-scope balh-comments-state balh-comments-error',
+                        event: { click: onCommentsPreferenceClick },
+                    }, [_('text', readBangumiCommentsHidden() ? '显示评论区' : '关闭评论区')]),
+                    _('span', { id: 'balh-comments-scope' }, [_('text', '仅保存在当前浏览器配置中；清除哔哩哔哩网站数据后恢复默认。')]),
+                    _('span', { id: 'balh-comments-state', 'aria-live': 'polite' }, [_('text', readBangumiCommentsHidden() ? '评论区当前已关闭。' : '评论区当前已显示。')]),
+                    _('span', { id: 'balh-comments-error', role: 'status', 'aria-live': 'polite' }),
+                ]), _('br'),
                 _('text', '其他：'), _('br'),
                 _('div', { style: { display: 'flex' } }, [
                     _('label', { style: { flex: 1 } }, [_('input', { type: 'checkbox', name: 'balh_blocked_vip' }), _('text', '被永封的大会员'), _('a', { href: 'https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E5%85%B3%E4%BA%8E%E8%A2%AB%E6%B0%B8%E5%B0%81%E7%9A%84%E5%A4%A7%E4%BC%9A%E5%91%98%E9%80%89%E9%A1%B9', target: '_blank' }, [_('text', '(？)')])]),
@@ -545,6 +583,10 @@ export function settings() {
             ])
         ])
     ]);
+
+    refreshCommentsPreferenceControl()
+    window.addEventListener(commentsPreferenceEvent, refreshCommentsPreferenceControl)
+    window.addEventListener('storage', onCommentsStorageChange)
 
     util_init(() => {
         if (!(util_page.player() || (util_page.av() && !balh_config.enable_in_av))) {

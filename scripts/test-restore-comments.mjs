@@ -20,11 +20,11 @@ await build({
 
 async function main() {
     const environment = createDom()
-    Object.assign(globalThis, { document: environment.document, location: environment.location, window: environment.window })
+    Object.assign(globalThis, { document: environment.document, location: environment.location, window: environment.window, CustomEvent: FakeCustomEvent })
     globalThis.Element = FakeElement
     globalThis.Node = FakeNode
     globalThis.MutationObserver = FakeMutationObserver
-    const { restoreBangumiComments, startRestoreBangumiComments } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
+    const { commentsPreferenceEvent, readBangumiCommentsHidden, restoreBangumiComments, startRestoreBangumiComments, writeBangumiCommentsHidden } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
 
     const tick = () => new Promise(resolve => setTimeout(resolve, 0))
     const episode = () => {
@@ -38,6 +38,15 @@ async function main() {
     }
     const commentModule = (style = 'display:none;color:green') => make('div', { id: 'comment-module', style })
     const comments = params => make('bili-comments', params === undefined ? {} : { 'data-params': params })
+
+    assert.equal(readBangumiCommentsHidden(), false)
+    environment.window.localStorage.throwOnGet = true
+    assert.equal(readBangumiCommentsHidden(), false)
+    environment.window.localStorage.throwOnGet = false
+    environment.window.localStorage.throwOnSet = true
+    assert.equal(writeBangumiCommentsHidden(true), false)
+    assert.equal(readBangumiCommentsHidden(), false)
+    environment.window.localStorage.throwOnSet = false
 
     // Disabled mode and non-PGC URLs leave an otherwise valid hidden container alone.
     episode()
@@ -58,6 +67,7 @@ async function main() {
     environment.document.body.removeChild(module)
 
     episode()
+    assert.equal(writeBangumiCommentsHidden(true), true)
     const cleanup = startRestoreBangumiComments(true)
     assert.equal(startRestoreBangumiComments(true), cleanup)
 
@@ -67,11 +77,17 @@ async function main() {
     environment.document.body.appendChild(module)
     await tick()
     assert.equal(module.style.getPropertyValue('display'), 'none')
+    assert.equal(module.style.getPropertyPriority('display'), '')
     const pending = comments()
     module.appendChild(pending)
     await tick()
     assert.equal(module.style.getPropertyValue('display'), 'none')
+    assert.equal(module.style.getPropertyPriority('display'), '')
     pending.setAttribute('data-params', '1,30638972')
+    await tick()
+    assert.equal(module.style.getPropertyValue('display'), 'none')
+    assert.equal(module.style.getPropertyPriority('display'), 'important')
+    assert.equal(writeBangumiCommentsHidden(false), true)
     await tick()
     assert.equal(module.style.getPropertyValue('display'), '')
     assert.equal(module.style.getPropertyValue('color'), 'green')
@@ -96,6 +112,16 @@ async function main() {
     await tick()
     assert.equal(replacement.style.getPropertyValue('display'), '')
 
+    environment.window.localStorage.values.set('balh_hide_comments', 'true')
+    environment.window.dispatchEvent(new FakeStorageEvent('storage', { key: 'balh_hide_comments', newValue: 'true' }))
+    await tick()
+    assert.equal(replacement.style.getPropertyValue('display'), 'none')
+    assert.equal(replacement.style.getPropertyPriority('display'), 'important')
+    environment.window.localStorage.values.set('balh_hide_comments', 'false')
+    environment.window.dispatchEvent(new FakeStorageEvent('storage', { key: 'balh_hide_comments', newValue: 'false' }))
+    await tick()
+    assert.equal(replacement.style.getPropertyValue('display'), '')
+
     // BFCache pagehide keeps observation alive; a real pagehide disconnects it.
     environment.window.dispatchEvent({ type: 'pagehide', persisted: true })
     replacement.style.setProperty('display', 'none')
@@ -106,6 +132,18 @@ async function main() {
     await tick()
     assert.equal(replacement.style.getPropertyValue('display'), 'none')
     cleanup()
+
+    assert.equal(readBangumiCommentsHidden(), false)
+    assert.equal(writeBangumiCommentsHidden(true), true)
+    startRestoreBangumiComments(true)
+    replacement.style.setProperty('display', 'none')
+    await tick()
+    assert.equal(replacement.style.getPropertyPriority('display'), 'important')
+    startRestoreBangumiComments(false)
+    assert.equal(writeBangumiCommentsHidden(false), true)
+
+    // Keep the event name in the fixture to prove same-tab changes use a dedicated event.
+    assert.equal(commentsPreferenceEvent, 'balh-comments-preference-change')
 
     // The standalone restore API applies the same page, container, and params gates.
     const invalid = commentModule()
@@ -157,7 +195,8 @@ class FakeElement extends FakeNode {
         this.attributes = new Map()
         const element = this
         this.style = {
-            getPropertyValue(name) { return parseStyle(element.getAttribute('style')).get(name) ?? '' },
+            getPropertyValue(name) { return (parseStyle(element.getAttribute('style')).get(name) ?? '').replace(/\s*!important$/, '') },
+            getPropertyPriority(name) { return /\s*!important$/.test(parseStyle(element.getAttribute('style')).get(name) ?? '') ? 'important' : '' },
             removeProperty(name) {
                 const styles = parseStyle(element.getAttribute('style'))
                 const old = styles.get(name) ?? ''
@@ -165,9 +204,9 @@ class FakeElement extends FakeNode {
                 element.writeStyle(styles)
                 return old
             },
-            setProperty(name, value) {
+            setProperty(name, value, priority = '') {
                 const styles = parseStyle(element.getAttribute('style'))
-                styles.set(name, value)
+                styles.set(name, priority === 'important' ? `${value} !important` : value)
                 element.writeStyle(styles)
             },
         }
@@ -238,6 +277,7 @@ class FakeMutationObserver {
 
 class FakeWindow {
     listeners = new Map()
+    localStorage = new FakeStorage()
     addEventListener(type, listener) {
         const listeners = this.listeners.get(type) ?? new Set()
         listeners.add(listener)
@@ -245,6 +285,28 @@ class FakeWindow {
     }
     removeEventListener(type, listener) { this.listeners.get(type)?.delete(listener) }
     dispatchEvent(event) { this.listeners.get(event.type)?.forEach(listener => listener(event)) }
+}
+
+class FakeStorage {
+    values = new Map()
+    throwOnGet = false
+    throwOnSet = false
+    getItem(key) {
+        if (this.throwOnGet) throw new Error('storage read blocked')
+        return this.values.get(key) ?? null
+    }
+    setItem(key, value) {
+        if (this.throwOnSet) throw new Error('storage write blocked')
+        this.values.set(key, String(value))
+    }
+}
+
+class FakeCustomEvent {
+    constructor(type, init = {}) { this.type = type; this.detail = init.detail }
+}
+
+class FakeStorageEvent {
+    constructor(type, init = {}) { this.type = type; this.key = init.key ?? null; this.newValue = init.newValue ?? null }
 }
 
 function parseStyle(value) {
