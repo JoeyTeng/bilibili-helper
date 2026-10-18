@@ -44,7 +44,7 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
         if (enabled) return stopCurrent
         stopCurrent()
     }
-    if (!enabled || !isBangumiPage() || typeof MutationObserver === 'undefined') return () => undefined
+    if (!enabled || !isBangumiCommentsPreferenceAvailable() || typeof MutationObserver === 'undefined') return () => undefined
 
     let activeModule: HTMLElement | undefined
     let childObserver: MutationObserver | undefined
@@ -192,12 +192,10 @@ function applyVisibility(module: HTMLElement): boolean {
     if (!isBangumiPage()) return false
     if (readBangumiCommentsHidden()) {
         if (module.style.getPropertyValue('display') === 'none' && module.style.getPropertyPriority('display') === 'important') return false
-        if (!savedDisplays.has(module)) {
-            savedDisplays.set(module, {
-                value: module.style.getPropertyValue('display'),
-                priority: module.style.getPropertyPriority('display'),
-            })
-        }
+        savedDisplays.set(module, {
+            value: module.style.getPropertyValue('display'),
+            priority: module.style.getPropertyPriority('display'),
+        })
         module.style.setProperty('display', 'none', 'important')
         return true
     }

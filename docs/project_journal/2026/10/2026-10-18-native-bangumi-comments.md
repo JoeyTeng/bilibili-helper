@@ -47,6 +47,7 @@ The same committed implementation was tested against five additional valid fixtu
 - When enabled, remove only the container's inline `display: none`, preserving other styles, component attributes, and native access controls. When explicitly hidden, enforce `display: none !important` on that same valid native container.
 - Handle late containers/components, delayed identifier attributes, framework style resets, replacement containers, and BFCache returns with scoped mutation observation.
 - Rediscover a replacement inserted before the prior container is removed, including separate mutation batches. Recheck route eligibility before observer-driven visibility changes to keep ordinary video comments outside this feature's scope.
+- Keep lightweight route/discovery monitoring on the supported origin even when the initial path is an ordinary video page. Restore or hide comments only after entering an eligible Bangumi route, and preserve the latest site display declaration when overriding it for a hidden preference.
 - Respect the script's global close setting without requiring a playback proxy configuration.
 - Store the comments preference in localStorage, defaulting to visible. Apply changes immediately and synchronize same-profile tabs through storage events. Report a failed save in the settings UI. Clearing Bilibili site data restores the default.
 - Show the preference control only on the supported `www.bilibili.com` origin; mobile settings cannot configure another origin's localStorage.
