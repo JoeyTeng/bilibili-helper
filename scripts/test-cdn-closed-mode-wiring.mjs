@@ -13,6 +13,7 @@ globalThis.__closedModeFullPipelineCalls = []
 globalThis.__closedModeWarnings = []
 globalThis.__closedModeThrowFromCdn = false
 globalThis.__closedModeMainCalls = []
+globalThis.__closedModeCommentsEnabled = []
 globalThis.__closedModeRuntimeRecoveryPublications = []
 globalThis.__closedModeConfig = {
     is_closed: 'Y',
@@ -93,8 +94,10 @@ assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'explicitly clo
 
 const mainModuleUrl = await buildMainWiringModule()
 globalThis.__closedModeMainCalls = []
+globalThis.__closedModeCommentsEnabled = []
 await import(`${mainModuleUrl}#explicit-close`)
 assert.equal(countMainCall('area_limit_xhr'), 1, 'explicit-close main wiring did not reach area_limit_xhr')
+assert.deepEqual(globalThis.__closedModeCommentsEnabled, [false], 'closed mode must disable native comments restoration')
 assert.equal(countMainCall('installCdnRecoveryMonitor'), 0, 'explicitly closed mode installed the CDN recovery monitor')
 assert.equal(countMainCall('installCdnFinalDeliveryObservers'), 0, 'explicitly closed mode installed final-delivery observers')
 
@@ -111,8 +114,10 @@ assert.deepEqual(
 assert.equal(globalThis.__closedModeFullPipelineCalls.length, 0, 'CDN-only mode must not enter the area-unblock pipeline')
 
 globalThis.__closedModeMainCalls = []
+globalThis.__closedModeCommentsEnabled = []
 await import(`${mainModuleUrl}#missing-custom-proxy`)
 assert.equal(countMainCall('area_limit_xhr'), 1, 'missing-proxy main wiring did not reach area_limit_xhr')
+assert.deepEqual(globalThis.__closedModeCommentsEnabled, [true], 'open mode must enable native comments restoration')
 assert.equal(countMainCall('installCdnRecoveryMonitor'), 1, 'missing custom proxy incorrectly disabled the CDN recovery monitor')
 assert.equal(countMainCall('installCdnFinalDeliveryObservers'), 1, 'missing custom proxy incorrectly disabled final-delivery observers')
 
@@ -412,6 +417,10 @@ function mainWiringStubPlugin() {
             export function version_remind() { called('version_remind') }
             export function switch_to_old_player() { called('switch_to_old_player') }
             export function area_limit_for_vue() { called('area_limit_for_vue') }
+            export function startRestoreBangumiComments(enabled) {
+                called('startRestoreBangumiComments')
+                globalThis.__closedModeCommentsEnabled.push(enabled)
+            }
             export function hide_adblock_tips() { called('hide_adblock_tips') }
             export function area_limit_xhr() { called('area_limit_xhr') }
             export function installCdnRecoveryMonitor() { called('installCdnRecoveryMonitor') }

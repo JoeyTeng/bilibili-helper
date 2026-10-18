@@ -1,7 +1,7 @@
 ---
 id: 20261018-native-bangumi-comments
 title: Restore Native Bangumi Comments
-status: active
+status: completed
 created: 2026-10-18
 updated: 2026-10-18
 branch: wip/restore-bangumi-comments
@@ -15,6 +15,7 @@ superseded_by:
 ## Summary
 - Restore the existing native comments component on Bangumi playback pages where its container has inline `display: none`.
 - Keep comments on Bilibili's own API; no comment reverse proxy, credential forwarding, or replacement comment UI is introduced.
+- Add a settings button to hide or show native Bangumi comments, with a persistent preference scoped to the current browser profile and Bilibili origin.
 
 ## Evidence and Scope
 - Anonymous live fixture: `https://www.bilibili.com/bangumi/play/ep247270`, the first episode of media `md1376`.
@@ -43,19 +44,19 @@ The same committed implementation was tested against five additional valid fixtu
 
 ## Implementation
 - Limit restoration to `www.bilibili.com/bangumi/play/ep*` and `/ss*` pages and containers holding a native component with valid positive decimal identifiers.
-- Remove only the container's inline `display: none`, preserving other styles, component attributes, and native access controls.
+- When enabled, remove only the container's inline `display: none`, preserving other styles, component attributes, and native access controls. When explicitly hidden, enforce `display: none !important` on that same valid native container.
 - Handle late containers/components, delayed identifier attributes, framework style resets, replacement containers, and BFCache returns with scoped mutation observation.
 - Respect the script's global close setting without requiring a playback proxy configuration.
+- Store the comments preference in localStorage, defaulting to visible. Apply changes immediately and synchronize same-profile tabs through storage events. Report a failed save in the settings UI. Clearing Bilibili site data restores the default.
 
 ## Validation
-- DOM mock regression tests passed for the restoration lifecycle and scope restrictions.
+- DOM mock regression tests passed for the restoration lifecycle, scope restrictions, persistent preferences, storage failures, cross-tab events, and observer cleanup.
 - Type checking passed.
-- `pnpm run check` passed: type checking, async requests, subtitles, diagnostics, comments, and the final userscript build.
+- `pnpm run check` passed after integrating current `dev`: type checking, async requests, subtitles, diagnostics, comments, XHR compatibility, CDN tests, and the final userscript build. The closed-mode startup fixture now checks the comments enable argument alongside its existing CDN assertions.
+- The real settings button was tested with the complete built userscript injected after page load: hiding immediately applied `display: none !important` and saved the preference; a newly opened episode in the same profile kept comments hidden; showing comments synchronized the other tab back to `display: block`. This is a two-document browser smoke test, not a userscript-manager installation or browser-restart test.
 - `node --check scripts/test-restore-comments.mjs` and `git diff --check` passed.
 - The repository journal validator reported a pre-existing missing-frontmatter error in `docs/project_journal/2026/06/2026-06-05-diagnostic-report.md`; that unrelated file was left unchanged.
 - Toolchain: Node.js v25.8.2 and pnpm 10.15.0. Regression tests use a DOM mock without requiring a browser download.
 - Screenshot: `/Users/joey/.codex/visualizations/2026/10/18/01a14f86-9055-7f03-a04f-0fc64d233c88/bangumi-comments.jpg`.
-- Formal independent review was not run. The installed review workflow requires version-bound instruction-isolation receipts; neither the subagent receipt nor a validated receipt for the installed Codex CLI 0.163.0 was available during the bounded preflight. No clean-review claim is made.
-
-## Next Steps
-- Complete formal review under a verified isolation profile before treating this local candidate as fully reviewed. No push, release, or installed userscript update is part of this task.
+- Settings screenshot: `/Users/joey/.codex/visualizations/2026/10/18/01a14f86-9055-7f03-a04f-0fc64d233c88/comments-toggle-visible.jpg`.
+- Exact-head CI and independent review evidence belong to the associated PR. This change does not increment or publish a release version.
