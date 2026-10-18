@@ -8,7 +8,7 @@ import { r } from "../r"
 import { util_ui_msg } from '../../util/message'
 import { bilibili_login } from "./bilibili_login"
 import { createDiagnosticArtifacts, downloadDiagnosticReport } from "./diagnostics"
-import { commentsPreferenceEvent, readBangumiCommentsHidden, writeBangumiCommentsHidden } from "./restore_comments"
+import { commentsPreferenceEvent, isBangumiCommentsPreferenceAvailable, readBangumiCommentsHidden, writeBangumiCommentsHidden } from "./restore_comments"
 import { clearCdnHealthCache, getCdnProbeStatus, probeCurrentPlayUrlCdn, subscribeCdnProbeStatus } from './cdn_runtime'
 import css from './settings.css'
 
@@ -346,8 +346,10 @@ export function settings() {
 
     function refreshCommentsPreferenceControl() {
         const hidden = readBangumiCommentsHidden()
+        const setting = settingsDOM?.querySelector<HTMLElement>('#balh-comments-setting')
         const button = settingsDOM?.querySelector<HTMLButtonElement>('#balh-comments-toggle')
         const status = settingsDOM?.querySelector<HTMLElement>('#balh-comments-state')
+        if (setting) setting.style.display = isBangumiCommentsPreferenceAvailable() ? '' : 'none'
         if (button) button.textContent = hidden ? '显示评论区' : '关闭评论区'
         if (status) status.textContent = hidden ? '评论区当前已关闭。' : '评论区当前已显示。'
     }

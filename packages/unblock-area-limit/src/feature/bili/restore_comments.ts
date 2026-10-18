@@ -4,6 +4,11 @@ const bangumiPath = /^\/bangumi\/play\/(?:ep|ss)\d+\/?$/
 const commentsHiddenKey = 'balh_hide_comments'
 export const commentsPreferenceEvent = 'balh-comments-preference-change'
 let stopCurrent: (() => void) | undefined
+const savedDisplays = new WeakMap<HTMLElement, { value: string; priority: string }>()
+
+export function isBangumiCommentsPreferenceAvailable(): boolean {
+    return location.hostname === 'www.bilibili.com'
+}
 
 export function readBangumiCommentsHidden(): boolean {
     try {
@@ -41,7 +46,7 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
     }
     if (!enabled || !isBangumiPage() || typeof MutationObserver === 'undefined') return () => undefined
 
-    let activeModule: Element | undefined
+    let activeModule: HTMLElement | undefined
     let childObserver: MutationObserver | undefined
     let styleObserver: MutationObserver | undefined
     let stopped = false
@@ -51,7 +56,30 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
         styleObserver?.disconnect()
         childObserver = undefined
         styleObserver = undefined
+        const savedDisplay = activeModule && savedDisplays.get(activeModule)
+        if (activeModule && savedDisplay
+            && activeModule.style.getPropertyValue('display') === 'none'
+            && activeModule.style.getPropertyPriority('display') === 'important') {
+            if (savedDisplay.value) activeModule.style.setProperty('display', savedDisplay.value, savedDisplay.priority)
+            else activeModule.style.removeProperty('display')
+        }
+        if (activeModule) savedDisplays.delete(activeModule)
         activeModule = undefined
+    }
+    function suspendForRoute() {
+        detachModule()
+    }
+    function refreshRoute() {
+        if (!isBangumiPage()) {
+            suspendForRoute()
+            return
+        }
+        if (!activeModule) {
+            const module = document.querySelector<HTMLElement>(moduleSelector)
+            if (module) watchModule(module)
+        } else if (hasValidComponent(activeModule)) {
+            applyVisibility(activeModule)
+        }
     }
     function containsValidComponent(node: Node): boolean {
         if (!(node instanceof Element)) return false
@@ -60,9 +88,14 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
     function watchModule(module: Element) {
         if (activeModule === module) return
         detachModule()
-        activeModule = module
+        if (!isBangumiPage()) return
+        activeModule = module as HTMLElement
         if (hasValidComponent(module)) applyVisibility(module as HTMLElement)
         childObserver = new MutationObserver(records => {
+            if (!isBangumiPage()) {
+                suspendForRoute()
+                return
+            }
             const addedValidComponent = records.some(record => Array.from(record.addedNodes).some(containsValidComponent))
             const updatedValidParams = records.some(record => record.type === 'attributes'
                 && record.target instanceof Element
@@ -74,6 +107,10 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
         })
         childObserver.observe(module, { childList: true, attributes: true, attributeFilter: ['data-params'], subtree: true })
         styleObserver = new MutationObserver(() => {
+            if (!isBangumiPage()) {
+                suspendForRoute()
+                return
+            }
             if (hasValidComponent(module)) applyVisibility(module as HTMLElement)
         })
         styleObserver.observe(module, { attributes: true, attributeFilter: ['style'] })
@@ -84,8 +121,19 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
     }
 
     const discover = new MutationObserver(records => {
-        if (activeModule && !activeModule.isConnected) detachModule()
+        if (!isBangumiPage()) {
+            suspendForRoute()
+            return
+        }
+        if (activeModule && !activeModule.isConnected) {
+            detachModule()
+        }
         if (activeModule) return
+        const currentModule = document.querySelector<HTMLElement>(moduleSelector)
+        if (currentModule) {
+            watchModule(currentModule)
+            return
+        }
         for (const record of records) record.addedNodes.forEach(node => {
             const module = findModule(node)
             if (module?.isConnected) watchModule(module)
@@ -96,16 +144,18 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
     if (existing) watchModule(existing)
 
     const onPreferenceChange = () => {
-        if (activeModule && hasValidComponent(activeModule)) applyVisibility(activeModule as HTMLElement)
+        refreshRoute()
     }
     const onStorage = (event: StorageEvent) => {
         if (event.key !== commentsHiddenKey && event.key !== null) return
         onPreferenceChange()
     }
-    const onPageShow = () => onPreferenceChange()
+    const onPageShow = () => refreshRoute()
     window.addEventListener(commentsPreferenceEvent, onPreferenceChange)
     window.addEventListener('storage', onStorage)
     window.addEventListener('pageshow', onPageShow)
+    window.addEventListener('popstate', onPageShow)
+    window.addEventListener('hashchange', onPageShow)
 
     const cleanup = () => {
         if (stopped) return
@@ -116,6 +166,8 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
         window.removeEventListener(commentsPreferenceEvent, onPreferenceChange)
         window.removeEventListener('storage', onStorage)
         window.removeEventListener('pageshow', onPageShow)
+        window.removeEventListener('popstate', onPageShow)
+        window.removeEventListener('hashchange', onPageShow)
         if (stopCurrent === cleanup) stopCurrent = undefined
     }
     const onPageHide = (event: PageTransitionEvent) => {
@@ -127,7 +179,7 @@ export function startRestoreBangumiComments(enabled: boolean): () => void {
 }
 
 function isBangumiPage(): boolean {
-    return location.hostname === 'www.bilibili.com' && bangumiPath.test(location.pathname)
+    return isBangumiCommentsPreferenceAvailable() && bangumiPath.test(location.pathname)
 }
 function validParams(component: Element): boolean {
     const params = component.getAttribute('data-params')?.split(',')
@@ -137,12 +189,25 @@ function hasValidComponent(module: ParentNode): boolean {
     return Array.from(module.querySelectorAll<HTMLElement>(componentSelector)).some(validParams)
 }
 function applyVisibility(module: HTMLElement): boolean {
+    if (!isBangumiPage()) return false
     if (readBangumiCommentsHidden()) {
         if (module.style.getPropertyValue('display') === 'none' && module.style.getPropertyPriority('display') === 'important') return false
+        if (!savedDisplays.has(module)) {
+            savedDisplays.set(module, {
+                value: module.style.getPropertyValue('display'),
+                priority: module.style.getPropertyPriority('display'),
+            })
+        }
         module.style.setProperty('display', 'none', 'important')
         return true
     }
-    if (module.style.getPropertyValue('display') !== 'none') return false
-    module.style.removeProperty('display')
-    return true
+    const changed = module.style.getPropertyValue('display') === 'none'
+    const savedDisplay = savedDisplays.get(module)
+    if (changed && savedDisplay?.value && savedDisplay.value !== 'none') {
+        module.style.setProperty('display', savedDisplay.value, savedDisplay.priority)
+    } else if (changed) {
+        module.style.removeProperty('display')
+    }
+    savedDisplays.delete(module)
+    return changed
 }

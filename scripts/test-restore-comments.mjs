@@ -24,7 +24,7 @@ async function main() {
     globalThis.Element = FakeElement
     globalThis.Node = FakeNode
     globalThis.MutationObserver = FakeMutationObserver
-    const { commentsPreferenceEvent, readBangumiCommentsHidden, restoreBangumiComments, startRestoreBangumiComments, writeBangumiCommentsHidden } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
+    const { commentsPreferenceEvent, isBangumiCommentsPreferenceAvailable, readBangumiCommentsHidden, restoreBangumiComments, startRestoreBangumiComments, writeBangumiCommentsHidden } = await import(`${pathToFileURL(outFile).href}?t=${Date.now()}`)
 
     const tick = () => new Promise(resolve => setTimeout(resolve, 0))
     const episode = () => {
@@ -38,6 +38,12 @@ async function main() {
     }
     const commentModule = (style = 'display:none;color:green') => make('div', { id: 'comment-module', style })
     const comments = params => make('bili-comments', params === undefined ? {} : { 'data-params': params })
+
+    environment.location.hostname = 'm.bilibili.com'
+    assert.equal(isBangumiCommentsPreferenceAvailable(), false)
+    environment.location.hostname = 'www.bilibili.com'
+    environment.location.pathname = '/video/BV1xx'
+    assert.equal(isBangumiCommentsPreferenceAvailable(), true, 'main-site settings remain available outside bangumi playback')
 
     assert.equal(readBangumiCommentsHidden(), false)
     environment.window.localStorage.throwOnGet = true
@@ -87,6 +93,17 @@ async function main() {
     await tick()
     assert.equal(module.style.getPropertyValue('display'), 'none')
     assert.equal(module.style.getPropertyPriority('display'), 'important')
+
+    // Leaving bangumi restores the previous display state; returning can reattach the existing module.
+    environment.location.pathname = '/video/BV1xx'
+    environment.window.dispatchEvent({ type: 'popstate' })
+    assert.equal(module.style.getPropertyValue('display'), 'none')
+    assert.equal(module.style.getPropertyPriority('display'), '')
+    episode()
+    // Simulate pushState without a history event; unrelated body churn re-discovers the existing container.
+    environment.document.body.appendChild(make('aside'))
+    await tick()
+    assert.equal(module.style.getPropertyPriority('display'), 'important')
     assert.equal(writeBangumiCommentsHidden(false), true)
     await tick()
     assert.equal(module.style.getPropertyValue('display'), '')
@@ -104,23 +121,40 @@ async function main() {
     assert.equal(hiddenComponent.hasAttribute('hidden'), true)
     assert.equal(hiddenComponent.getAttribute('aria-hidden'), 'true')
 
-    // Replacing the container re-enters discovery and restores the replacement.
-    environment.document.body.removeChild(module)
-    const replacement = commentModule()
+    // A replacement inserted while the old container is connected is found after its later removal.
+    const replacement = commentModule('display:block;color:purple')
     replacement.appendChild(comments('3,99'))
     environment.document.body.appendChild(replacement)
     await tick()
-    assert.equal(replacement.style.getPropertyValue('display'), '')
+    assert.equal(replacement.style.getPropertyValue('display'), 'block')
+    environment.document.body.removeChild(module)
+    await tick()
+    assert.equal(replacement.style.getPropertyValue('display'), 'block')
 
     environment.window.localStorage.values.set('balh_hide_comments', 'true')
     environment.window.dispatchEvent(new FakeStorageEvent('storage', { key: 'balh_hide_comments', newValue: 'true' }))
     await tick()
     assert.equal(replacement.style.getPropertyValue('display'), 'none')
     assert.equal(replacement.style.getPropertyPriority('display'), 'important')
+    environment.location.pathname = '/video/BV1xx'
+    environment.window.dispatchEvent({ type: 'popstate' })
+    assert.equal(replacement.style.getPropertyValue('display'), 'block', 'route suspension restores the pre-hide display value')
+    episode()
+    environment.window.dispatchEvent({ type: 'popstate' })
+    await tick()
+    assert.equal(replacement.style.getPropertyPriority('display'), 'important')
+    replacement.style.setProperty('display', 'grid')
+    environment.location.pathname = '/video/BV1xx'
+    environment.window.dispatchEvent({ type: 'popstate' })
+    assert.equal(replacement.style.getPropertyValue('display'), 'grid', 'route suspension preserves a site style rewrite')
+    episode()
+    environment.window.dispatchEvent({ type: 'popstate' })
+    await tick()
+    assert.equal(replacement.style.getPropertyPriority('display'), 'important')
     environment.window.localStorage.values.set('balh_hide_comments', 'false')
     environment.window.dispatchEvent(new FakeStorageEvent('storage', { key: 'balh_hide_comments', newValue: 'false' }))
     await tick()
-    assert.equal(replacement.style.getPropertyValue('display'), '')
+    assert.equal(replacement.style.getPropertyValue('display'), 'grid')
 
     // BFCache pagehide keeps observation alive; a real pagehide disconnects it.
     environment.window.dispatchEvent({ type: 'pagehide', persisted: true })
