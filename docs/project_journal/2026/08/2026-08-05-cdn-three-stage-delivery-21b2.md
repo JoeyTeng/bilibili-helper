@@ -1,9 +1,9 @@
 ---
 id: 20260805-cdn-three-stage-delivery-21b2
 title: CDN Three-Stage Delivery
-status: active
+status: completed
 created: 2026-08-05
-updated: 2026-08-07
+updated: 2026-10-19
 branch:
 pr: 14
 supersedes: []
@@ -18,10 +18,10 @@ superseded_by:
   [PR #13](https://github.com/JoeyTeng/bilibili-helper/pull/13) 交付；Stage 3 由
   [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 交付，三个阶段均已进入
   `dev`。
-- 三个阶段全部合并且 Joey 在 UK-local 环境完成人工播放验收前，整体状态保持
-  `active`。
-- UK-local 人工播放验收完成且 Joey 明确授权发布前，不得创建稳定版 tag、发布稳定版或
-  刷新 `main`。
+- 三个阶段实现及 `v8.11.0` release-specific trial 构成本 program 的完成范围。该版本
+  接受的人工范围是正常播放、原生评论的已安装候选试用，以及 Joey 明确指示继续发布。
+- 真实 stall/cache recovery 未在该人工试用中执行，不能记作已人工验收；后续 UK-local
+  现场验证保留为独立事项，不阻塞本次明确授权的 `v8.11.0` 发布。
 
 ## Stage Status
 
@@ -194,21 +194,33 @@ superseded_by:
 ## Compatibility Contract
 
 - 兼容范围只覆盖 latest Bilibili Video CDN Switcher，不维护旧版矩阵。
-- 当前固定 snapshot 是 `0.1.4`，SHA-256
-  `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
+- 当前固定 snapshot 是 `0.1.5`，SHA-256
+  `39cb475d8377a892931d969ab5e16e1fb39023f2ef0fd1611df78126880c81b4`。
+- Static comparison of the `0.1.4` and `0.1.5` archive sources found only a version change
+  and a Chinese default CDN change from `cos` to `ali`; Fetch/XHR implementation is unchanged.
+  The archive-to-canonical source difference is limited to Greasy Fork `downloadURL` and
+  `updateURL` metadata.
 - latest-upstream browser gate 使用不同的 source/post-CDN host，分别覆盖两种
   BALH/CDN Switcher 加载顺序和 Fetch/XHR response transport；只有 post-CDN exact
   candidates 可以激活 future-route recovery。最终合并证据必须来自 strengthened gate
   的完整通过结果，不能沿用候选本来就在目标 host 上的旧 fixture 结果。
-- strengthened gate 已在 Chrome `151.0.7922.108` 通过：`balh->cdn` 与 `cdn->balh`
-  的 Fetch/XHR 均为 `primary -> primary -> alternate -> alternate`；固定上游身份仍是
-  `0.1.4` 与上述 SHA-256。测试同时门禁 post-CDN publication、pre-CDN 零激活、当前
-  请求不重放、实际 grace/cooldown、稳定恢复、transport health 与隐私 surface。
+- latest-source gate 已在 Chrome `155.0.8059.80` 通过：`balh->cdn` 与 `cdn->balh`
+  的 Fetch/XHR 均使用 `compat-cdn.invalid` 并得到 `primary -> primary -> alternate -> alternate`。
+  测试使用 `en-US` 与自定义 CDN host，没有覆盖新版中文默认 CDN host。测试同时门禁
+  post-CDN publication、pre-CDN 零激活、当前请求不重放、实际 grace/cooldown、稳定恢复、
+  transport health 与隐私 surface。
 
 ## Release Gate
 
-- 三个阶段的实现已经全部合并。下一步由 Joey 在 UK-local 环境人工验收播放与恢复
-  行为；验收完成后仍须 Joey 明确授权，才能解除稳定发布门禁。
+- 在 UK-local 真实 Chrome Codex profile 中，agent 使用 Tampermonkey `5.5.1` 将既有
+  `8.10.0` 安装更新为完整 `8.11.0` 候选（源码 `dc00e20`）。在 `ep247368` 第 99 话，
+  视频时间从 `00:01` 推进至 `02:30`，原生评论显示 90 条；系统音频全程静音且已核实。
+- Joey 观察该已安装候选后表示结果看起来没问题，并明确指示继续发布。此决定接受的
+  `v8.11.0` 人工范围为正常播放与原生评论安装试用。
+- 本次人工验收没有验证真实 stall 或 cache 恢复，不构成这些路径的现场证据。验收时，
+  `v8.11.0` 候选尚未打 tag 或发布。
+- 自动 live E2E 与受控 recovery gate 是辅助证据，不替代上述 UK-local 人工试用，也不
+  将未执行的真实 stall/cache recovery 升格为人工验收结果。
 - 2026-08-06 的仓库 live E2E gate 已通过：BVID `BV17x411w7KC` 在 Chrome
   `151.0.7922.72` 中真实播放推进；2 个 candidate/probed host 均 healthy，probe
   attempts 为 `completed=4` / `total=4`，持久化 2 个 host，并在重载后的新 runtime
@@ -220,13 +232,12 @@ superseded_by:
 - live Stage 3 capability classifier 对同一 BVID 返回 `INCONCLUSIVE` / `exit 3`，原因是
   `no-unique-exact-group`。这正确保留了证据不足与成功之间的边界，不替代受控正向 gate，
   也不表示生产代码失败。
-- UK-local 人工验收完成且 Joey 明确授权前，不创建稳定版 tag、不发布稳定版，也不刷新
-  `main`。
+- 发布授权已收到；稳定 tag、Release 与 `main` 更新由常规发布流程处理。
 
 ## Next Steps
 
-1. 由 Joey 执行 UK-local 人工播放验收。
-2. 仅在人工门禁通过并收到明确授权后，恢复稳定 tag/release/`main` 刷新流程。
+1. 按常规流程完成已获授权的 `v8.11.0` 稳定发布。
+2. 后续另行完成并记录 UK-local 真实 stall 与 cache recovery 现场验证。
 
 ## Evidence
 

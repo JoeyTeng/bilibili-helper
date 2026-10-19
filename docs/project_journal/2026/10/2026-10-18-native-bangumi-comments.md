@@ -63,3 +63,17 @@ The same committed implementation was tested against five additional valid fixtu
 - Screenshot: `/Users/joey/.codex/visualizations/2026/10/18/01a14f86-9055-7f03-a04f-0fc64d233c88/bangumi-comments.jpg`.
 - Settings screenshot: `/Users/joey/.codex/visualizations/2026/10/18/01a14f86-9055-7f03-a04f-0fc64d233c88/comments-toggle-visible.jpg`.
 - Exact-head CI and independent review evidence belong to the associated PR. This change does not increment or publish a release version.
+
+## UK Manual Release Acceptance — 2026-10-19
+
+- The agent updated the existing `8.10.0` installation to the complete `8.11.0` candidate
+  built from source commit `dc00e20` in the real local Chrome Codex profile using Tampermonkey
+  `5.5.1`. The BALH candidate metadata used `@name 解除B站区域限制` and
+  `@namespace https://github.com/JoeyTeng`.
+- On `ep247368`, episode 99 playback advanced from `00:01` to `02:30`, and the native comments
+  component displayed 90 comments. System audio remained muted throughout and muting was verified.
+- Joey reviewed the installed candidate, said it looked good, and explicitly instructed us to
+  continue with publication. This is the release-specific acceptance decision for normal playback
+  and the installed native-comments trial. At acceptance time, the candidate had not been tagged
+  or published. Real stall/cache recovery was not exercised and remains future field validation;
+  this trial does not claim acceptance of those behaviors.

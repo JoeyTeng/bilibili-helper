@@ -125,13 +125,17 @@ candidate pool 不属于当前交付。
 再次排序、替换 `Response` / XHR 对象或拼接 URL。最新版 CDN Switcher 的两种加载顺序
 均由下列固定 snapshot gate 覆盖。
 
-仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。三个阶段已经全部合并；Joey 完成人工验收并明确授权发布前，不得创建稳定版 tag、发布稳定版或刷新 `main`。精确 live E2E 命令由仓库根 README 维护。
+三个阶段已经全部合并。Joey 于 2026-10-19 接受本机安装候选的正常播放与评论试用，
+并明确指示继续发布 `v8.11.0`；本版本的
+[发布决定](../../docs/design/cdn-selection.md#compatibility-and-acceptance) 按该实际范围记录。
+真实 stall/cache 恢复仍未人工验证；仓库 live E2E gate 只提供自动辅助证据。精确命令
+由仓库根 README 维护。
 
 #### CDN Switcher 兼容性
 
 | 项目 | 已验证版本 | 验证日期 | 范围 |
 | --- | --- | --- | --- |
-| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.4` | 2026-08-06 | 当前 latest；Fetch/XHR、两种脚本加载顺序与 future-route recovery |
+| [Bilibili Video CDN Switcher](https://greasyfork.org/scripts/500213-bilibili-video-cdn-switcher) | `0.1.5` | 2026-10-19 | 当前 latest；Fetch/XHR、两种脚本加载顺序与 future-route recovery |
 
 上游身份固定为 Greasy Fork script `500213`，latest 下载地址是
 `https://update.greasyfork.org/scripts/500213/Bilibili%20Video%20CDN%20Switcher.user.js`。
@@ -140,8 +144,17 @@ canonical latest metadata 地址是
 兼容测试要求 metadata 与源码中的身份和版本完全一致。
 userscript metadata 身份固定为 `@name Bilibili Video CDN Switcher` 与
 `@namespace mailto:1332019995@qq.com`。
-本次验证的 `0.1.4` 源文件 SHA-256 为
-`261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
+本次验证的 `0.1.5` 源文件 SHA-256 为
+`39cb475d8377a892931d969ab5e16e1fb39023f2ef0fd1611df78126880c81b4`。
+静态比较 `0.1.4` 与 `0.1.5` archive 源文件只发现版本和中文默认 CDN（`cos` 改为
+`ali`）变化，Fetch/XHR 实现不变；archive 与 canonical 源文件的差异仅为 Greasy Fork
+`downloadURL` / `updateURL` metadata。
+
+该固定 snapshot 已在 Chrome `155.0.8059.80` 的 latest-source 组合 gate 通过。
+`balh->cdn` 与 `cdn->balh` 的 Fetch/XHR 请求均使用 `compat-cdn.invalid`，结果都是
+`primary -> primary -> alternate -> alternate`。测试使用 `en-US` 与自定义 CDN host；
+没有覆盖新版中文默认 CDN host。Fetch/XHR 的后续恢复范围仅为本仓库已有契约中的
+future request、cooldown 与稳定播放恢复。
 
 仓库只保证上表中“当前 latest”的单一固定 snapshot，不维护 CDN Switcher 旧版本兼容矩阵。打稳定版 tag 前应显式运行下列命令：它会从 Greasy Fork 临时下载上游 latest 脚本，不在本仓库复制其源码；若 latest 版本或原始源码 bytes/SHA-256 变更，测试会要求先重新验证并更新此表。tag 触发的 release workflow 不再读取这个可变上游，避免已经冻结的 tag 因第三方后续更新而无法重跑。
 

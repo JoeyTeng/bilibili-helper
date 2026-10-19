@@ -1,27 +1,28 @@
 # Project State
 
-Last updated: 2026-08-07
+Last updated: 2026-10-19
 
 ## Current State
 
 - CDN selection Stage 1（精确响应选择）、Stage 2（本机两阶段探测）与 Stage 3
-  stall recovery 均已完成并合并到 `dev`；下一步是 UK-local 人工播放验收，验收完成后
-  仍须 Joey 明确授权才能发布。
-- 兼容范围仅覆盖 latest Bilibili Video CDN Switcher；当前固定 snapshot 是 `0.1.4`，
-  SHA-256 `261e2dee00acd83ed40f1cc26cf8c5feffc599c41b95952d44b98c09af8dc0d4`。
+  stall recovery 均已完成。对 `v8.11.0`，Joey 接受了已安装候选的正常播放与原生评论试用，
+  并明确指示继续发布。
+- 本次验收并批准发布的版本为稳定版 `v8.11.0`；发布按常规 tag/Release/`main` 流程进行。
+- 兼容范围仅覆盖 latest Bilibili Video CDN Switcher；固定 snapshot 详情见
+  [兼容性文档](../packages/unblock-area-limit/README.md#cdn-switcher-兼容性)。
 
 ## Recovery
 
 - Source branch: `dev`.
 - Distribution branch: `main`, refreshed by the release workflow from stable `vX.Y.Z` tags.
-- Current release target: next stable `v8.10.x` patch/minor from `dev`, subject to the CDN
-  three-stage release gate below.
-- Active CDN program:
+- Approved release version: stable `v8.11.0` from `dev`.
+- Completed CDN program:
   [2026-08-05-cdn-three-stage-delivery-21b2.md](project_journal/2026/08/2026-08-05-cdn-three-stage-delivery-21b2.md).
 - Backlog entrypoint: [PROJECT_TODO.md](PROJECT_TODO.md).
 
-## Global Blockers
+## Release Notes
 
-- Joey 在 UK-local 环境完成人工播放验收并明确授权发布前，不得创建稳定版 tag、
-  发布稳定版或刷新 `main`。
-- 自动 live E2E 只是辅助证据，不能替代 Joey 的人工验收。
+- The `v8.11.0` release-specific manual acceptance covers normal playback and the installed
+  native-comments trial, followed by Joey's explicit publication instruction. Real stall/cache
+  recovery was not manually exercised and remains follow-up field validation. Automated gates
+  provide supporting evidence; they do not replace the UK-local manual trial.

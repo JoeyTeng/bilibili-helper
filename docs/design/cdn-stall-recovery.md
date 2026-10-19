@@ -117,8 +117,9 @@ An exception thrown by a page `success` / `.done()` callback stops the remaining
 is rethrown with the exact error in a separate browser task, and never enters the AJAX `error`
 callback or becomes a Promise rejection. Final observation is committed before that callback runs.
 An already-registered `ajaxPrefilter` that obtains jqXHR before `beforeSend` is outside this gate's
-observable seam. The pinned latest CDN Switcher `0.1.4` does not use that surface; expanding the
-compatibility claim requires a real-jQuery composition gate for the new integration.
+observable seam. Static revalidation confirms that the pinned latest CDN Switcher `0.1.5` still
+does not use that surface. Expanding the compatibility claim requires a real-jQuery composition
+gate for the new integration.
 
 Each supported playurl Fetch call / XHR `open()` receives a monotonic delivery order before its
 predecessor starts. All active observation layers for that delivery use the same accepted order;
@@ -461,6 +462,12 @@ Stage 3 capability has four explicit terminal results:
 
 `UNSUPPORTED` and `INCONCLUSIVE` are non-success results for the Stage 3-specific capability gate
 and must never fall through to a generic `PASS`. They do not replace UK-local manual acceptance.
+
+For `v8.11.0`, the [release-specific acceptance decision](cdn-selection.md#compatibility-and-acceptance)
+uses the installed normal-playback and comments trial followed by Joey's explicit instruction to
+publish. Live stall/cache recovery remains manually unverified and stays a follow-up validation
+item. This release decision does not convert its capability result into `PASS` or claim manual
+recovery acceptance.
 
 ## Porting checklist
 

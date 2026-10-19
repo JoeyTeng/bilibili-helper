@@ -1,18 +1,19 @@
 # Project TODO
 
-Last updated: 2026-08-07
+Last updated: 2026-10-19
 
 ## Backlog
 
-- [ ] 由 Joey 在 UK-local 环境执行人工播放验收。自动 live
-  E2E 不能替代该门禁。
-- [ ] **Blocked:** Joey 完成人工验收并明确授权发布前，不创建稳定版 tag、发布稳定版
-  或刷新 `main`。
-
 - [ ] Add a guided issue template link for diagnostic reports.
   - Keep the current report copy flow local-only, but prefill issue title/body only when the payload is small enough for a URL.
+- [ ] Perform and record a later UK-local field check of real stall and cache recovery. These
+  behaviors were not exercised in the `v8.11.0` installed-candidate trial.
 
 ## Completed
+
+- [x] Joey 接受 `v8.11.0` 已安装候选的正常播放与原生评论试用，并明确指示继续发布。
+  - 真实 stall/cache recovery 未在本次试用中测试；证据与范围记录于
+    [Native Bangumi Comments](project_journal/2026/10/2026-10-18-native-bangumi-comments.md).
 
 - [x] 完成并合并 CDN selection Stage 3 stall recovery。
   - [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 完成 future-request-only
