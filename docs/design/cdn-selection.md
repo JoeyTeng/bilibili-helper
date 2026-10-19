@@ -592,7 +592,7 @@ completion-order token 覆盖先前 raw observation，而不替换自定义 tran
 callback list 在抛错点停止；原始异常在独立 browser task 重抛，不得进入 AJAX `error`
 或变成 Promise rejection。
 已经在 BALH 注入前注册、并在 `beforeSend` 之前直接取得 jqXHR 的 `ajaxPrefilter`
-callback 不在该 gate 可见的拦截面内；当前 latest CDN Switcher `0.1.4` 不使用该表面，
+callback 不在该 gate 可见的拦截面内；当前 latest CDN Switcher `0.1.5` 经源码复核仍不使用该表面，
 若未来兼容对象开始依赖它，必须新增真实 jQuery 组合 gate 后再扩展兼容声明。
 
 ### 幂等性
