@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         解除B站区域限制
 // @namespace    https://github.com/JoeyTeng
-// @version      8.10.0
+// @version      8.11.0
 // @description  通过替换获取视频地址接口的方式, 实现解除B站区域限制;
 // @author       ipcjs
 // @supportURL   https://github.com/JoeyTeng/bilibili-helper
@@ -180,7 +180,7 @@ if (!Object.getOwnPropertyDescriptor(window, 'XMLHttpRequest').writable) {
 /** 脚本的主体部分, 在GM4中, 需要把这个函数转换成字符串, 注入到页面中, 故不要引用外部的变量 */
 function scriptSource(invokeBy) {
     // @template-content
-    const __BALH_BUILD_VERSION__ = "20260610T110248327Z";
+    const __BALH_BUILD_VERSION__ = "20261019T191708149Z";
     "use strict";
     (() => {
       // packages/unblock-area-limit/src/util/cookie.ts
@@ -269,7 +269,7 @@ function scriptSource(invokeBy) {
             for (const item of obj) {
               convertKeyToSnakeCase(item);
             }
-          } else if (typeof obj === "object") {
+          } else if (obj !== null && typeof obj === "object") {
             const o = obj;
             for (const key of Object.keys(o)) {
               const value = o[key];
@@ -1141,6 +1141,13 @@ function scriptSource(invokeBy) {
 
       // packages/unblock-area-limit/src/feature/config.ts
       var cookies = cookieStorage.all();
+      var CDN_MODES = /* @__PURE__ */ new Set(["original", "safe", "auto", "manual"]);
+      function resolveCdnMode(value, legacyUposServer) {
+        if (value && CDN_MODES.has(value)) {
+          return value;
+        }
+        return legacyUposServer ? "manual" : "safe";
+      }
       var balh_config = new Proxy({
         /*保存config的对象*/
       }, {
@@ -1181,6 +1188,13 @@ function scriptSource(invokeBy) {
                 break;
               case "flv_prefer_ws":
                 value = r.const.FALSE;
+                break;
+              case "cdn_mode":
+                const resolvedCdnMode = resolveCdnMode(value, cookies.balh_upos_server);
+                if (resolvedCdnMode !== value) {
+                  value = resolvedCdnMode;
+                  cookieStorage.balh_cdn_mode = resolvedCdnMode;
+                }
                 break;
               case "is_closed":
                 if (value == null) {
@@ -1620,117 +1634,673 @@ function scriptSource(invokeBy) {
 
       // packages/unblock-area-limit/src/util/inject-xhr.ts
       var noReferrerHostArray = [];
-      function injectXhr({ transformRequest, transformResponse }) {
+      function injectXhr({ transformOpenUrl, transformRequest, transformResponse }) {
+        const NativeXMLHttpRequest = window.XMLHttpRequest;
+        const nativePrototype = NativeXMLHttpRequest.prototype;
+        const nativeOpen = Reflect.get(nativePrototype, "open");
+        const nativeSend = Reflect.get(nativePrototype, "send");
+        const nativeAbort = Reflect.get(nativePrototype, "abort");
+        const nativeAddEventListener = Reflect.get(nativePrototype, "addEventListener");
+        const nativeRemoveEventListener = Reflect.get(nativePrototype, "removeEventListener");
+        const nativeDispatchEvent = Reflect.get(nativePrototype, "dispatchEvent");
+        const nativeReadyStateChangeDescriptor = findPropertyDescriptor(nativePrototype, "onreadystatechange");
+        const NativePromise = window.Promise;
+        const EventConstructor = window.Event;
+        const states = /* @__PURE__ */ new WeakMap();
+        const pendingNativeValues = /* @__PURE__ */ new WeakMap();
+        const pendingNativeReadyStateChanges = /* @__PURE__ */ new WeakMap();
         let firstCreateXHR = true;
-        window.XMLHttpRequest = new Proxy(window.XMLHttpRequest, {
-          construct: function(target2, args) {
+        const nativePrototypeFacade = new Proxy(Object.create(nativePrototype), {
+          has: function(target2, prop) {
+            if (prop === "onloadend") {
+              return false;
+            }
+            return Reflect.has(target2, prop);
+          }
+        });
+        class InjectedXMLHttpRequest extends NativeXMLHttpRequest {
+          constructor(...args) {
+            super(...args);
             if (firstCreateXHR && Scripts.isDev) {
               firstCreateXHR = false;
             }
-            let container = {};
-            const setContainerResponse = (response) => {
-              container.__has_replacement = true;
-              container.response = response;
-              if (typeof response === "string") {
-                container.responseText = response;
-              } else if (response instanceof ArrayBuffer || ArrayBuffer.isView(response) || response instanceof Blob) {
-                delete container.responseText;
-              } else {
-                container.responseText = JSON.stringify(response);
+            initializeInstance(this);
+          }
+          get onreadystatechange() {
+            const state = states.get(this);
+            if (!state) return pendingNativeReadyStateChanges.get(this) ?? null;
+            return state.publicReadyStateChange ?? null;
+          }
+          set onreadystatechange(value) {
+            const state = states.get(this);
+            if (!state) {
+              pendingNativeReadyStateChanges.set(this, value);
+              setNativeReadyStateChange(this, value);
+              return;
+            }
+            state.publicReadyStateChange = value;
+            if (state.usesNativeEventTarget) {
+              const wrapped = typeof value === "function" ? wrapReadyStateChangeCallback(value) : null;
+              state.wrappedReadyStateChange = wrapped;
+              setNativeReadyStateChange(this, wrapped);
+            }
+          }
+          addEventListener(type, listener, options) {
+            const state = requireState(this);
+            if (type !== "readystatechange" || !state.usesNativeEventTarget || listener == null) {
+              return nativeAddEventListener?.call(this, type, listener, options);
+            }
+            const capture = getEventListenerCapture(options);
+            let record = state.readyStateChangeListeners.find((candidate) => candidate.listener === listener && candidate.capture === capture);
+            if (!record) {
+              record = {
+                listener,
+                capture,
+                wrapped: wrapReadyStateChangeListener(listener)
+              };
+              state.readyStateChangeListeners.push(record);
+            }
+            return nativeAddEventListener.call(this, type, record.wrapped, options);
+          }
+          removeEventListener(type, listener, options) {
+            const state = requireState(this);
+            if (type !== "readystatechange" || !state.usesNativeEventTarget || listener == null) {
+              return nativeRemoveEventListener?.call(this, type, listener, options);
+            }
+            const capture = getEventListenerCapture(options);
+            const record = state.readyStateChangeListeners.find((candidate) => candidate.listener === listener && candidate.capture === capture);
+            return nativeRemoveEventListener.call(this, type, record?.wrapped ?? listener, options);
+          }
+          get response() {
+            return readNativeProperty(this, "response");
+          }
+          set response(value) {
+            writeNativeProperty(this, "response", value);
+          }
+          get responseText() {
+            return readNativeProperty(this, "responseText");
+          }
+          set responseText(value) {
+            writeNativeProperty(this, "responseText", value);
+          }
+          get readyState() {
+            return readNativeProperty(this, "readyState");
+          }
+          set readyState(value) {
+            writeNativeProperty(this, "readyState", value);
+          }
+          open(...args) {
+            const state = requireState(this);
+            const routed = transformOpenArguments(args);
+            const transaction = {
+              args: routed.args,
+              routeCommit: routed.commit,
+              routeRollback: routed.rollback,
+              routeSettled: false,
+              applied: false,
+              committed: false
+            };
+            state.openTransactions.push(transaction);
+            let result;
+            try {
+              result = nativeOpen.apply(this, transaction.args);
+            } catch (error) {
+              try {
+                rollbackOpenTransaction(state, transaction);
+              } catch (_) {
               }
-            };
-            const dispatchResultTransformer = (p) => {
-              let event = {};
-              return p.then((r2) => {
-                container.readyState = 4;
-                setContainerResponse(r2);
-                container.__onreadystatechange(event);
-              }).catch((e) => {
-                container.__block_response = false;
-                if (container.__response != null) {
-                  container.readyState = 4;
-                  container.response = container.__response;
-                  container.__onreadystatechange(event);
-                }
+              throw error;
+            }
+            commitOpenTransaction(state, transaction);
+            if (!state.usesNativeEventTarget) {
+              setNativeReadyStateChange(this, state.nativeReadyStateChange);
+            }
+            return result;
+          }
+          send(...args) {
+            const state = requireState(this);
+            const generation = state.generation;
+            if (readNativeProperty(this, "readyState") === 1) {
+              const url = state.container.__url;
+              const host = new URL(url, document.location.href).hostname;
+              if (noReferrerHostArray.includes(host)) {
+                setReferrer("no-referrer");
+              } else {
+                setReferrer("no-referrer-when-downgrade");
+              }
+            }
+            const previousBlock = captureContainerFlag(state.container, "__block_response");
+            state.container.__block_response = true;
+            let result;
+            try {
+              result = nativeSend.apply(this, args);
+            } catch (error) {
+              if (state.generation === generation) {
+                restoreContainerFlag(state.container, "__block_response", previousBlock);
+              }
+              throw error;
+            }
+            if (state.generation !== generation) return result;
+            let requestResult;
+            try {
+              requestResult = transformRequest({
+                url: state.container.__url,
+                container: state.container
               });
-            };
-            const dispatchResultTransformerCreator = () => {
-              container.__block_response = true;
-              return dispatchResultTransformer;
-            };
-            return new Proxy(new target2(...args), {
-              has: function(target3, prop) {
-                if (prop === "onloadend") {
-                  return false;
+            } catch (error) {
+              restoreContainerFlag(state.container, "__block_response", previousBlock);
+              if (!state.container.__block_response && state.hasNativeFallback) {
+                processCapturedNativeCompletion(this, state);
+              }
+              util_debug("XHR transformRequest failed; using native request", error);
+              return result;
+            }
+            if (requestResult != null) {
+              const inspected = inspectThenable(requestResult);
+              const promise = inspected.isThenable ? inspected.promise : NativePromise.resolve(requestResult);
+              dispatchAsyncResult(this, state, promise);
+            } else {
+              restoreContainerFlag(state.container, "__block_response", previousBlock);
+              if (!state.container.__block_response && state.hasNativeFallback) {
+                processCapturedNativeCompletion(this, state);
+              }
+            }
+            return result;
+          }
+          abort(...args) {
+            const state = requireState(this);
+            resetRequestState(state);
+            const generation = state.generation;
+            state.aborting = true;
+            try {
+              return nativeAbort.apply(this, args);
+            } finally {
+              if (state.generation === generation) {
+                state.aborting = false;
+              }
+            }
+          }
+        }
+        Object.setPrototypeOf(InjectedXMLHttpRequest.prototype, nativePrototypeFacade);
+        window.XMLHttpRequest = InjectedXMLHttpRequest;
+        function initializeInstance(instance) {
+          const usesNativeEventTarget = typeof nativeAddEventListener === "function" && typeof nativeRemoveEventListener === "function" && typeof nativeDispatchEvent === "function";
+          const state = {
+            container: {},
+            generation: 0,
+            aborting: false,
+            asyncOutcome: "idle",
+            asyncResponse: void 0,
+            hasNativeFallback: false,
+            nativeFallbackEvent: void 0,
+            nativeCompletionDelivered: false,
+            openTransactions: [],
+            originalPrototype: Object.getPrototypeOf(instance),
+            nativeReadyStateChange: void 0,
+            nativeValues: pendingNativeValues.get(instance) ?? {},
+            publicReadyStateChange: pendingNativeReadyStateChanges.get(instance) ?? null,
+            readyStateChangeListeners: [],
+            syntheticDelivery: false,
+            usesNativeEventTarget,
+            wrappedReadyStateChange: void 0
+          };
+          pendingNativeValues.delete(instance);
+          pendingNativeReadyStateChanges.delete(instance);
+          state.nativeReadyStateChange = (event) => handleNativeReadyStateChange(instance, state, event);
+          states.set(instance, state);
+          if (usesNativeEventTarget) {
+            nativeAddEventListener.call(instance, "readystatechange", state.nativeReadyStateChange);
+            if (typeof state.publicReadyStateChange === "function") {
+              state.wrappedReadyStateChange = wrapReadyStateChangeCallback(state.publicReadyStateChange);
+              setNativeReadyStateChange(instance, state.wrappedReadyStateChange);
+            }
+          } else {
+            setNativeReadyStateChange(instance, state.nativeReadyStateChange);
+          }
+          for (const prop of ["response", "responseText", "readyState"]) {
+            Object.defineProperty(instance, prop, {
+              configurable: true,
+              get: function() {
+                if (Object.prototype.hasOwnProperty.call(state.container, prop)) {
+                  return state.container[prop];
                 }
-                return prop in target3;
+                return Reflect.get(state.originalPrototype, prop, instance);
               },
-              set: function(target3, prop, value, receiver) {
-                if (prop === "onreadystatechange") {
-                  container.__onreadystatechange = value;
-                  let cb = value;
-                  value = function(event) {
-                    if (target3.readyState === 4) {
-                      const response = transformResponse({
-                        url: target3.responseURL,
-                        response: target3.response,
-                        xhr: target3,
-                        container
-                      });
-                      if (response != null) {
-                        if (typeof response === "object" && response instanceof Promise) {
-                          response.compose(dispatchResultTransformerCreator());
-                        } else {
-                          setContainerResponse(response);
-                        }
-                      } else {
-                      }
-                      if (container.__block_response) {
-                        container.__response = target3.response;
-                        return;
-                      }
-                    }
-                    cb.apply(container.__has_replacement ? receiver : this, arguments);
-                  };
-                }
-                target3[prop] = value;
-                return true;
-              },
-              get: function(target3, prop, receiver) {
-                if (prop in container) return container[prop];
-                let value = target3[prop];
-                if (typeof value === "function") {
-                  let func = value;
-                  value = function() {
-                    if (target3.readyState === 1) {
-                      const url = container.__url;
-                      const host = new URL(url, document.location.href).hostname;
-                      if (noReferrerHostArray.includes(host)) {
-                        setReferrer("no-referrer");
-                      } else {
-                        setReferrer("no-referrer-when-downgrade");
-                      }
-                    }
-                    if (prop === "open") {
-                      container.__method = arguments[0];
-                      container.__url = arguments[1];
-                    } else if (prop === "send") {
-                      const promise = transformRequest({
-                        url: container.__url,
-                        container
-                      });
-                      if (promise != null) {
-                        promise.compose(dispatchResultTransformerCreator());
-                      }
-                    }
-                    return func.apply(target3, arguments);
-                  };
-                }
-                return value;
+              set: function(value) {
+                state.nativeValues[prop] = value;
               }
             });
           }
-        });
+        }
+        function requireState(instance) {
+          const state = states.get(instance);
+          if (!state) throw new TypeError("Illegal XMLHttpRequest invocation");
+          return state;
+        }
+        function readNativeProperty(instance, prop) {
+          const descriptor = findPropertyDescriptor(nativePrototype, prop);
+          if (!descriptor?.get) {
+            const state = states.get(instance);
+            const nativeValues = state?.nativeValues ?? pendingNativeValues.get(instance);
+            if (nativeValues && Object.prototype.hasOwnProperty.call(nativeValues, prop)) {
+              return nativeValues[prop];
+            }
+          }
+          return Reflect.get(nativePrototype, prop, instance);
+        }
+        function writeNativeProperty(instance, prop, value) {
+          const state = states.get(instance);
+          if (state) {
+            state.nativeValues[prop] = value;
+            return;
+          }
+          let nativeValues = pendingNativeValues.get(instance);
+          if (!nativeValues) {
+            nativeValues = {};
+            pendingNativeValues.set(instance, nativeValues);
+          }
+          nativeValues[prop] = value;
+        }
+        function setNativeReadyStateChange(instance, value) {
+          if (nativeReadyStateChangeDescriptor?.set) {
+            nativeReadyStateChangeDescriptor.set.call(instance, value);
+            return;
+          }
+          pendingNativeReadyStateChanges.set(instance, value);
+        }
+        function resetRequestState(state) {
+          state.generation += 1;
+          state.aborting = false;
+          state.asyncOutcome = "idle";
+          state.asyncResponse = void 0;
+          state.hasNativeFallback = false;
+          state.nativeFallbackEvent = void 0;
+          state.nativeCompletionDelivered = false;
+          state.syntheticDelivery = false;
+          for (const prop of [
+            "__block_response",
+            "__has_replacement",
+            "__redirect",
+            "__response",
+            "readyState",
+            "response",
+            "responseText"
+          ]) {
+            delete state.container[prop];
+          }
+        }
+        function transformOpenArguments(args) {
+          const original = { args, commit: null, rollback: null };
+          const method = args[0];
+          const url = args[1];
+          if (typeof transformOpenUrl !== "function" || typeof method !== "string" || typeof url !== "string" || !isGetMethod2(method)) {
+            return original;
+          }
+          let replacement;
+          try {
+            replacement = transformOpenUrl(url);
+          } catch (_) {
+            return original;
+          }
+          let replacementUrl;
+          let commit = null;
+          let rollback = null;
+          if (typeof replacement === "string") {
+            replacementUrl = replacement;
+          } else if (replacement && typeof replacement === "object") {
+            try {
+              const candidateUrl = replacement.url;
+              if (typeof candidateUrl !== "string") return original;
+              replacementUrl = candidateUrl;
+              const commitCallback = replacement.commit;
+              const rollbackCallback = replacement.rollback;
+              if (typeof commitCallback === "function") {
+                commit = () => commitCallback.call(replacement);
+              }
+              if (typeof rollbackCallback === "function") {
+                rollback = () => rollbackCallback.call(replacement);
+              }
+            } catch (_) {
+              return original;
+            }
+          } else {
+            return original;
+          }
+          const routedArgs = args.slice();
+          routedArgs[1] = replacementUrl;
+          return { args: routedArgs, commit, rollback };
+        }
+        function isGetMethod2(method) {
+          return method.length === 3 && (method[0] === "G" || method[0] === "g") && (method[1] === "E" || method[1] === "e") && (method[2] === "T" || method[2] === "t");
+        }
+        function applyOpenTransaction(state, transaction) {
+          if (transaction.applied) return;
+          transaction.applied = true;
+          transaction.previousState = captureRequestState(state);
+          resetRequestState(state);
+          transaction.appliedGeneration = state.generation;
+          state.container.__method = transaction.args[0];
+          state.container.__url = transaction.args[1];
+        }
+        function commitOpenTransaction(state, transaction) {
+          if (transaction.committed) return;
+          applyOpenTransaction(state, transaction);
+          if (state.generation !== transaction.appliedGeneration) {
+            removeOpenTransaction(state, transaction);
+            settleOpenRoute(transaction, "rollback");
+            return;
+          }
+          transaction.committed = true;
+          removeOpenTransaction(state, transaction);
+          settleOpenRoute(transaction, "commit");
+        }
+        function rollbackOpenTransaction(state, transaction) {
+          removeOpenTransaction(state, transaction);
+          try {
+            if (transaction.applied && state.generation === transaction.appliedGeneration) {
+              restoreRequestState(state, transaction.previousState);
+            }
+          } finally {
+            settleOpenRoute(transaction, "rollback");
+          }
+        }
+        function settleOpenRoute(transaction, outcome) {
+          if (transaction.routeSettled) return;
+          transaction.routeSettled = true;
+          const callback = outcome === "commit" ? transaction.routeCommit : transaction.routeRollback;
+          if (typeof callback !== "function") return;
+          try {
+            callback();
+          } catch (_) {
+          }
+        }
+        function captureRequestState(state) {
+          const stateValues = {};
+          for (const prop of [
+            "generation",
+            "aborting",
+            "asyncOutcome",
+            "asyncResponse",
+            "hasNativeFallback",
+            "nativeFallbackEvent",
+            "nativeCompletionDelivered",
+            "syntheticDelivery"
+          ]) {
+            stateValues[prop] = state[prop];
+          }
+          const containerValues = {};
+          for (const prop of [
+            "__method",
+            "__url",
+            "__block_response",
+            "__has_replacement",
+            "__redirect",
+            "__response",
+            "readyState",
+            "response",
+            "responseText"
+          ]) {
+            containerValues[prop] = captureContainerFlag(state.container, prop);
+          }
+          return { stateValues, containerValues };
+        }
+        function restoreRequestState(state, previousState) {
+          for (const [prop, value] of Object.entries(previousState.stateValues)) {
+            state[prop] = value;
+          }
+          for (const [prop, captured] of Object.entries(previousState.containerValues)) {
+            restoreContainerFlag(state.container, prop, captured);
+          }
+        }
+        function removeOpenTransaction(state, transaction) {
+          const index = state.openTransactions.lastIndexOf(transaction);
+          if (index >= 0) {
+            state.openTransactions.splice(index, 1);
+          }
+        }
+        function setContainerResponse(container, response) {
+          container.__has_replacement = true;
+          container.response = response;
+          if (typeof response === "string") {
+            container.responseText = response;
+          } else if (response instanceof ArrayBuffer || ArrayBuffer.isView(response) || response instanceof Blob) {
+            delete container.responseText;
+          } else {
+            container.responseText = JSON.stringify(response);
+          }
+        }
+        function dispatchAsyncResult(instance, state, promise) {
+          const generation = state.generation;
+          state.asyncOutcome = "pending";
+          state.asyncResponse = void 0;
+          state.container.__block_response = true;
+          promise.then(
+            (response) => {
+              if (state.generation !== generation) return;
+              state.asyncOutcome = "success";
+              state.asyncResponse = response;
+              if (state.hasNativeFallback && !state.nativeCompletionDelivered) {
+                deliverCapturedAsyncSuccess(instance, state);
+              }
+            },
+            () => {
+              if (state.generation !== generation) return;
+              state.asyncOutcome = "failure";
+              state.container.__block_response = false;
+              if (!state.hasNativeFallback) return;
+              releaseCapturedNativeFallback(instance, state);
+            }
+          );
+        }
+        function handleNativeReadyStateChange(instance, state, event) {
+          if (state.syntheticDelivery || state.aborting) return;
+          const openTransaction = state.openTransactions[state.openTransactions.length - 1];
+          if (openTransaction && event?.isTrusted === true && readNativeProperty(instance, "readyState") === 1) {
+            applyOpenTransaction(state, openTransaction);
+          }
+          if (readNativeProperty(instance, "readyState") === 4) {
+            if (state.nativeCompletionDelivered) {
+              suppressNativeEvent(event);
+              return;
+            }
+            if (state.container.__block_response) {
+              if (state.asyncOutcome === "success") {
+                setContainerResponse(state.container, state.asyncResponse);
+                state.nativeCompletionDelivered = true;
+                clearNativeFallback(state);
+                return;
+              }
+              captureNativeFallback(state, event);
+              return;
+            }
+            const transformed = invokeTransformResponse(instance, state);
+            if (!transformed.ok) {
+              state.nativeCompletionDelivered = true;
+              if (!state.usesNativeEventTarget) {
+                dispatchFallbackReadyStateChange(instance, state, event);
+              }
+              return;
+            }
+            const response = transformed.response;
+            if (response != null) {
+              const inspected = inspectThenable(response);
+              if (inspected.isThenable) {
+                captureNativeFallback(state, event);
+                dispatchAsyncResult(instance, state, inspected.promise);
+                return;
+              } else {
+                setContainerResponse(state.container, response);
+              }
+            }
+            state.nativeCompletionDelivered = true;
+          }
+          if (!state.usesNativeEventTarget) {
+            dispatchFallbackReadyStateChange(instance, state, event);
+          }
+        }
+        function processCapturedNativeCompletion(instance, state) {
+          const event = state.nativeFallbackEvent;
+          clearNativeFallback(state);
+          const transformed = invokeTransformResponse(instance, state);
+          if (!transformed.ok) {
+            state.nativeCompletionDelivered = true;
+            dispatchSyntheticReadyStateChange(instance, state, event);
+            return;
+          }
+          const response = transformed.response;
+          if (response != null) {
+            const inspected = inspectThenable(response);
+            if (inspected.isThenable) {
+              state.hasNativeFallback = true;
+              state.nativeFallbackEvent = event;
+              dispatchAsyncResult(instance, state, inspected.promise);
+              return;
+            }
+            setContainerResponse(state.container, response);
+          }
+          state.nativeCompletionDelivered = true;
+          dispatchSyntheticReadyStateChange(instance, state, event);
+        }
+        function deliverCapturedAsyncSuccess(instance, state) {
+          const event = state.nativeFallbackEvent;
+          setContainerResponse(state.container, state.asyncResponse);
+          state.nativeCompletionDelivered = true;
+          clearNativeFallback(state);
+          dispatchSyntheticReadyStateChange(instance, state, event);
+        }
+        function releaseCapturedNativeFallback(instance, state) {
+          const event = state.nativeFallbackEvent;
+          state.nativeCompletionDelivered = true;
+          clearNativeFallback(state);
+          dispatchSyntheticReadyStateChange(instance, state, event);
+        }
+        function captureNativeFallback(state, event) {
+          state.hasNativeFallback = true;
+          state.nativeFallbackEvent = event;
+          suppressNativeEvent(event);
+        }
+        function clearNativeFallback(state) {
+          state.hasNativeFallback = false;
+          state.nativeFallbackEvent = void 0;
+        }
+        function suppressNativeEvent(event) {
+          if (typeof event?.stopImmediatePropagation === "function") {
+            event.stopImmediatePropagation();
+          }
+        }
+        function dispatchFallbackReadyStateChange(instance, state, event) {
+          const callback = state.publicReadyStateChange;
+          if (typeof callback === "function") {
+            invokeReadyStateChangeCallback(callback, instance, event);
+          }
+        }
+        function dispatchSyntheticReadyStateChange(instance, state, fallbackEvent) {
+          if (!state.usesNativeEventTarget || typeof EventConstructor !== "function") {
+            dispatchFallbackReadyStateChange(instance, state, fallbackEvent);
+            return;
+          }
+          state.syntheticDelivery = true;
+          try {
+            nativeDispatchEvent.call(instance, new EventConstructor("readystatechange"));
+          } finally {
+            state.syntheticDelivery = false;
+          }
+        }
+        function wrapReadyStateChangeCallback(callback) {
+          return function(event) {
+            invokeReadyStateChangeCallback(callback, this, event);
+          };
+        }
+        function wrapReadyStateChangeListener(listener) {
+          return function(event) {
+            if (typeof listener === "function") {
+              invokeReadyStateChangeCallback(listener, this, event);
+              return;
+            }
+            const callback = listener?.handleEvent;
+            if (typeof callback === "function") {
+              invokeReadyStateChangeCallback(callback, listener, event);
+            }
+          };
+        }
+        function invokeReadyStateChangeCallback(callback, receiver, event) {
+          try {
+            callback.call(receiver, event);
+          } catch (error) {
+            reportCallbackError(error);
+          }
+        }
+        function invokeTransformResponse(instance, state) {
+          try {
+            return {
+              ok: true,
+              response: transformResponse({
+                url: instance.responseURL,
+                response: instance.response,
+                xhr: instance,
+                container: state.container
+              })
+            };
+          } catch (error) {
+            util_debug("XHR transformResponse failed; using native response", error);
+            return { ok: false, response: null };
+          }
+        }
+        function reportCallbackError(error) {
+          const reportError = globalThis.reportError;
+          if (typeof reportError === "function") {
+            reportError(error);
+          } else {
+            setTimeout(() => {
+              throw error;
+            }, 0);
+          }
+        }
+        function getEventListenerCapture(options) {
+          if (typeof options === "boolean") return options;
+          return Boolean(options?.capture);
+        }
+        function inspectThenable(value) {
+          if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+            return { isThenable: false, promise: void 0 };
+          }
+          let then;
+          try {
+            then = value.then;
+          } catch (error) {
+            return { isThenable: true, promise: NativePromise.reject(error) };
+          }
+          if (typeof then !== "function") {
+            return { isThenable: false, promise: void 0 };
+          }
+          return {
+            isThenable: true,
+            promise: new NativePromise((resolve, reject) => {
+              then.call(value, resolve, reject);
+            })
+          };
+        }
+        function captureContainerFlag(container, prop) {
+          return {
+            exists: Object.prototype.hasOwnProperty.call(container, prop),
+            value: container[prop]
+          };
+        }
+        function restoreContainerFlag(container, prop, captured) {
+          if (captured.exists) {
+            container[prop] = captured.value;
+          } else {
+            delete container[prop];
+          }
+        }
+        function findPropertyDescriptor(value, prop) {
+          while (value) {
+            const descriptor = Object.getOwnPropertyDescriptor(value, prop);
+            if (descriptor) return descriptor;
+            value = Object.getPrototypeOf(value);
+          }
+          return void 0;
+        }
       }
       var referrerEle = null;
       function setReferrer(referrer) {
@@ -2041,7 +2611,15 @@ function scriptSource(invokeBy) {
           "min_buffer_time": 0,
           "audio": []
         };
-        const upos = uposMap[balh_config.upos_server || "hw"] ?? uposMap.hw;
+        const upos = uposMap.hw;
+        const preserveOriginalAkamaiBackup = (stream, sourceUrl) => {
+          const source = new URL(sourceUrl, document.location.href);
+          if (!source.hostname.includes("akamaized.net")) return;
+          const backupUrls = Array.isArray(stream.backup_url) ? stream.backup_url : [];
+          if (!backupUrls.includes(sourceUrl)) {
+            stream.backup_url = [...backupUrls, sourceUrl];
+          }
+        };
         origin.data.video_info.dash_audio.forEach((audio) => {
           const base_url = audio.base_url;
           const url = new URL(base_url, document.location.href);
@@ -2051,6 +2629,7 @@ function scriptSource(invokeBy) {
           } else if (url.hostname.includes("akamaized.net")) {
             audio.base_url = new URL(url.pathname + search, `https://${upos}`).href;
           }
+          preserveOriginalAkamaiBackup(audio, base_url);
           addNoRefererHost(audio.base_url);
           if (audio.backup_url) {
             audio.backup_url.forEach((u) => {
@@ -2083,6 +2662,7 @@ function scriptSource(invokeBy) {
             } else if (url.hostname.includes("akamaized.net")) {
               stream.dash_video.base_url = new URL(url.pathname + search, `https://${upos}`).href;
             }
+            preserveOriginalAkamaiBackup(stream.dash_video, base_url);
             addNoRefererHost(stream.dash_video.base_url);
             if (stream.dash_video.backup_url) {
               stream.dash_video.backup_url.forEach((u) => {
@@ -3188,6 +3768,3219 @@ function scriptSource(invokeBy) {
 
     </html>`;
 
+      // packages/unblock-area-limit/src/feature/bili/cdn_selection.ts
+      var KNOWN_PCDN_DOMAINS = Object.freeze([
+        "bsccdn.net",
+        "gjfzpt.cn",
+        "jomodns.cn",
+        "kuiniuca.com",
+        "mountaintoys.cn",
+        "nexusedgeio.com",
+        "onethingpcs.com",
+        "pcdn.biliapi.net",
+        "pcdn.xmcdn.com",
+        "pkoplink.com",
+        "saxysec.com",
+        "szbdyd.com",
+        "uhabo.com",
+        "xycdn.com",
+        "ahdohpiechei.com"
+      ]);
+      var DEFAULT_MIN_HEALTH_SAMPLES = 2;
+      var DASH_BASE_KEYS = ["base_url", "baseUrl"];
+      var BACKUP_KEYS = ["backup_url", "backupUrl"];
+      function isCompleteCdnUrl(value) {
+        return parseCompleteUrl(value) !== null;
+      }
+      function classifyCdnUrl(url) {
+        const parsed = parseCompleteUrl(url);
+        if (!parsed) return null;
+        const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+        const firstLabel = hostname.split(".")[0] || "";
+        const riskKinds = [];
+        if (isDomainOrSubdomain(hostname, "mcdn.bilivideo.cn") || isDomainOrSubdomain(hostname, "mcdn.bilivideo.com") || isDomainOrSubdomain(hostname, "mcdn.bilivideo.net")) {
+          riskKinds.push("mcdn-host");
+        }
+        if (parsed.searchParams.getAll("os").some((value) => value.toLowerCase() === "mcdn")) {
+          riskKinds.push("mcdn-query");
+        }
+        if (isIpLiteral(hostname)) {
+          riskKinds.push("ip-literal");
+        }
+        if (parsed.port) {
+          riskKinds.push("non-default-port");
+        }
+        if (isKnownPcdnHostname(hostname)) {
+          riskKinds.push("pcdn-domain");
+        }
+        if (hostname.split(".").some((label) => hasHyphenToken(label, "mirror14b"))) {
+          riskKinds.push("mirror14b");
+        }
+        if (has302HostToken(firstLabel)) {
+          riskKinds.push("host-label-302");
+        }
+        return {
+          url,
+          host: parsed.host.toLowerCase(),
+          hostname,
+          riskKinds
+        };
+      }
+      function collectPlayUrlCdnGroups(playUrl) {
+        return collectMutableGroups(playUrl).map((binding) => binding.group);
+      }
+      function compareHostHealth(left, right, minSamples = DEFAULT_MIN_HEALTH_SAMPLES) {
+        const minimum = normalizeMinSamples(minSamples);
+        const leftHealth = normalizeHealth(left ?? {});
+        const rightHealth = normalizeHealth(right ?? {});
+        const leftSortable = hasSortableSuccessEvidence(leftHealth, minimum);
+        const rightSortable = hasSortableSuccessEvidence(rightHealth, minimum);
+        if (leftSortable !== rightSortable) return leftSortable ? -1 : 1;
+        if (!leftSortable) return 0;
+        return compareOptionalMetric(leftHealth.throughputKbps, rightHealth.throughputKbps, "descending") || compareOptionalMetric(leftHealth.ttfbMs, rightHealth.ttfbMs, "ascending") || compareOptionalMetric(leftHealth.successRate, rightHealth.successRate, "descending");
+      }
+      function selectCdnCandidates(candidates, options) {
+        const ordered = candidates.slice();
+        if (options.mode === "original" || options.mode === "manual" || ordered.length < 2) {
+          return ordered;
+        }
+        const safe = ordered.filter((candidate) => candidate.riskKinds.length === 0);
+        const risky = ordered.filter((candidate) => candidate.riskKinds.length > 0);
+        if (safe.length === 0) return ordered;
+        if (safe.length > 0 && risky.length > 0) {
+          ordered.splice(0, ordered.length, ...safe, ...risky);
+        }
+        if (options.mode !== "auto" || !options.hostHealth) return ordered;
+        const health = createHealthLookup(options.hostHealth);
+        const minSamples = normalizeMinSamples(options.minHealthSamples);
+        stableSortByHealth(ordered, 0, safe.length, health, minSamples);
+        return ordered;
+      }
+      function optimizePlayUrlCdn(playUrl, options) {
+        const bindings = collectMutableGroups(playUrl);
+        const diagnostics = [];
+        const health = options.hostHealth ? createHealthLookup(options.hostHealth) : /* @__PURE__ */ new Map();
+        let changed = false;
+        for (const binding of bindings) {
+          const original = binding.group.candidates;
+          const selected = selectCdnCandidates(original, options);
+          const bypassed = options.mode === "original" || options.mode === "manual";
+          const orderChanged = !sameCandidateOrder(original, selected);
+          const applied = bypassed || !orderChanged ? false : binding.apply(selected.map((candidate) => candidate.url));
+          changed || (changed = applied);
+          let reason = "unchanged";
+          if (bypassed) {
+            reason = "mode-bypass";
+          } else if (orderChanged && applied) {
+            reason = original[0]?.riskKinds.length && !selected[0]?.riskKinds.length ? "risk-demotion" : "health-promotion";
+          } else if (orderChanged) {
+            reason = "skipped-capacity";
+          }
+          diagnostics.push({
+            group: binding.group.key,
+            kind: binding.group.kind,
+            changed: applied,
+            reason,
+            originalHost: original[0]?.host ?? null,
+            selectedHost: selected[0]?.host ?? null,
+            bandwidthBps: binding.group.bandwidthBps ?? null,
+            candidates: original.map((candidate) => {
+              const normalized = normalizeHealth(findHealth(health, candidate) ?? {});
+              const throughputKbps = normalized.throughputKbps;
+              const bitrateKbps = binding.group.bandwidthBps === void 0 ? null : binding.group.bandwidthBps / 1e3;
+              return {
+                host: candidate.host,
+                riskKinds: candidate.riskKinds,
+                throughputKbps,
+                bitrateMargin: throughputKbps !== null && bitrateKbps !== null ? throughputKbps / bitrateKbps : null
+              };
+            })
+          });
+        }
+        return { changed, groups: bindings.length, diagnostics };
+      }
+      function collectMutableGroups(playUrl) {
+        if (!isRecord(playUrl)) return [];
+        const bindings = [];
+        const dash = isRecord(playUrl.dash) ? playUrl.dash : null;
+        if (dash) {
+          collectStreamCollection(bindings, dash.video, "dash.video", "dash-video", DASH_BASE_KEYS);
+          collectStreamCollection(bindings, dash.audio, "dash.audio", "dash-audio", DASH_BASE_KEYS);
+          if (isRecord(dash.dolby)) {
+            collectStreamCollection(bindings, dash.dolby.audio, "dash.dolby.audio", "dash-dolby-audio", DASH_BASE_KEYS);
+          }
+          if (isRecord(dash.flac)) {
+            collectStreamCollection(bindings, dash.flac.audio, "dash.flac.audio", "dash-flac-audio", DASH_BASE_KEYS);
+          }
+        }
+        collectStreamCollection(bindings, playUrl.durl, "durl", "durl", ["url"]);
+        return bindings;
+      }
+      function collectStreamCollection(bindings, value, key, kind, mainKeys) {
+        if (Array.isArray(value)) {
+          value.forEach((stream, index) => {
+            if (!isRecord(stream)) return;
+            const binding = createMutableGroup(stream, `${key}[${index}]`, kind, mainKeys);
+            if (binding) bindings.push(binding);
+          });
+          return;
+        }
+        if (isRecord(value)) {
+          const binding = createMutableGroup(value, key, kind, mainKeys);
+          if (binding) bindings.push(binding);
+        }
+      }
+      function createMutableGroup(stream, key, kind, mainKeys) {
+        const mainSlots = [];
+        for (const field of mainKeys) {
+          if (hasOwn(stream, field) && isCompleteCdnUrl(stream[field])) {
+            mainSlots.push(createPropertyUrlSlot(stream, field));
+          }
+        }
+        const backupSlotGroups = [];
+        for (const field of BACKUP_KEYS) {
+          if (!hasOwn(stream, field)) continue;
+          const slots = [];
+          collectUrlSlots(stream, field, slots);
+          backupSlotGroups.push(slots);
+        }
+        const allSlots = [...mainSlots, ...backupSlotGroups.flat()];
+        const seen = /* @__PURE__ */ new Set();
+        const candidates = allSlots.map((slot) => slot.read()).filter((url) => {
+          if (seen.has(url)) return false;
+          seen.add(url);
+          return true;
+        }).map(classifyCdnUrl).filter((candidate) => candidate !== null);
+        if (candidates.length === 0) return null;
+        const bandwidthBps = kind === "durl" ? void 0 : positiveFinite(stream.bandwidth);
+        return {
+          group: {
+            key,
+            kind,
+            candidates,
+            ...bandwidthBps === void 0 ? {} : { bandwidthBps }
+          },
+          apply(nextUrls) {
+            if (mainSlots.length === 0 || nextUrls.length === 0) return false;
+            return applyCandidateOccurrences(mainSlots, backupSlotGroups, nextUrls);
+          }
+        };
+      }
+      function collectUrlSlots(container, key, slots) {
+        const value = readContainerValue(container, key);
+        if (Array.isArray(value)) {
+          value.forEach((_, index) => collectUrlSlots(value, index, slots));
+        } else if (isCompleteCdnUrl(value)) {
+          slots.push(createPropertyUrlSlot(container, key));
+        } else if (isRecord(value) && hasOwn(value, "url") && isCompleteCdnUrl(value.url)) {
+          slots.push(createPropertyUrlSlot(value, "url"));
+        }
+      }
+      function createPropertyUrlSlot(container, key) {
+        return {
+          read: () => readContainerValue(container, key),
+          write(url) {
+            if (readContainerValue(container, key) === url) return false;
+            writeContainerValue(container, key, url);
+            return true;
+          }
+        };
+      }
+      function readContainerValue(container, key) {
+        return Array.isArray(container) ? container[typeof key === "number" ? key : -1] : container[typeof key === "string" ? key : ""];
+      }
+      function writeContainerValue(container, key, value) {
+        if (Array.isArray(container)) {
+          if (typeof key === "number") container[key] = value;
+        } else if (typeof key === "string") {
+          container[key] = value;
+        }
+      }
+      function applyCandidateOccurrences(mainSlots, backupSlotGroups, uniqueOrder) {
+        if (mainSlots.length === 0 || uniqueOrder.length === 0) return false;
+        if (new Set(uniqueOrder).size !== uniqueOrder.length) return false;
+        if (backupSlotGroups.length === 0) return false;
+        const primary = uniqueOrder[0];
+        const plans = [];
+        for (const backupSlots of backupSlotGroups) {
+          let canonicalPlan = null;
+          for (const mainSlot of mainSlots) {
+            const plan = planAliasOccurrences(mainSlot, backupSlots, uniqueOrder);
+            if (!plan) return false;
+            if (canonicalPlan && !sameStringArray(canonicalPlan, plan)) return false;
+            canonicalPlan = plan;
+          }
+          if (!canonicalPlan) return false;
+          plans.push(canonicalPlan);
+        }
+        let changed = false;
+        mainSlots.forEach((slot) => {
+          changed = slot.write(primary) || changed;
+        });
+        backupSlotGroups.forEach((slots, groupIndex) => {
+          slots.forEach((slot, slotIndex) => {
+            changed = slot.write(plans[groupIndex][slotIndex]) || changed;
+          });
+        });
+        return changed;
+      }
+      function planAliasOccurrences(mainSlot, backupSlots, uniqueOrder) {
+        const occurrenceCounts = /* @__PURE__ */ new Map();
+        for (const slot of [mainSlot, ...backupSlots]) {
+          const url = slot.read();
+          occurrenceCounts.set(url, (occurrenceCounts.get(url) ?? 0) + 1);
+        }
+        if (uniqueOrder.length !== occurrenceCounts.size || uniqueOrder.some((url) => !occurrenceCounts.has(url))) {
+          return null;
+        }
+        const primary = uniqueOrder[0];
+        const primaryCount = occurrenceCounts.get(primary) ?? 0;
+        if (primaryCount < 1) return null;
+        occurrenceCounts.set(primary, primaryCount - 1);
+        const plan = [];
+        for (const url of uniqueOrder) {
+          const count = occurrenceCounts.get(url) ?? 0;
+          for (let occurrence = 0; occurrence < count; occurrence++) plan.push(url);
+        }
+        return plan.length === backupSlots.length ? plan : null;
+      }
+      function sameStringArray(left, right) {
+        return left.length === right.length && left.every((value, index) => value === right[index]);
+      }
+      function stableSortByHealth(candidates, start, end, health, minSamples) {
+        if (end - start < 2) return;
+        const sorted = candidates.slice(start, end).map((candidate, index) => ({ candidate, index })).sort((left, right) => compareHostHealth(
+          findHealth(health, left.candidate),
+          findHealth(health, right.candidate),
+          minSamples
+        ) || left.index - right.index).map((entry) => entry.candidate);
+        candidates.splice(start, end - start, ...sorted);
+      }
+      function createHealthLookup(collection) {
+        const lookup = /* @__PURE__ */ new Map();
+        const add = (key, health) => {
+          const normalized = normalizeHealthKey(key);
+          if (normalized) lookup.set(normalized, health);
+        };
+        if (Array.isArray(collection)) {
+          const healthList = collection;
+          healthList.forEach((health) => add(health.host, health));
+        } else if (collection instanceof Map) {
+          collection.forEach((health, host) => add(host, health));
+        } else {
+          const record = collection;
+          Object.keys(record).forEach((host) => add(host, record[host]));
+        }
+        return lookup;
+      }
+      function findHealth(lookup, candidate) {
+        return lookup.get(normalizeHealthKey(candidate.host) || "") ?? lookup.get(normalizeHealthKey(candidate.hostname) || "");
+      }
+      function normalizeHealthKey(value) {
+        if (!value) return null;
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        const direct = parseCompleteUrl(trimmed);
+        if (direct) return direct.host.toLowerCase();
+        try {
+          return new URL(`http://${trimmed}`).host.toLowerCase();
+        } catch (_) {
+          return trimmed.toLowerCase().replace(/\.$/, "");
+        }
+      }
+      function normalizeHealth(health) {
+        const successes = nonNegativeFinite(health.successes);
+        const failures = nonNegativeFinite(health.failures);
+        const observed = (successes ?? 0) + (failures ?? 0);
+        const declaredSamples = nonNegativeFinite(health.samples);
+        const samples = declaredSamples ?? observed;
+        const denominator = Math.max(samples, observed);
+        return {
+          samples,
+          successes,
+          failures,
+          successRate: successes !== null && denominator > 0 ? successes / denominator : null,
+          throughputKbps: nonNegativeFinite(health.throughputKbps),
+          ttfbMs: nonNegativeFinite(health.ttfbMs)
+        };
+      }
+      function hasSortableSuccessEvidence(health, minSamples) {
+        return health.samples >= minSamples && health.successes !== null && health.successes >= minSamples;
+      }
+      function compareOptionalMetric(left, right, direction) {
+        if (left === null || right === null) {
+          if (left === right) return 0;
+          return left === null ? 1 : -1;
+        }
+        return direction === "ascending" ? left - right : right - left;
+      }
+      function normalizeMinSamples(value) {
+        return Number.isFinite(value) && value !== void 0 ? Math.max(0, Math.floor(value)) : DEFAULT_MIN_HEALTH_SAMPLES;
+      }
+      function nonNegativeFinite(value) {
+        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+      }
+      function positiveFinite(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return void 0;
+        const integer = Math.floor(value);
+        return integer > 0 ? integer : void 0;
+      }
+      function parseCompleteUrl(value) {
+        if (typeof value !== "string" || !value) return null;
+        try {
+          const protocolRelative = value.startsWith("//") && !value.startsWith("///");
+          const parsed = new URL(protocolRelative ? `https:${value}` : value);
+          return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname ? parsed : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      function isKnownPcdnHostname(hostname) {
+        return KNOWN_PCDN_DOMAINS.some((domain) => isDomainOrSubdomain(hostname, domain)) || isDomainOrSubdomain(hostname, "biliapi.net") && hostname.split(".").some((label) => hasHyphenToken(label, "pcdn"));
+      }
+      function hasHyphenToken(label, token) {
+        return label.split("-").includes(token);
+      }
+      function has302HostToken(firstLabel) {
+        return firstLabel.split("-").some((token) => token === "302" || /^[a-z]+302$/.test(token));
+      }
+      function isDomainOrSubdomain(hostname, domain) {
+        return hostname === domain || hostname.endsWith(`.${domain}`);
+      }
+      function isIpv4Hostname(hostname) {
+        const parts = hostname.split(".");
+        return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+      }
+      function isIpLiteral(hostname) {
+        return isIpv4Hostname(hostname) || hostname.startsWith("[") && hostname.endsWith("]") || hostname.includes(":");
+      }
+      function sameCandidateOrder(left, right) {
+        return left.length === right.length && left.every((candidate, index) => candidate.url === right[index]?.url);
+      }
+      function isRecord(value) {
+        return typeof value === "object" && value !== null;
+      }
+      function hasOwn(value, key) {
+        return Object.prototype.hasOwnProperty.call(value, key);
+      }
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_media_request_routing.ts
+      function defaultLocationProtocol() {
+        try {
+          return typeof location === "undefined" ? "" : location.protocol;
+        } catch {
+          return "";
+        }
+      }
+      function createCdnMediaRequestRouter(overrides = {}) {
+        const getLocationProtocol = overrides.getLocationProtocol ?? defaultLocationProtocol;
+        let enabled = false;
+        let contextEpoch = 0;
+        let generation = 0;
+        let canonicalRegistry = canonicalizeSnapshots([]);
+        let groups = [];
+        let groupsById = /* @__PURE__ */ new Map();
+        let reverseIndex = /* @__PURE__ */ new Map();
+        function publishGroups(candidateGroups, nextEnabled) {
+          const snapshots = copyGroupsOrEmpty(candidateGroups);
+          const nextCanonical = canonicalizeSnapshots(snapshots);
+          const registryChanged = nextCanonical !== canonicalRegistry;
+          const enabledChanged = enabled !== nextEnabled;
+          if (registryChanged) {
+            const nextGeneration = generation + 1;
+            const nextGroups = snapshots.map((snapshot, index) => createGroupRuntime(
+              snapshot,
+              index + 1
+            ));
+            const nextGroupsById = new Map(nextGroups.map((group) => [group.groupId, group]));
+            const nextReverseIndex = createReverseIndex(nextGroups, readLocationProtocol());
+            generation = nextGeneration;
+            canonicalRegistry = nextCanonical;
+            groups = nextGroups;
+            groupsById = nextGroupsById;
+            reverseIndex = nextReverseIndex;
+          } else {
+            reverseIndex = createReverseIndex(groups, readLocationProtocol());
+          }
+          enabled = nextEnabled;
+          if (enabledChanged && !registryChanged) {
+            for (const group of groups) resetGroupRuntime(group);
+          }
+          return { registryChanged, enabledChanged, status: getStatus() };
+        }
+        function beginContext() {
+          contextEpoch += 1;
+          for (const group of groups) resetGroupRuntime(group);
+          return getStatus();
+        }
+        function setEnabled(nextEnabled) {
+          if (enabled === nextEnabled) return getStatus();
+          enabled = nextEnabled;
+          for (const group of groups) resetGroupRuntime(group);
+          return getStatus();
+        }
+        function prepareExactUrl(url, method = "GET") {
+          const originalDecision = { url, routed: false };
+          if (!enabled || !isEffectiveGet(method)) return settledPreparation(originalDecision);
+          const matches = reverseIndex.get(url);
+          if (!matches || matches.length !== 1) return settledPreparation(originalDecision);
+          const match = matches[0];
+          const group = groupsById.get(match.groupId);
+          if (!group || !group.candidates[match.candidateIndex]) {
+            return settledPreparation(originalDecision);
+          }
+          const routeCandidateIndex = group.pendingCandidateIndex ?? group.overrideCandidateIndex;
+          const targetIndex = routeCandidateIndex ?? match.candidateIndex;
+          const target2 = group.candidates[targetIndex];
+          if (!target2) return settledPreparation(originalDecision);
+          const targetUrl = routeCandidateIndex === null ? url : target2.url;
+          const decision = {
+            url: targetUrl,
+            routed: targetUrl !== url
+          };
+          const preparedContextEpoch = contextEpoch;
+          const preparedGeneration = generation;
+          const preparedRouteRevision = group.routeRevision;
+          let finished = false;
+          let committedDecision = decision;
+          return {
+            eligible: true,
+            decision,
+            commit() {
+              if (finished) return committedDecision;
+              finished = true;
+              if (!enabled || contextEpoch !== preparedContextEpoch || generation !== preparedGeneration || groupsById.get(group.groupId) !== group || group.routeRevision !== preparedRouteRevision) return committedDecision;
+              const currentMatches = reverseIndex.get(url);
+              if (!currentMatches || currentMatches.length !== 1 || currentMatches[0].groupId !== group.groupId || currentMatches[0].candidateIndex !== match.candidateIndex || (group.pendingCandidateIndex ?? group.overrideCandidateIndex ?? match.candidateIndex) !== targetIndex) {
+                return committedDecision;
+              }
+              observeCommittedRoute(group, match.candidateIndex, targetIndex);
+              committedDecision = {
+                ...decision,
+                activation: activationFor(group)
+              };
+              return committedDecision;
+            },
+            discard() {
+              finished = true;
+            }
+          };
+        }
+        function routeExactUrl(url, method = "GET") {
+          return prepareExactUrl(url, method).commit();
+        }
+        function advanceRoute(activation) {
+          const group = validateActivation(activation);
+          if (!group) return { accepted: false, advanced: false, exhausted: false };
+          if (group.pendingCandidateIndex !== null) {
+            return {
+              accepted: true,
+              advanced: false,
+              exhausted: false,
+              activation: activationFor(group)
+            };
+          }
+          const nextCandidateIndex = group.fallbackOrder.find((index) => !group.attempted.has(index));
+          group.routeRevision += 1;
+          if (nextCandidateIndex === void 0) {
+            group.exhausted = true;
+            return {
+              accepted: true,
+              advanced: false,
+              exhausted: true,
+              activation: activationFor(group)
+            };
+          }
+          group.pendingCandidateIndex = nextCandidateIndex;
+          group.exhausted = false;
+          return {
+            accepted: true,
+            advanced: true,
+            exhausted: false,
+            activation: activationFor(group)
+          };
+        }
+        function resetAfterStableRecovery(activation) {
+          const group = validateActivation(activation);
+          if (!group || group.candidateIndex === null) return { accepted: false };
+          group.pendingCandidateIndex = null;
+          group.attempted = /* @__PURE__ */ new Set([group.candidateIndex]);
+          group.exhausted = false;
+          group.routeRevision += 1;
+          return { accepted: true, activation: activationFor(group) };
+        }
+        function getStatus() {
+          const groupStatuses = groups.map((group) => ({
+            groupId: group.groupId,
+            key: group.key,
+            kind: group.kind,
+            generation,
+            candidateCount: group.candidates.length,
+            active: group.active,
+            candidateIndex: group.candidateIndex,
+            pendingCandidateIndex: group.pendingCandidateIndex,
+            attemptedCount: group.attempted.size,
+            routeRevision: group.routeRevision,
+            exhausted: group.exhausted
+          }));
+          return {
+            enabled,
+            contextEpoch,
+            generation,
+            groupCount: groupStatuses.length,
+            activeGroupCount: groupStatuses.filter((group) => group.active).length,
+            groups: groupStatuses
+          };
+        }
+        function getActiveActivations() {
+          return groups.filter((group) => group.active && group.candidateIndex !== null).map(activationFor);
+        }
+        function getActiveActivation(groupId) {
+          const group = groupsById.get(groupId);
+          return group?.active && group.candidateIndex !== null ? activationFor(group) : null;
+        }
+        function validateActivation(activation) {
+          if (!enabled || activation.contextEpoch !== contextEpoch || activation.generation !== generation) {
+            return null;
+          }
+          const group = groupsById.get(activation.groupId);
+          if (!group || !group.active || group.candidateIndex === null) return null;
+          return activation.routeRevision === group.routeRevision && activation.candidateIndex === group.candidateIndex ? group : null;
+        }
+        function activationFor(group) {
+          if (group.candidateIndex === null) {
+            throw new Error("Cannot create an activation for an unseen CDN group.");
+          }
+          return {
+            contextEpoch,
+            generation,
+            groupId: group.groupId,
+            routeRevision: group.routeRevision,
+            candidateIndex: group.candidateIndex
+          };
+        }
+        function readLocationProtocol() {
+          try {
+            const protocol = getLocationProtocol();
+            return typeof protocol === "string" && /^[A-Za-z][A-Za-z\d+.-]*:$/.test(protocol) ? protocol : null;
+          } catch {
+            return null;
+          }
+        }
+        return {
+          publishGroups,
+          setEnabled,
+          beginContext,
+          prepareExactUrl,
+          routeExactUrl,
+          advanceRoute,
+          resetAfterStableRecovery,
+          getStatus,
+          getActiveActivations,
+          getActiveActivation
+        };
+      }
+      function settledPreparation(decision) {
+        return {
+          eligible: false,
+          decision,
+          commit: () => decision,
+          discard() {
+          }
+        };
+      }
+      function observeCommittedRoute(group, matchedCandidateIndex, targetCandidateIndex) {
+        if (!group.active) {
+          group.active = true;
+          group.candidateIndex = matchedCandidateIndex;
+          group.overrideCandidateIndex = null;
+          group.pendingCandidateIndex = null;
+          group.attempted.add(matchedCandidateIndex);
+          group.exhausted = false;
+        } else if (group.pendingCandidateIndex !== null) {
+          group.overrideCandidateIndex = targetCandidateIndex;
+          group.pendingCandidateIndex = null;
+          group.exhausted = false;
+        } else if (group.overrideCandidateIndex === null && group.candidateIndex !== matchedCandidateIndex) {
+          group.candidateIndex = matchedCandidateIndex;
+          group.attempted.add(matchedCandidateIndex);
+          group.routeRevision += 1;
+          group.exhausted = false;
+        }
+        group.attempted.add(targetCandidateIndex);
+        group.candidateIndex = targetCandidateIndex;
+      }
+      function copyGroupsOrEmpty(candidateGroups) {
+        try {
+          if (!Array.isArray(candidateGroups)) return [];
+          return candidateGroups.map((group) => {
+            if (!group || typeof group !== "object" || typeof group.key !== "string" || typeof group.kind !== "string" || !Array.isArray(group.candidates)) {
+              throw new TypeError("Invalid CDN candidate group.");
+            }
+            const candidates = group.candidates.map((candidate) => {
+              if (!candidate || typeof candidate !== "object" || typeof candidate.url !== "string") {
+                throw new TypeError("Invalid CDN candidate.");
+              }
+              return {
+                url: candidate.url,
+                risky: Array.isArray(candidate.riskKinds) && candidate.riskKinds.length > 0
+              };
+            });
+            if (candidates.length === 0) throw new TypeError("Empty CDN candidate group.");
+            return { key: group.key, kind: group.kind, candidates };
+          });
+        } catch {
+          return [];
+        }
+      }
+      function canonicalizeSnapshots(groups) {
+        return JSON.stringify(groups.map((group) => [
+          group.kind,
+          group.key,
+          group.candidates.map((candidate) => candidate.url)
+        ]));
+      }
+      function createGroupRuntime(snapshot, groupId) {
+        const originalOrder = snapshot.candidates.map((_, index) => index);
+        const ordinary = originalOrder.filter((index) => !snapshot.candidates[index].risky);
+        const risky = originalOrder.filter((index) => snapshot.candidates[index].risky);
+        const fallbackOrder = ordinary.length === 0 ? originalOrder : [...ordinary, ...risky];
+        return {
+          groupId,
+          key: snapshot.key,
+          kind: snapshot.kind,
+          candidates: snapshot.candidates,
+          fallbackOrder,
+          attempted: /* @__PURE__ */ new Set(),
+          active: false,
+          candidateIndex: null,
+          overrideCandidateIndex: null,
+          pendingCandidateIndex: null,
+          routeRevision: 0,
+          exhausted: false
+        };
+      }
+      function createReverseIndex(groups, protocol) {
+        const result = /* @__PURE__ */ new Map();
+        for (const group of groups) {
+          group.candidates.forEach((candidate, candidateIndex) => {
+            addReverseMatch(result, candidate.url, group.groupId, candidateIndex);
+            if (protocol && candidate.url.startsWith("//")) {
+              addReverseMatch(result, `${protocol}${candidate.url}`, group.groupId, candidateIndex);
+            }
+          });
+        }
+        return result;
+      }
+      function addReverseMatch(index, exactUrl, groupId, candidateIndex) {
+        const matches = index.get(exactUrl);
+        const match = { groupId, candidateIndex };
+        if (matches) matches.push(match);
+        else index.set(exactUrl, [match]);
+      }
+      function resetGroupRuntime(group) {
+        group.attempted = /* @__PURE__ */ new Set();
+        group.active = false;
+        group.candidateIndex = null;
+        group.overrideCandidateIndex = null;
+        group.pendingCandidateIndex = null;
+        group.routeRevision += 1;
+        group.exhausted = false;
+      }
+      function isEffectiveGet(method) {
+        return typeof method === "string" && method.toUpperCase() === "GET";
+      }
+      var defaultCdnMediaRequestRouter = createCdnMediaRequestRouter();
+      var publishCdnMediaRequestGroups = defaultCdnMediaRequestRouter.publishGroups;
+      var beginCdnMediaRequestContext = defaultCdnMediaRequestRouter.beginContext;
+      var routeCdnMediaRequestUrl = defaultCdnMediaRequestRouter.routeExactUrl;
+      var getCdnMediaRequestRoutingStatus = defaultCdnMediaRequestRouter.getStatus;
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_recovery.ts
+      var DEFAULT_CDN_RECOVERY_TIMING = Object.freeze({
+        lowBufferThresholdSeconds: 0.5,
+        progressRestartSeconds: 0.25,
+        confirmationGraceMs: 3e3,
+        minimumSwitchCooldownMs: 15e3,
+        retryBackoffBaseMs: 5e3,
+        retryBackoffCapMs: 6e4,
+        stableBufferThresholdSeconds: 3,
+        stablePlaybackResetMs: 5e3,
+        activeSampleIntervalMs: 500
+      });
+      function createCdnRecoveryCoordinator(overrides = {}) {
+        const router = overrides.router ?? createCdnMediaRequestRouter();
+        const isEnabled = overrides.isEnabled ?? (() => true);
+        const now = overrides.now ?? (() => Date.now());
+        const scheduleTimeout = overrides.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+        const cancelTimeout = overrides.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
+        const timing = normalizeTiming(overrides.timing);
+        let groupsById = /* @__PURE__ */ new Map();
+        function publishGroups(groups, enabled) {
+          const publication = router.publishGroups(groups, enabled && readEnabledGuard(isEnabled));
+          if (publication.registryChanged || publication.enabledChanged) resetAllStates();
+          synchronizeWithRouter();
+          return getStatus();
+        }
+        function setEnabled(enabled) {
+          const currentEnabled = router.getStatus().enabled;
+          const nextEnabled = enabled && readEnabledGuard(isEnabled);
+          router.setEnabled(nextEnabled);
+          if (currentEnabled !== nextEnabled) resetAllStates();
+          synchronizeWithRouter();
+          return getStatus();
+        }
+        function beginContext() {
+          router.beginContext();
+          resetAllStates();
+          synchronizeWithRouter();
+          return getStatus();
+        }
+        function prepareExactUrl(url, method = "GET") {
+          let prepared;
+          try {
+            prepared = router.prepareExactUrl(url, method);
+          } catch {
+            return settledRecoveryPreparation({ url, routed: false });
+          }
+          return {
+            eligible: prepared.eligible,
+            decision: prepared.decision,
+            commit() {
+              let decision;
+              try {
+                decision = prepared.commit();
+              } catch {
+                decision = { url, routed: false };
+              }
+              synchronizeWithRouter();
+              return decision;
+            },
+            discard() {
+              try {
+                prepared.discard();
+              } catch {
+              }
+            }
+          };
+        }
+        function routeExactUrl(url, method = "GET") {
+          return prepareExactUrl(url, method).commit();
+        }
+        function samplePlayback(signals) {
+          synchronizeWithRouter();
+          const sampledAt = safeNow(now);
+          for (const group of groupsById.values()) {
+            if (!group.activation || group.state === "disabled" || group.state === "unseen") continue;
+            if (signals) processSample(group, signals, sampledAt);
+            else processUnavailableSample(group, sampledAt);
+          }
+          return getStatus();
+        }
+        function processUnavailableSample(group, sampledAt) {
+          group.latestSignals = null;
+          group.latestSampleAt = sampledAt;
+          group.lastProcessedFingerprint = "unavailable";
+          group.lastProcessedRouteRevision = group.activation?.routeRevision ?? null;
+          group.lastProcessedCandidateIndex = group.activation?.candidateIndex ?? null;
+          clearStableWindow(group);
+          if (group.state !== "confirming") return;
+          cancelConfirmation(group);
+          group.state = "monitoring";
+        }
+        function processSample(group, signals, sampledAt) {
+          const fingerprint = sampleFingerprint(signals);
+          if (group.latestSampleAt === sampledAt && group.lastProcessedFingerprint === fingerprint && group.lastProcessedRouteRevision === group.activation?.routeRevision && group.lastProcessedCandidateIndex === group.activation?.candidateIndex) return;
+          group.latestSignals = copySignals(signals);
+          group.latestSampleAt = sampledAt;
+          group.lastProcessedFingerprint = fingerprint;
+          group.lastProcessedRouteRevision = group.activation?.routeRevision ?? null;
+          group.lastProcessedCandidateIndex = group.activation?.candidateIndex ?? null;
+          if (group.state === "waiting-retry" || group.state === "exhausted") {
+            if (processStableRecovery(group, signals, sampledAt)) return;
+            if (group.state === "exhausted") return;
+            if (group.awaitingRouteCommit) return;
+            if (sampledAt < group.retryAt) return;
+            if (isEligibleLowBuffer(signals, timing)) startConfirmation(group, signals, sampledAt);
+            else group.state = "monitoring";
+            return;
+          }
+          clearStableWindow(group);
+          if (group.state === "monitoring") {
+            if (sampledAt >= group.retryAt && isEligibleLowBuffer(signals, timing)) {
+              startConfirmation(group, signals, sampledAt);
+            }
+            return;
+          }
+          if (group.state !== "confirming") return;
+          if (!isEligibleLowBuffer(signals, timing)) {
+            cancelConfirmation(group);
+            group.state = "monitoring";
+            return;
+          }
+          const anchor = group.confirmationAnchorSeconds;
+          const currentTime = finiteNumber(signals.currentTimeSeconds);
+          if (anchor === null || currentTime === null || currentTime < anchor) {
+            cancelConfirmation(group);
+            group.state = "monitoring";
+            return;
+          }
+          if (currentTime - anchor >= timing.progressRestartSeconds) {
+            startConfirmation(group, signals, sampledAt);
+          }
+        }
+        function startConfirmation(group, signals, startedAt) {
+          invalidateGraceTimer(group);
+          group.state = "confirming";
+          group.confirmationAnchorSeconds = signals.currentTimeSeconds;
+          group.confirmationDueAt = startedAt + timing.confirmationGraceMs;
+          const token = {
+            contextEpoch: group.contextEpoch,
+            generation: group.generation,
+            groupId: group.groupId,
+            timerRevision: group.timerRevision
+          };
+          scheduleGraceTimer(group, token, timing.confirmationGraceMs);
+        }
+        function handleGraceTimer(token) {
+          const group = groupsById.get(token.groupId);
+          if (!group || group.contextEpoch !== token.contextEpoch || group.generation !== token.generation || group.timerRevision !== token.timerRevision || group.state !== "confirming") return;
+          if (!readEnabledGuard(isEnabled)) {
+            setEnabled(false);
+            return;
+          }
+          const firedAt = safeNow(now);
+          const dueAt = group.confirmationDueAt;
+          if (dueAt !== null && firedAt < dueAt) {
+            rescheduleEarlyGraceTimer(group, token, dueAt - firedAt);
+            return;
+          }
+          group.timerHandle = null;
+          group.timerRevision += 1;
+          const activation = group.activation;
+          const currentActivation = router.getActiveActivation(group.groupId);
+          if (!activation || !currentActivation || !sameActivation(activation, currentActivation)) {
+            synchronizeWithRouter();
+            return;
+          }
+          const signals = group.latestSignals;
+          if (!signals || !isEligibleLowBuffer(signals, timing)) {
+            group.confirmationAnchorSeconds = null;
+            group.confirmationDueAt = null;
+            group.state = "monitoring";
+            return;
+          }
+          const currentTime = finiteNumber(signals.currentTimeSeconds);
+          const anchor = group.confirmationAnchorSeconds;
+          if (currentTime === null || anchor === null || currentTime < anchor) {
+            group.confirmationAnchorSeconds = null;
+            group.confirmationDueAt = null;
+            group.state = "monitoring";
+            return;
+          }
+          if (currentTime - anchor >= timing.progressRestartSeconds) {
+            startConfirmation(group, signals, firedAt);
+            return;
+          }
+          group.confirmationAnchorSeconds = null;
+          group.confirmationDueAt = null;
+          const result = router.advanceRoute(activation);
+          if (!result.accepted || !result.activation) {
+            synchronizeWithRouter();
+            return;
+          }
+          group.activation = result.activation;
+          group.lastProcessedRouteRevision = result.activation.routeRevision;
+          clearStableWindow(group);
+          if (result.exhausted) {
+            group.awaitingRouteCommit = false;
+            group.state = "exhausted";
+            return;
+          }
+          group.awaitingRouteCommit = true;
+          if (!result.advanced) {
+            group.state = "waiting-retry";
+            return;
+          }
+          group.switchAttempts += 1;
+          group.retryAt = firedAt + switchCooldownMs(group.switchAttempts, timing);
+          group.retryAtSet = true;
+          group.state = "waiting-retry";
+        }
+        function rescheduleEarlyGraceTimer(group, previousToken, remainingMs) {
+          group.timerHandle = null;
+          group.timerRevision += 1;
+          const token = {
+            ...previousToken,
+            timerRevision: group.timerRevision
+          };
+          scheduleGraceTimer(group, token, remainingMs);
+        }
+        function scheduleGraceTimer(group, token, delayMs) {
+          let timerReturned = false;
+          let firedSynchronously = false;
+          let handle;
+          try {
+            handle = scheduleTimeout(() => {
+              if (!timerReturned) {
+                firedSynchronously = true;
+                return;
+              }
+              handleGraceTimer(token);
+            }, delayMs);
+            timerReturned = true;
+          } catch {
+            abandonGraceTimer(group, token);
+            return;
+          }
+          const currentGroup = groupsById.get(token.groupId);
+          if (firedSynchronously || currentGroup !== group || group.contextEpoch !== token.contextEpoch || group.generation !== token.generation || group.timerRevision !== token.timerRevision || group.state !== "confirming") {
+            abandonGraceTimer(group, token);
+            try {
+              cancelTimeout(handle);
+            } catch {
+            }
+            return;
+          }
+          group.timerHandle = handle;
+        }
+        function abandonGraceTimer(group, token) {
+          if (group.contextEpoch !== token.contextEpoch || group.generation !== token.generation || group.timerRevision !== token.timerRevision) return;
+          group.timerRevision += 1;
+          group.timerHandle = null;
+          group.confirmationAnchorSeconds = null;
+          group.confirmationDueAt = null;
+          if (group.state === "confirming") group.state = "monitoring";
+        }
+        function processStableRecovery(group, signals, sampledAt) {
+          const currentTime = stablePlaybackTime(signals, timing);
+          if (currentTime === null) {
+            clearStableWindow(group);
+            return false;
+          }
+          if (group.stableStartAt === null || group.stableLastAt === null || group.stableLastCurrentTimeSeconds === null) {
+            beginStableWindow(group, sampledAt, currentTime);
+            return false;
+          }
+          if (sampledAt < group.stableLastAt || sampledAt > group.stableLastAt && currentTime <= group.stableLastCurrentTimeSeconds || sampledAt === group.stableLastAt && currentTime < group.stableLastCurrentTimeSeconds) {
+            beginStableWindow(group, sampledAt, currentTime);
+            return false;
+          }
+          if (sampledAt === group.stableLastAt && currentTime === group.stableLastCurrentTimeSeconds) return false;
+          group.stableLastAt = sampledAt;
+          group.stableLastCurrentTimeSeconds = currentTime;
+          if (sampledAt - group.stableStartAt < timing.stablePlaybackResetMs) return false;
+          const activation = group.activation;
+          if (!activation) return false;
+          const reset = router.resetAfterStableRecovery(activation);
+          if (!reset.accepted || !reset.activation) {
+            synchronizeWithRouter();
+            return true;
+          }
+          group.activation = reset.activation;
+          group.awaitingRouteCommit = false;
+          group.switchAttempts = 0;
+          group.lastProcessedRouteRevision = reset.activation.routeRevision;
+          clearStableWindow(group);
+          group.state = group.retryAtSet && sampledAt < group.retryAt ? "waiting-retry" : "monitoring";
+          return true;
+        }
+        function synchronizeWithRouter() {
+          const routingStatus = router.getStatus();
+          const activeActivations = new Map(
+            router.getActiveActivations().map((activation) => [activation.groupId, activation])
+          );
+          const nextGroups = /* @__PURE__ */ new Map();
+          for (const routingGroup of routingStatus.groups) {
+            const activeActivation = activeActivations.get(routingGroup.groupId) ?? null;
+            const pendingCandidateIndex = routingGroup.pendingCandidateIndex;
+            const awaitingRouteCommit = typeof pendingCandidateIndex === "number" && Number.isInteger(pendingCandidateIndex) && pendingCandidateIndex >= 0 && pendingCandidateIndex < routingGroup.candidateCount;
+            const existing = groupsById.get(routingGroup.groupId);
+            const reusable = existing && existing.contextEpoch === routingStatus.contextEpoch && existing.generation === routingStatus.generation;
+            const group = reusable ? existing : createGroupRecoveryRuntime(
+              routingGroup.groupId,
+              routingGroup.key,
+              routingGroup.kind,
+              routingStatus.contextEpoch,
+              routingStatus.generation,
+              routingGroup.candidateCount,
+              routingStatus.enabled,
+              activeActivation,
+              awaitingRouteCommit
+            );
+            if (reusable) {
+              synchronizeGroupActivation(
+                group,
+                routingStatus.enabled,
+                activeActivation,
+                awaitingRouteCommit
+              );
+            }
+            nextGroups.set(group.groupId, group);
+          }
+          for (const [groupId, group] of groupsById) {
+            if (!nextGroups.has(groupId)) invalidateGraceTimer(group);
+          }
+          groupsById = nextGroups;
+        }
+        function synchronizeGroupActivation(group, routingEnabled, activeActivation, awaitingRouteCommit) {
+          if (!routingEnabled) {
+            invalidateGraceTimer(group);
+            disableGroup(group);
+            return;
+          }
+          if (!activeActivation) {
+            if (group.state !== "unseen") {
+              invalidateGraceTimer(group);
+              resetGroupToUnseen(group);
+            }
+            return;
+          }
+          if (!group.activation) {
+            group.activation = activeActivation;
+            group.awaitingRouteCommit = awaitingRouteCommit;
+            group.state = awaitingRouteCommit ? "waiting-retry" : "monitoring";
+            return;
+          }
+          const committedPendingRoute = group.awaitingRouteCommit && !awaitingRouteCommit && group.activation.candidateIndex !== activeActivation.candidateIndex;
+          group.awaitingRouteCommit = awaitingRouteCommit;
+          if (sameActivation(group.activation, activeActivation)) {
+            if (awaitingRouteCommit) group.state = "waiting-retry";
+            return;
+          }
+          invalidateGraceTimer(group);
+          group.activation = activeActivation;
+          const observedAt = readNow(now);
+          const synchronizedAt = observedAt ?? 0;
+          if (committedPendingRoute && group.switchAttempts > 0) {
+            group.routeCommittedAt = observedAt;
+            group.retryAt = Math.max(
+              group.retryAt,
+              synchronizedAt + switchCooldownMs(group.switchAttempts, timing)
+            );
+            group.retryAtSet = true;
+          }
+          clearStableWindow(group);
+          group.state = awaitingRouteCommit || synchronizedAt < group.retryAt ? "waiting-retry" : "monitoring";
+        }
+        function getStatus() {
+          const routingStatus = router.getStatus();
+          const groups = routingStatus.groups.map((routingGroup) => {
+            const recovery = groupsById.get(routingGroup.groupId);
+            return {
+              groupId: routingGroup.groupId,
+              key: routingGroup.key,
+              kind: routingGroup.kind,
+              generation: routingGroup.generation,
+              candidateCount: routingGroup.candidateCount,
+              candidateIndex: routingGroup.candidateIndex,
+              pendingCandidateIndex: routingGroup.pendingCandidateIndex,
+              attemptedCount: routingGroup.attemptedCount,
+              routeRevision: routingGroup.routeRevision,
+              state: recovery?.state ?? (routingStatus.enabled ? "unseen" : "disabled"),
+              switchAttempts: recovery?.switchAttempts ?? 0,
+              routeCommittedAt: recovery?.routeCommittedAt ?? null,
+              retryAt: recovery?.retryAtSet ? recovery.retryAt : null,
+              timerPending: recovery?.timerHandle !== null && recovery?.timerHandle !== void 0
+            };
+          });
+          return {
+            enabled: routingStatus.enabled,
+            contextEpoch: routingStatus.contextEpoch,
+            generation: routingStatus.generation,
+            groupCount: groups.length,
+            activeGroupCount: groups.filter((group) => group.state !== "disabled" && group.state !== "unseen").length,
+            groups
+          };
+        }
+        function getActiveStates() {
+          return getStatus().groups.filter((group) => group.state !== "disabled" && group.state !== "unseen");
+        }
+        function resetAllStates() {
+          for (const group of groupsById.values()) invalidateGraceTimer(group);
+          groupsById = /* @__PURE__ */ new Map();
+        }
+        function invalidateGraceTimer(group) {
+          const handle = group.timerHandle;
+          group.timerHandle = null;
+          group.timerRevision += 1;
+          group.confirmationAnchorSeconds = null;
+          group.confirmationDueAt = null;
+          if (handle === null) return;
+          try {
+            cancelTimeout(handle);
+          } catch {
+          }
+        }
+        function cancelConfirmation(group) {
+          invalidateGraceTimer(group);
+          group.confirmationAnchorSeconds = null;
+          group.confirmationDueAt = null;
+        }
+        return {
+          publishGroups,
+          setEnabled,
+          beginContext,
+          prepareExactUrl,
+          routeExactUrl,
+          samplePlayback,
+          getStatus,
+          getActiveStates
+        };
+      }
+      function settledRecoveryPreparation(decision) {
+        return {
+          eligible: false,
+          decision,
+          commit: () => decision,
+          discard() {
+          }
+        };
+      }
+      function createGroupRecoveryRuntime(groupId, key, kind, contextEpoch, generation, candidateCount, enabled, activation, awaitingRouteCommit) {
+        return {
+          groupId,
+          key,
+          kind,
+          contextEpoch,
+          generation,
+          candidateCount,
+          state: !enabled ? "disabled" : activation ? awaitingRouteCommit ? "waiting-retry" : "monitoring" : "unseen",
+          activation,
+          awaitingRouteCommit,
+          switchAttempts: 0,
+          routeCommittedAt: null,
+          retryAt: 0,
+          retryAtSet: false,
+          timerRevision: 0,
+          timerHandle: null,
+          confirmationAnchorSeconds: null,
+          confirmationDueAt: null,
+          latestSignals: null,
+          latestSampleAt: null,
+          lastProcessedFingerprint: null,
+          lastProcessedRouteRevision: activation?.routeRevision ?? null,
+          lastProcessedCandidateIndex: activation?.candidateIndex ?? null,
+          stableStartAt: null,
+          stableLastAt: null,
+          stableLastCurrentTimeSeconds: null
+        };
+      }
+      function disableGroup(group) {
+        resetGroupToUnseen(group);
+        group.state = "disabled";
+      }
+      function resetGroupToUnseen(group) {
+        group.activation = null;
+        group.awaitingRouteCommit = false;
+        group.state = "unseen";
+        group.switchAttempts = 0;
+        group.routeCommittedAt = null;
+        group.retryAt = 0;
+        group.retryAtSet = false;
+        group.latestSignals = null;
+        group.latestSampleAt = null;
+        group.lastProcessedFingerprint = null;
+        group.lastProcessedRouteRevision = null;
+        group.lastProcessedCandidateIndex = null;
+        clearStableWindow(group);
+      }
+      function beginStableWindow(group, sampledAt, currentTime) {
+        group.stableStartAt = sampledAt;
+        group.stableLastAt = sampledAt;
+        group.stableLastCurrentTimeSeconds = currentTime;
+      }
+      function clearStableWindow(group) {
+        group.stableStartAt = null;
+        group.stableLastAt = null;
+        group.stableLastCurrentTimeSeconds = null;
+      }
+      function isEligibleLowBuffer(signals, timing) {
+        const currentTime = finiteNumber(signals.currentTimeSeconds);
+        const bufferedAhead = finiteNumber(signals.bufferedAheadSeconds);
+        if (currentTime === null || bufferedAhead === null || invalidDuration(signals.durationSeconds)) return false;
+        return signals.visible && !signals.paused && !signals.seeking && !signals.ended && !isNearEnd(currentTime, signals.durationSeconds) && bufferedAhead <= timing.lowBufferThresholdSeconds;
+      }
+      function stablePlaybackTime(signals, timing) {
+        const currentTime = finiteNumber(signals.currentTimeSeconds);
+        const bufferedAhead = finiteNumber(signals.bufferedAheadSeconds);
+        if (currentTime === null || bufferedAhead === null || invalidDuration(signals.durationSeconds)) return null;
+        if (!signals.visible || signals.paused || signals.seeking || signals.ended || isNearEnd(currentTime, signals.durationSeconds) || bufferedAhead < timing.stableBufferThresholdSeconds) return null;
+        return currentTime;
+      }
+      function invalidDuration(durationSeconds) {
+        return durationSeconds !== null && finiteNumber(durationSeconds) === null;
+      }
+      function isNearEnd(currentTimeSeconds, durationSeconds) {
+        return durationSeconds !== null && durationSeconds - currentTimeSeconds <= 0.5;
+      }
+      function switchCooldownMs(attempt, timing) {
+        const exponent = Math.max(0, attempt - 1);
+        const backoff = Math.min(
+          timing.retryBackoffBaseMs * 2 ** exponent,
+          timing.retryBackoffCapMs
+        );
+        return Math.max(timing.minimumSwitchCooldownMs, backoff);
+      }
+      function normalizeTiming(overrides) {
+        return {
+          lowBufferThresholdSeconds: nonNegativeFinite2(
+            overrides?.lowBufferThresholdSeconds,
+            DEFAULT_CDN_RECOVERY_TIMING.lowBufferThresholdSeconds
+          ),
+          progressRestartSeconds: positiveFinite2(
+            overrides?.progressRestartSeconds,
+            DEFAULT_CDN_RECOVERY_TIMING.progressRestartSeconds
+          ),
+          confirmationGraceMs: nonNegativeFinite2(
+            overrides?.confirmationGraceMs,
+            DEFAULT_CDN_RECOVERY_TIMING.confirmationGraceMs
+          ),
+          minimumSwitchCooldownMs: nonNegativeFinite2(
+            overrides?.minimumSwitchCooldownMs,
+            DEFAULT_CDN_RECOVERY_TIMING.minimumSwitchCooldownMs
+          ),
+          retryBackoffBaseMs: nonNegativeFinite2(
+            overrides?.retryBackoffBaseMs,
+            DEFAULT_CDN_RECOVERY_TIMING.retryBackoffBaseMs
+          ),
+          retryBackoffCapMs: nonNegativeFinite2(
+            overrides?.retryBackoffCapMs,
+            DEFAULT_CDN_RECOVERY_TIMING.retryBackoffCapMs
+          ),
+          stableBufferThresholdSeconds: nonNegativeFinite2(
+            overrides?.stableBufferThresholdSeconds,
+            DEFAULT_CDN_RECOVERY_TIMING.stableBufferThresholdSeconds
+          ),
+          stablePlaybackResetMs: nonNegativeFinite2(
+            overrides?.stablePlaybackResetMs,
+            DEFAULT_CDN_RECOVERY_TIMING.stablePlaybackResetMs
+          ),
+          activeSampleIntervalMs: positiveFinite2(
+            overrides?.activeSampleIntervalMs,
+            DEFAULT_CDN_RECOVERY_TIMING.activeSampleIntervalMs
+          )
+        };
+      }
+      function positiveFinite2(value, fallback) {
+        return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+      }
+      function nonNegativeFinite2(value, fallback) {
+        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+      }
+      function finiteNumber(value) {
+        return typeof value === "number" && Number.isFinite(value) ? value : null;
+      }
+      function safeNow(now) {
+        return readNow(now) ?? 0;
+      }
+      function readNow(now) {
+        try {
+          const value = now();
+          return Number.isFinite(value) && value >= 0 ? value : null;
+        } catch {
+          return null;
+        }
+      }
+      function readEnabledGuard(isEnabled) {
+        try {
+          return isEnabled() === true;
+        } catch {
+          return false;
+        }
+      }
+      function copySignals(signals) {
+        return {
+          visible: signals.visible,
+          paused: signals.paused,
+          seeking: signals.seeking,
+          ended: signals.ended,
+          currentTimeSeconds: signals.currentTimeSeconds,
+          durationSeconds: signals.durationSeconds,
+          bufferedAheadSeconds: signals.bufferedAheadSeconds
+        };
+      }
+      function sampleFingerprint(signals) {
+        return [
+          signals.visible,
+          signals.paused,
+          signals.seeking,
+          signals.ended,
+          signals.currentTimeSeconds,
+          signals.durationSeconds,
+          signals.bufferedAheadSeconds
+        ].join("|");
+      }
+      function sameActivation(left, right) {
+        return left.contextEpoch === right.contextEpoch && left.generation === right.generation && left.groupId === right.groupId && left.routeRevision === right.routeRevision && left.candidateIndex === right.candidateIndex;
+      }
+      var defaultCdnRecoveryCoordinator = createCdnRecoveryCoordinator({
+        router: defaultCdnMediaRequestRouter
+      });
+      var publishCdnRecoveryGroups = defaultCdnRecoveryCoordinator.publishGroups;
+      var beginCdnRecoveryContext = defaultCdnRecoveryCoordinator.beginContext;
+      var routeCdnRecoveryRequestUrl = defaultCdnRecoveryCoordinator.routeExactUrl;
+      var sampleCdnRecoveryPlayback = defaultCdnRecoveryCoordinator.samplePlayback;
+      var getCdnRecoveryStatus = defaultCdnRecoveryCoordinator.getStatus;
+      var getActiveCdnRecoveryStates = defaultCdnRecoveryCoordinator.getActiveStates;
+
+      // packages/unblock-area-limit/src/feature/bili/player_stall_monitor.ts
+      var PLAYER_STALL_MONITOR_INTERVAL_MS = 500;
+      var MAX_SYNCHRONOUS_WAKE_CYCLES = 8;
+      var MEDIA_WAKE_EVENTS = [
+        "play",
+        "pause",
+        "seeking",
+        "seeked",
+        "progress",
+        "timeupdate",
+        "waiting",
+        "stalled",
+        "playing"
+      ];
+      var WAKE_EVENTS = ["visibilitychange", ...MEDIA_WAKE_EVENTS];
+      var MAX_BUFFERED_RANGES = 1e4;
+      function createPlayerStallMonitor(dependencies) {
+        const documentValue = dependencies.document === void 0 ? typeof document === "undefined" ? null : document : dependencies.document;
+        const now = dependencies.now ?? Date.now;
+        const setTimer = dependencies.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+        const clearTimer = dependencies.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
+        let running = false;
+        let disposed = false;
+        let stopping = false;
+        let processingWake = false;
+        let deferredWake = false;
+        let timerHandle = null;
+        let timerToken = 0;
+        let selectedVideo = null;
+        const installedWakeEvents = [];
+        const wakeListener = () => {
+          wake();
+        };
+        function start() {
+          if (running || disposed || stopping) return;
+          running = true;
+          installWakeListeners();
+          if (running && !disposed) wake();
+        }
+        function stop() {
+          if (stopping) {
+            running = false;
+            deferredWake = false;
+            timerToken += 1;
+            return;
+          }
+          const wasRunning = running;
+          running = false;
+          deferredWake = false;
+          stopping = true;
+          try {
+            invalidateTimer();
+            if (wasRunning || installedWakeEvents.length > 0) removeWakeListeners();
+          } finally {
+            stopping = false;
+          }
+        }
+        function dispose() {
+          if (disposed) return;
+          disposed = true;
+          stop();
+        }
+        function wake() {
+          if (!running || disposed) return;
+          if (processingWake) {
+            deferredWake = true;
+            return;
+          }
+          processingWake = true;
+          try {
+            for (let cycle = 0; cycle < MAX_SYNCHRONOUS_WAKE_CYCLES && running && !disposed; cycle += 1) {
+              deferredWake = false;
+              runWakeCycle();
+              if (!deferredWake) break;
+            }
+          } finally {
+            processingWake = false;
+            deferredWake = false;
+          }
+        }
+        function synchronizeContext() {
+          if (!running || disposed) return;
+          synchronizeSelectedVideo();
+        }
+        function runWakeCycle() {
+          invalidateTimer();
+          if (!running || disposed || !isEnabled()) return;
+          const cycleStartedAt = readNow2();
+          sampleSelectedVideo();
+          if (shouldMonitor()) scheduleNextPoll(delayAfterCycle(cycleStartedAt));
+        }
+        function installWakeListeners() {
+          if (!documentValue) return;
+          for (const eventName of WAKE_EVENTS) {
+            if (!running || disposed || stopping) break;
+            try {
+              documentValue.addEventListener(eventName, wakeListener, true);
+              if (!running || disposed || stopping) {
+                try {
+                  documentValue.removeEventListener(eventName, wakeListener, true);
+                } catch {
+                }
+                break;
+              }
+              installedWakeEvents.push(eventName);
+            } catch {
+            }
+          }
+        }
+        function removeWakeListeners() {
+          if (!documentValue) {
+            installedWakeEvents.length = 0;
+            return;
+          }
+          for (const eventName of installedWakeEvents.splice(0)) {
+            try {
+              documentValue.removeEventListener(eventName, wakeListener, true);
+            } catch {
+            }
+          }
+        }
+        function shouldMonitor() {
+          if (!isEnabled()) return false;
+          try {
+            return dependencies.isActive() === true;
+          } catch {
+            return false;
+          }
+        }
+        function isEnabled() {
+          try {
+            return dependencies.isEnabled() === true;
+          } catch {
+            return false;
+          }
+        }
+        function readNow2() {
+          try {
+            const value = now();
+            return Number.isFinite(value) ? value : null;
+          } catch {
+            return null;
+          }
+        }
+        function delayAfterCycle(startedAt) {
+          if (startedAt === null) return PLAYER_STALL_MONITOR_INTERVAL_MS;
+          const completedAt = readNow2();
+          if (completedAt === null || completedAt < startedAt) return PLAYER_STALL_MONITOR_INTERVAL_MS;
+          return Math.max(0, PLAYER_STALL_MONITOR_INTERVAL_MS - (completedAt - startedAt));
+        }
+        function invalidateTimer() {
+          timerToken += 1;
+          if (timerHandle === null) return;
+          const handle = timerHandle;
+          timerHandle = null;
+          try {
+            clearTimer(handle);
+          } catch {
+          }
+        }
+        function scheduleNextPoll(delayMs) {
+          if (!running || disposed || !shouldMonitor()) return;
+          if (timerHandle !== null) invalidateTimer();
+          const token = ++timerToken;
+          let timerReturned = false;
+          let firedSynchronously = false;
+          let handle;
+          try {
+            handle = setTimer(() => {
+              if (!timerReturned) {
+                firedSynchronously = true;
+                return;
+              }
+              poll(token);
+            }, delayMs);
+            timerReturned = true;
+          } catch {
+            if (token === timerToken) timerToken += 1;
+            return;
+          }
+          if (firedSynchronously || token !== timerToken || !running || disposed) {
+            if (token === timerToken) timerToken += 1;
+            try {
+              clearTimer(handle);
+            } catch {
+            }
+            return;
+          }
+          timerHandle = handle;
+        }
+        function poll(token) {
+          if (token !== timerToken || !running || disposed) return;
+          timerHandle = null;
+          wake();
+        }
+        function sampleSelectedVideo() {
+          const video = synchronizeSelectedVideo();
+          if (!video) {
+            submitSample(null);
+            return;
+          }
+          const signals = readPlaybackSignals(documentValue, video);
+          submitSample(signals);
+        }
+        function synchronizeSelectedVideo() {
+          const video = selectVideo(queryVideos());
+          if (!video) return null;
+          if (selectedVideo === null) {
+            selectedVideo = video;
+          } else if (selectedVideo !== video) {
+            try {
+              dependencies.beginContext();
+            } catch {
+              return null;
+            }
+            selectedVideo = video;
+          }
+          return video;
+        }
+        function submitSample(signals) {
+          if (!running || disposed || !shouldMonitor()) return;
+          try {
+            dependencies.sample(signals);
+          } catch {
+          }
+        }
+        function queryVideos() {
+          try {
+            if (dependencies.queryVideos) return dependencies.queryVideos();
+            return documentValue ? Array.from(documentValue.querySelectorAll("video")) : null;
+          } catch {
+            return null;
+          }
+        }
+        return { start, stop, synchronizeContext, wake, dispose };
+      }
+      function selectVideo(videos) {
+        if (!videos) return null;
+        const connected = [];
+        try {
+          for (const video of videos) {
+            if (video.isConnected) connected.push(video);
+          }
+        } catch {
+          return null;
+        }
+        const playing = [];
+        try {
+          for (const video of connected) {
+            const ended = video.ended;
+            const paused = video.paused;
+            if (typeof ended !== "boolean" || typeof paused !== "boolean") return null;
+            if (!ended && !paused) playing.push(video);
+          }
+        } catch {
+          return null;
+        }
+        if (playing.length === 1) return playing[0];
+        if (playing.length > 1) return null;
+        const mediaBearing = [];
+        try {
+          for (const video of connected) {
+            if (video.currentSrc || video.src || video.srcObject != null) mediaBearing.push(video);
+          }
+        } catch {
+          return null;
+        }
+        return mediaBearing.length === 1 ? mediaBearing[0] : null;
+      }
+      function readPlaybackSignals(documentValue, video) {
+        const visible = readVisibility(documentValue);
+        if (visible === null) return null;
+        let paused;
+        let seeking;
+        let ended;
+        let currentTimeSeconds;
+        try {
+          paused = video.paused;
+          seeking = video.seeking;
+          ended = video.ended;
+          currentTimeSeconds = video.currentTime;
+        } catch {
+          return null;
+        }
+        if (typeof paused !== "boolean" || typeof seeking !== "boolean" || typeof ended !== "boolean" || !Number.isFinite(currentTimeSeconds)) {
+          return null;
+        }
+        let durationSeconds = null;
+        try {
+          const duration = video.duration;
+          durationSeconds = Number.isFinite(duration) ? duration : null;
+        } catch {
+        }
+        return {
+          visible,
+          paused,
+          seeking,
+          ended,
+          currentTimeSeconds,
+          durationSeconds,
+          bufferedAheadSeconds: readBufferedAhead(video, currentTimeSeconds)
+        };
+      }
+      function readVisibility(documentValue) {
+        if (!documentValue) return null;
+        try {
+          if (documentValue.visibilityState === "visible") return true;
+          if (documentValue.visibilityState === "hidden") return false;
+          return null;
+        } catch {
+          return null;
+        }
+      }
+      function readBufferedAhead(video, currentTimeSeconds) {
+        try {
+          const buffered = video.buffered;
+          const length = buffered.length;
+          if (!Number.isSafeInteger(length) || length < 0 || length > MAX_BUFFERED_RANGES) return null;
+          let greatestAhead = null;
+          for (let index = 0; index < length; index += 1) {
+            const start = buffered.start(index);
+            const end = buffered.end(index);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return null;
+            if (start <= currentTimeSeconds && currentTimeSeconds <= end) {
+              const ahead = end - currentTimeSeconds;
+              if (!Number.isFinite(ahead)) return null;
+              greatestAhead = greatestAhead === null ? ahead : Math.max(greatestAhead, ahead);
+            }
+          }
+          return greatestAhead ?? 0;
+        } catch {
+          return null;
+        }
+      }
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_recovery_browser.ts
+      var EMPTY_RECOVERY_STATUS = Object.freeze({
+        enabled: false,
+        contextEpoch: 0,
+        generation: 0,
+        groupCount: 0,
+        activeGroupCount: 0,
+        groups: Object.freeze([])
+      });
+      var defaultMonitor = null;
+      var installingMonitor = false;
+      var publicationAllowsRecovery = false;
+      function isAutoRecoveryEnabled() {
+        try {
+          return !balh_config.is_closed && balh_config.cdn_mode === "auto";
+        } catch {
+          return false;
+        }
+      }
+      function isRecoveryEnabled() {
+        return publicationAllowsRecovery && isAutoRecoveryEnabled();
+      }
+      var recoveryCoordinator = createCdnRecoveryCoordinator({
+        isEnabled: isRecoveryEnabled
+      });
+      function synchronizeRecoveryEnabled() {
+        try {
+          recoveryCoordinator.setEnabled(isRecoveryEnabled());
+        } catch {
+        }
+      }
+      function isSynchronizedRecoveryEnabled() {
+        synchronizeRecoveryEnabled();
+        return isRecoveryEnabled();
+      }
+      function wakeDefaultMonitor() {
+        try {
+          defaultMonitor?.wake();
+        } catch {
+        }
+      }
+      function synchronizeDefaultMonitorContext() {
+        try {
+          defaultMonitor?.synchronizeContext();
+        } catch {
+        }
+      }
+      function publishCdnRecoveryGroups2(groups, enabled) {
+        publicationAllowsRecovery = enabled === true;
+        try {
+          return recoveryCoordinator.publishGroups(groups, isRecoveryEnabled());
+        } catch {
+          publicationAllowsRecovery = false;
+          synchronizeRecoveryEnabled();
+          return getCdnRecoveryStatus2();
+        } finally {
+          wakeDefaultMonitor();
+        }
+      }
+      function beginCdnRecoveryContext2() {
+        synchronizeRecoveryEnabled();
+        try {
+          return recoveryCoordinator.beginContext();
+        } catch {
+          return getCdnRecoveryStatus2();
+        }
+      }
+      function prepareCdnRecoveryRequestUrl(url, method = "GET") {
+        synchronizeRecoveryEnabled();
+        let eligibility;
+        try {
+          eligibility = recoveryCoordinator.prepareExactUrl(url, method);
+        } catch {
+          return settledPreparation2({ url, routed: false });
+        }
+        if (!eligibility.eligible) return eligibility;
+        eligibility.discard();
+        synchronizeDefaultMonitorContext();
+        let prepared;
+        try {
+          prepared = recoveryCoordinator.prepareExactUrl(url, method);
+        } catch {
+          return settledPreparation2({ url, routed: false });
+        }
+        if (!prepared.eligible) return prepared;
+        let state = "pending";
+        let committedDecision = prepared.decision;
+        return {
+          eligible: true,
+          decision: prepared.decision,
+          commit() {
+            if (state !== "pending") return committedDecision;
+            state = "committed";
+            try {
+              synchronizeDefaultMonitorContext();
+              const acceptedDecision = prepared.decision;
+              let observation = prepared.commit();
+              if (!observation.activation) {
+                const current = recoveryCoordinator.prepareExactUrl(
+                  acceptedDecision.url,
+                  method
+                );
+                if (current.decision.url === acceptedDecision.url) {
+                  observation = current.commit();
+                } else {
+                  current.discard();
+                }
+              }
+              committedDecision = observation.activation ? { ...acceptedDecision, activation: observation.activation } : acceptedDecision;
+            } catch {
+              committedDecision = prepared.decision;
+            } finally {
+              wakeDefaultMonitor();
+            }
+            return committedDecision;
+          },
+          discard() {
+            if (state !== "pending") return;
+            state = "discarded";
+            try {
+              prepared.discard();
+            } catch {
+            }
+          }
+        };
+      }
+      function sampleCdnRecoveryPlayback2(signals) {
+        synchronizeRecoveryEnabled();
+        try {
+          return recoveryCoordinator.samplePlayback(signals);
+        } catch {
+          return getCdnRecoveryStatus2();
+        }
+      }
+      function getCdnRecoveryStatus2() {
+        synchronizeRecoveryEnabled();
+        try {
+          return recoveryCoordinator.getStatus();
+        } catch {
+          return EMPTY_RECOVERY_STATUS;
+        }
+      }
+      function installCdnRecoveryMonitor() {
+        if (defaultMonitor || installingMonitor) return defaultMonitor;
+        installingMonitor = true;
+        let candidate = null;
+        try {
+          candidate = createPlayerStallMonitor({
+            sample: sampleCdnRecoveryPlayback2,
+            beginContext: beginCdnRecoveryContext2,
+            isActive: () => getCdnRecoveryStatus2().activeGroupCount > 0,
+            isEnabled: isSynchronizedRecoveryEnabled
+          });
+          defaultMonitor = candidate;
+          candidate.start();
+          return candidate;
+        } catch {
+          if (defaultMonitor === candidate) defaultMonitor = null;
+          try {
+            candidate?.dispose();
+          } catch {
+          }
+          return null;
+        } finally {
+          installingMonitor = false;
+        }
+      }
+      function settledPreparation2(decision) {
+        return {
+          eligible: false,
+          decision,
+          commit: () => decision,
+          discard: () => void 0
+        };
+      }
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_runtime.ts
+      var capturedFetch = typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : void 0;
+      var CDN_HEALTH_CACHE_KEY = "balh_cdn_health_v1";
+      var CDN_HEALTH_CACHE_VERSION = 2;
+      var CDN_HEALTH_CACHE_TTL_MS = 20 * 60 * 1e3;
+      var CDN_UNPROBEABLE_RETRY_SUPPRESSION_MS = 60 * 1e3;
+      var DEFAULT_LIMITS = {
+        maxConcurrent: 2,
+        maxStages: 2,
+        initialBytesPerRequest: 64 * 1024,
+        maxBytesPerRequest: 512 * 1024,
+        maxTotalBytes: 2 * 1024 * 1024,
+        requestTimeoutMs: 3500,
+        stageTimeoutMs: 4e3,
+        totalTimeoutMs: 7500
+      };
+      function defaultStorage() {
+        try {
+          return typeof localStorage === "undefined" ? null : localStorage;
+        } catch {
+          return null;
+        }
+      }
+      function defaultNetworkHint() {
+        try {
+          const connection = navigator.connection;
+          if (!connection) return "unknown";
+          const type = typeof connection.type === "string" ? connection.type : "unknown";
+          const effectiveType = typeof connection.effectiveType === "string" ? connection.effectiveType : "unknown";
+          return `${type}:${effectiveType}:${connection.saveData === true ? "save-data" : "normal"}`;
+        } catch {
+          return "unknown";
+        }
+      }
+      function defaultManualHost() {
+        if (globalThis.window?.__balh_app_only__ === true) return void 0;
+        const key = balh_config.upos_server;
+        if (!key) return void 0;
+        const host = uposMap[key];
+        return typeof host === "string" && host.length > 0 ? host : void 0;
+      }
+      function normalizeMode(value) {
+        return value === "original" || value === "manual" || value === "auto" || value === "safe" ? value : "safe";
+      }
+      function positiveInteger(value, fallback) {
+        return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : fallback;
+      }
+      function normalizeLimits(overrides) {
+        const maxBytesPerRequest = positiveInteger(overrides?.maxBytesPerRequest, DEFAULT_LIMITS.maxBytesPerRequest);
+        return {
+          maxConcurrent: Math.min(2, positiveInteger(overrides?.maxConcurrent, DEFAULT_LIMITS.maxConcurrent)),
+          maxStages: Math.min(2, positiveInteger(overrides?.maxStages, DEFAULT_LIMITS.maxStages)),
+          initialBytesPerRequest: Math.min(
+            maxBytesPerRequest,
+            positiveInteger(overrides?.initialBytesPerRequest, DEFAULT_LIMITS.initialBytesPerRequest)
+          ),
+          maxBytesPerRequest,
+          maxTotalBytes: positiveInteger(overrides?.maxTotalBytes, DEFAULT_LIMITS.maxTotalBytes),
+          requestTimeoutMs: positiveInteger(overrides?.requestTimeoutMs, DEFAULT_LIMITS.requestTimeoutMs),
+          stageTimeoutMs: positiveInteger(overrides?.stageTimeoutMs, DEFAULT_LIMITS.stageTimeoutMs),
+          totalTimeoutMs: positiveInteger(overrides?.totalTimeoutMs, DEFAULT_LIMITS.totalTimeoutMs)
+        };
+      }
+      function normalizeHost(value) {
+        if (typeof value !== "string") return void 0;
+        const host = value.trim().toLowerCase();
+        if (!host || host.length > 253 || /[\s\\/?#@]/.test(host)) return void 0;
+        return host;
+      }
+      var TRUSTED_BILIBILI_MEDIA_DOMAINS = [
+        "bilivideo.com",
+        "bilivideo.cn",
+        "bilivideo.net"
+      ];
+      var TRUSTED_BILIBILI_MEDIA_HOSTS = /* @__PURE__ */ new Set([
+        "upos-hz-mirrorakam.akamaized.net"
+      ]);
+      function isTrustedBilibiliMediaHostname(hostname) {
+        const canonical = hostname.toLowerCase().replace(/\.$/, "");
+        if (TRUSTED_BILIBILI_MEDIA_HOSTS.has(canonical)) return true;
+        return TRUSTED_BILIBILI_MEDIA_DOMAINS.some((domain) => canonical === domain || canonical.endsWith(`.${domain}`));
+      }
+      function parseRuntimeCandidate(url) {
+        if (typeof url !== "string" || !url) return void 0;
+        try {
+          const parsed = new URL(url, "https://www.bilibili.com/");
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return void 0;
+          const host = normalizeHost(parsed.host);
+          if (!host) return void 0;
+          const probeAllowed = !parsed.username && !parsed.password && isTrustedBilibiliMediaHostname(parsed.hostname);
+          return { url, host, probeAllowed };
+        } catch {
+          return void 0;
+        }
+      }
+      function extractCandidates(groups) {
+        const result = [];
+        const indexesByUrl = /* @__PURE__ */ new Map();
+        for (const group of groups) {
+          for (const candidate of group.candidates) {
+            const existingIndex = indexesByUrl.get(candidate.url);
+            if (existingIndex !== void 0) {
+              if (group.bandwidthBps !== void 0) {
+                result[existingIndex].bandwidthBps = Math.max(
+                  result[existingIndex].bandwidthBps ?? 0,
+                  group.bandwidthBps
+                );
+              }
+              continue;
+            }
+            const parsed = parseRuntimeCandidate(candidate.url);
+            if (!parsed) continue;
+            indexesByUrl.set(parsed.url, result.length);
+            result.push({
+              ...parsed,
+              ...group.bandwidthBps === void 0 ? {} : { bandwidthBps: group.bandwidthBps }
+            });
+          }
+        }
+        return result;
+      }
+      function uniqueSorted(values) {
+        return [...new Set(values)].sort();
+      }
+      function probeAllowedHosts(candidates) {
+        return new Set(candidates.filter((candidate) => candidate.probeAllowed).map((candidate) => candidate.host));
+      }
+      function policyBlockedHosts(candidates) {
+        const allowedHosts = probeAllowedHosts(candidates);
+        return uniqueSorted(candidates.filter((candidate) => !candidate.probeAllowed && !allowedHosts.has(candidate.host)).map((candidate) => candidate.host));
+      }
+      function hashCandidateHosts(hosts) {
+        let hash = 2166136261;
+        for (const character of uniqueSorted(hosts).join("\n")) {
+          hash ^= character.charCodeAt(0);
+          hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+      }
+      function cloneStatus(status) {
+        return {
+          ...status,
+          candidateHosts: [...status.candidateHosts],
+          probedHosts: [...status.probedHosts],
+          healthyHosts: [...status.healthyHosts],
+          failedHosts: [...status.failedHosts],
+          unprobeableHosts: [...status.unprobeableHosts],
+          budgetLimitedHosts: [...status.budgetLimitedHosts],
+          hostDiagnostics: status.hostDiagnostics.map((diagnostic) => ({ ...diagnostic }))
+        };
+      }
+      function finiteMetric(value) {
+        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : void 0;
+      }
+      function normalizeHealth2(value, host) {
+        if (!value || typeof value !== "object") return void 0;
+        const input = value;
+        const successes = finiteMetric(input.successes);
+        const failures = finiteMetric(input.failures);
+        const samples = finiteMetric(input.samples);
+        const throughputKbps = finiteMetric(input.throughputKbps);
+        const ttfbMs = finiteMetric(input.ttfbMs);
+        const measuredBytes = finiteMetric(input.measuredBytes);
+        if (successes === void 0 && failures === void 0 && samples === void 0 && throughputKbps === void 0 && ttfbMs === void 0 && measuredBytes === void 0) return void 0;
+        return { host, successes, failures, samples, throughputKbps, ttfbMs, measuredBytes };
+      }
+      function replaceProtocolRelativeHosts(value, host, seen = /* @__PURE__ */ new WeakSet()) {
+        if (typeof value === "string") {
+          if (!value.startsWith("//")) return value;
+          try {
+            const parsed = new URL(`https:${value}`);
+            if (parsed.protocol !== "https:" || !parsed.host || parsed.host === host) return value;
+            const authorityEnd = value.slice(2).search(/[/?#]/);
+            const suffixIndex = authorityEnd < 0 ? value.length : authorityEnd + 2;
+            return `//${host}${value.slice(suffixIndex)}`;
+          } catch {
+            return value;
+          }
+        }
+        if (!value || typeof value !== "object" || seen.has(value)) return value;
+        seen.add(value);
+        if (Array.isArray(value)) {
+          for (let index = 0; index < value.length; index += 1) {
+            value[index] = replaceProtocolRelativeHosts(value[index], host, seen);
+          }
+          return value;
+        }
+        const record = value;
+        for (const key of Object.keys(record)) {
+          record[key] = replaceProtocolRelativeHosts(record[key], host, seen);
+        }
+        return value;
+      }
+      function replaceManualCdnHosts(playUrl, host, replaceAkamai) {
+        const replacement = Converters.replaceUpos(playUrl, host, replaceAkamai);
+        const serialized = JSON.stringify(playUrl);
+        if (serialized.includes("akamaized.net") && replaceAkamai !== "Y") return replacement;
+        return replaceProtocolRelativeHosts(replacement, host);
+      }
+      function replaceObjectContents(target2, replacement) {
+        if (!target2 || typeof target2 !== "object" || !replacement || typeof replacement !== "object") return target2;
+        if (Array.isArray(target2) && Array.isArray(replacement)) {
+          const sharedLength = Math.min(target2.length, replacement.length);
+          for (let index = 0; index < sharedLength; index += 1) {
+            const current = target2[index];
+            const next = replacement[index];
+            if (current && next && typeof current === "object" && typeof next === "object" && Array.isArray(current) === Array.isArray(next)) {
+              replaceObjectContents(current, next);
+            } else if (!Object.is(current, next)) {
+              target2[index] = next;
+            }
+          }
+          if (target2.length > replacement.length) target2.splice(replacement.length);
+          if (replacement.length > target2.length) target2.push(...replacement.slice(target2.length));
+          return target2;
+        }
+        if (Array.isArray(target2) || Array.isArray(replacement)) return target2;
+        const targetRecord = target2;
+        const replacementRecord = replacement;
+        for (const key of Object.keys(targetRecord)) {
+          if (!Object.prototype.hasOwnProperty.call(replacementRecord, key)) delete targetRecord[key];
+        }
+        for (const [key, next] of Object.entries(replacementRecord)) {
+          const current = targetRecord[key];
+          if (current && next && typeof current === "object" && typeof next === "object" && Array.isArray(current) === Array.isArray(next)) {
+            replaceObjectContents(current, next);
+          } else if (!Object.is(current, next)) {
+            targetRecord[key] = next;
+          }
+        }
+        return target2;
+      }
+      function createCdnRuntime(overrides = {}) {
+        const limits = normalizeLimits(overrides.limits);
+        const dependencies = {
+          fetch: overrides.fetch === void 0 ? capturedFetch : overrides.fetch,
+          storage: overrides.storage === void 0 ? defaultStorage() : overrides.storage,
+          now: overrides.now ?? (() => Date.now()),
+          setTimeout: overrides.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs)),
+          clearTimeout: overrides.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle)),
+          createAbortController: overrides.createAbortController ?? (() => new AbortController()),
+          scheduleBackground: overrides.scheduleBackground ?? ((callback) => {
+            globalThis.setTimeout(callback, 0);
+          }),
+          getNetworkHint: overrides.getNetworkHint ?? defaultNetworkHint,
+          getMode: overrides.getMode ?? (() => balh_config.is_closed ? "original" : balh_config.cdn_mode),
+          getManualHost: overrides.getManualHost ?? defaultManualHost,
+          getManualReplaceAkamai: overrides.getManualReplaceAkamai ?? (() => balh_config.upos_replace_akamai),
+          replaceManual: overrides.replaceManual ?? replaceManualCdnHosts,
+          collectGroups: overrides.collectGroups ?? collectPlayUrlCdnGroups,
+          publishRecoveryGroups: overrides.publishRecoveryGroups ?? publishCdnRecoveryGroups2,
+          optimize: overrides.optimize ?? optimizePlayUrlCdn,
+          log: overrides.log ?? ((event, probeStatus) => util_debug(event, probeStatus))
+        };
+        let currentCandidates = [];
+        let currentHostHash = hashCandidateHosts([]);
+        let healthHostHash = "";
+        let healthNetworkHint = "";
+        let healthValidUntil = 0;
+        let healthByHost = /* @__PURE__ */ Object.create(null);
+        let status = emptyStatus();
+        let generation = 0;
+        let inFlight;
+        let fencedProbe;
+        let backgroundScheduled = false;
+        let backgroundScheduleId = 0;
+        let unprobeableGeneration = -1;
+        let unprobeableUntil = 0;
+        let suppressedUnprobeableStatus;
+        let finalDeliveryOrder = 0;
+        let latestAcceptedFinalDeliveryOrder = 0;
+        let processingFinalDeliveries = false;
+        const pendingFinalDeliveries = [];
+        const activeControllers = /* @__PURE__ */ new Set();
+        let activeControllerDrain = Promise.resolve();
+        let resolveActiveControllerDrain;
+        let pendingAutoProbeDrain;
+        let pendingAutoProbeDrainGeneration = -1;
+        let pendingAutoProbeDrainHostHash = "";
+        const listeners = /* @__PURE__ */ new Set();
+        function emptyStatus(message) {
+          return {
+            state: "idle",
+            message,
+            candidateHosts: uniqueSorted(currentCandidates.map((candidate) => candidate.host)),
+            probedHosts: [],
+            healthyHosts: [],
+            failedHosts: [],
+            unprobeableHosts: [],
+            budgetLimitedHosts: [],
+            hostDiagnostics: [],
+            completed: 0,
+            total: 0
+          };
+        }
+        function publish(next) {
+          status = cloneStatus(next);
+          const publicStatus = cloneStatus(status);
+          dependencies.log("cdn-probe-status", publicStatus);
+          for (const listener of listeners) {
+            try {
+              listener(cloneStatus(publicStatus));
+            } catch {
+              dependencies.log("cdn-probe-listener-failed");
+            }
+          }
+        }
+        function currentNetworkHint() {
+          try {
+            return String(dependencies.getNetworkHint());
+          } catch {
+            dependencies.log("cdn-network-hint-read-failed");
+            return "unknown";
+          }
+        }
+        function clearUnprobeableSuppression() {
+          unprobeableGeneration = -1;
+          unprobeableUntil = 0;
+          suppressedUnprobeableStatus = void 0;
+        }
+        function rememberUnprobeable(status2, runGeneration) {
+          unprobeableGeneration = runGeneration;
+          unprobeableUntil = dependencies.now() + CDN_UNPROBEABLE_RETRY_SUPPRESSION_MS;
+          suppressedUnprobeableStatus = cloneStatus(status2);
+        }
+        async function cancelWithBudget(cancel, controller, requestTimeoutMs) {
+          const cleanupTimeoutMs = Math.max(1, Math.min(250, requestTimeoutMs));
+          let cleanupTimer = 0;
+          const cancellation = Promise.resolve().then(cancel).then(() => true, () => false);
+          const deadline = new Promise((resolve) => {
+            cleanupTimer = dependencies.setTimeout(() => resolve(false), cleanupTimeoutMs);
+          });
+          let completed = false;
+          try {
+            completed = await Promise.race([cancellation, deadline]);
+          } finally {
+            dependencies.clearTimeout(cleanupTimer);
+          }
+          if (!completed) {
+            try {
+              controller.abort();
+            } catch {
+            }
+          }
+          return { completedWithinBudget: completed, settled: cancellation };
+        }
+        function readMatchingCache(candidateHostHash, networkHint, candidates = currentCandidates) {
+          const storage = dependencies.storage;
+          if (!storage) return void 0;
+          let raw;
+          try {
+            raw = storage.getItem(CDN_HEALTH_CACHE_KEY);
+          } catch {
+            dependencies.log("cdn-health-cache-read-failed");
+            return void 0;
+          }
+          if (!raw) return void 0;
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            dependencies.log("cdn-health-cache-invalid");
+            return void 0;
+          }
+          if (!parsed || typeof parsed !== "object") return void 0;
+          const cache = parsed;
+          const age = dependencies.now() - Number(cache.savedAt);
+          if (cache.version !== CDN_HEALTH_CACHE_VERSION || !Number.isFinite(age) || age < 0 || age > CDN_HEALTH_CACHE_TTL_MS || cache.networkHint !== networkHint || cache.candidateHostHash !== candidateHostHash || !cache.hosts || typeof cache.hosts !== "object") return void 0;
+          const hosts = /* @__PURE__ */ Object.create(null);
+          const allowedHosts = probeAllowedHosts(candidates);
+          for (const [rawHost, rawHealth] of Object.entries(cache.hosts)) {
+            const host = normalizeHost(rawHost);
+            if (!host || !allowedHosts.has(host)) continue;
+            const health = normalizeHealth2(rawHealth, host);
+            if (health) hosts[host] = health;
+          }
+          if (!Object.keys(hosts).length) return void 0;
+          return { hosts, validUntil: Number(cache.savedAt) + CDN_HEALTH_CACHE_TTL_MS };
+        }
+        function writeCache() {
+          const storage = dependencies.storage;
+          if (!storage || !Object.keys(healthByHost).length || !currentCandidates.length) return;
+          const hosts = /* @__PURE__ */ Object.create(null);
+          const allowedHosts = probeAllowedHosts(currentCandidates);
+          for (const host of uniqueSorted([...allowedHosts])) {
+            const health = normalizeHealth2(healthByHost[host], host);
+            if (health) hosts[host] = health;
+          }
+          if (!Object.keys(hosts).length) return;
+          const cache = {
+            version: CDN_HEALTH_CACHE_VERSION,
+            savedAt: dependencies.now(),
+            networkHint: healthNetworkHint || currentNetworkHint(),
+            candidateHostHash: currentHostHash,
+            hosts
+          };
+          try {
+            storage.setItem(CDN_HEALTH_CACHE_KEY, JSON.stringify(cache));
+          } catch {
+            dependencies.log("cdn-health-cache-write-failed");
+          }
+        }
+        function publishHealthSnapshot(source) {
+          const candidateHosts = uniqueSorted(currentCandidates.map((candidate) => candidate.host));
+          const healthEntries = Object.entries(healthByHost);
+          const healthyHosts = healthEntries.filter(([, health]) => (health.successes ?? 0) > 0).map(([host]) => host).sort();
+          const failedHosts = healthEntries.filter(([, health]) => (health.successes ?? 0) === 0 && (health.failures ?? 0) > 0).map(([host]) => host).sort();
+          const measuredHosts = new Set(healthEntries.map(([host]) => host));
+          const unprobeableHosts = candidateHosts.filter((host) => !measuredHosts.has(host));
+          const healthState = healthyHosts.length ? failedHosts.length || unprobeableHosts.length ? "partial" : "ready" : failedHosts.length && !unprobeableHosts.length ? "failed" : "unprobeable";
+          const prefix = source === "cache" ? "Cached CDN health" : "CDN health";
+          const bandwidthByHost = /* @__PURE__ */ new Map();
+          for (const candidate of currentCandidates) {
+            if (candidate.bandwidthBps === void 0) continue;
+            bandwidthByHost.set(candidate.host, Math.max(
+              bandwidthByHost.get(candidate.host) ?? 0,
+              candidate.bandwidthBps
+            ));
+          }
+          const hostDiagnostics = candidateHosts.map((host) => {
+            const health = healthByHost[host];
+            const bandwidthBps = bandwidthByHost.get(host);
+            const throughputKbps = finiteMetric(health?.throughputKbps);
+            const ttfbMs = finiteMetric(health?.ttfbMs);
+            const classification = healthyHosts.includes(host) ? "healthy" : failedHosts.includes(host) ? "failed" : "unprobeable";
+            return {
+              host,
+              classification,
+              stagesCompleted: Math.floor(finiteMetric(health?.samples) ?? 0),
+              accountedBytes: Math.floor(finiteMetric(health?.measuredBytes) ?? 0),
+              observedBytes: Math.floor(finiteMetric(health?.measuredBytes) ?? 0),
+              ...throughputKbps === void 0 ? {} : { throughputKbps },
+              ...ttfbMs === void 0 ? {} : { ttfbMs },
+              ...bandwidthBps === void 0 ? {} : { bandwidthBps },
+              ...throughputKbps === void 0 || bandwidthBps === void 0 ? {} : { bitrateMargin: throughputKbps / (bandwidthBps / 1e3) }
+            };
+          });
+          const cachedAttempts = healthEntries.reduce((sum, [, health]) => sum + Math.floor(finiteMetric(health.samples) ?? 0), 0);
+          publish({
+            state: healthState,
+            message: healthState === "ready" ? `${prefix} is ready.` : healthState === "partial" ? `${prefix} has partial results.` : healthState === "failed" ? `${prefix} did not find a healthy host.` : `${prefix} is not measurable.`,
+            source,
+            candidateHosts,
+            probedHosts: healthEntries.map(([host]) => host).sort(),
+            healthyHosts,
+            failedHosts,
+            unprobeableHosts,
+            budgetLimitedHosts: [],
+            hostDiagnostics,
+            completed: cachedAttempts,
+            total: cachedAttempts,
+            updatedAt: dependencies.now()
+          });
+        }
+        function ensureHealthForCurrentHosts() {
+          const networkHint = currentNetworkHint();
+          const networkChanged = healthNetworkHint !== "" && healthNetworkHint !== networkHint;
+          if (networkChanged) {
+            generation += 1;
+            abortActiveProbes();
+            inFlight = void 0;
+            backgroundScheduled = false;
+            backgroundScheduleId += 1;
+            healthHostHash = "";
+            healthValidUntil = 0;
+            healthByHost = /* @__PURE__ */ Object.create(null);
+            clearUnprobeableSuppression();
+          }
+          if (!networkChanged && healthHostHash === currentHostHash && healthNetworkHint === networkHint && dependencies.now() < healthValidUntil) return;
+          const cached = readMatchingCache(currentHostHash, networkHint);
+          healthHostHash = currentHostHash;
+          healthNetworkHint = networkHint;
+          healthByHost = cached?.hosts ?? /* @__PURE__ */ Object.create(null);
+          healthValidUntil = cached?.validUntil ?? 0;
+          if (cached) publishHealthSnapshot("cache");
+          else if (networkChanged) publish(emptyStatus("Network changed; CDN health was reset."));
+        }
+        function abortActiveProbes() {
+          for (const controller of activeControllers) controller.abort();
+        }
+        function trackActiveController(controller) {
+          if (activeControllers.size === 0) {
+            activeControllerDrain = new Promise((resolve) => {
+              resolveActiveControllerDrain = resolve;
+            });
+          }
+          activeControllers.add(controller);
+        }
+        function releaseActiveController(controller) {
+          if (!activeControllers.delete(controller) || activeControllers.size > 0) return;
+          const resolve = resolveActiveControllerDrain;
+          resolveActiveControllerDrain = void 0;
+          resolve?.();
+        }
+        function updateCurrentCandidates(next) {
+          const canonical = (candidates) => candidates.map((candidate) => `${candidate.host}\0${candidate.url}\0${candidate.bandwidthBps ?? ""}`).sort();
+          const previousCanonical = canonical(currentCandidates);
+          const nextCanonical = canonical(next);
+          const changed = nextCanonical.length !== previousCanonical.length || nextCanonical.some((value, index) => value !== previousCanonical[index]);
+          if (!changed) {
+            currentCandidates = next;
+            return;
+          }
+          generation += 1;
+          abortActiveProbes();
+          inFlight = void 0;
+          backgroundScheduled = false;
+          backgroundScheduleId += 1;
+          clearUnprobeableSuppression();
+          currentCandidates = next;
+          currentHostHash = hashCandidateHosts(next.map((candidate) => candidate.host));
+          ensureHealthForCurrentHosts();
+          const allowedHosts = probeAllowedHosts(next);
+          for (const host of uniqueSorted(next.map((candidate) => candidate.host))) {
+            if (!allowedHosts.has(host)) delete healthByHost[host];
+          }
+          const hasValidHealth = healthHostHash === currentHostHash && dependencies.now() < healthValidUntil && Object.keys(healthByHost).length > 0;
+          if (hasValidHealth) publishHealthSnapshot(status.source === "cache" ? "cache" : "network");
+          else publish(emptyStatus());
+        }
+        function collectCurrent(playUrl) {
+          let groups = [];
+          try {
+            groups = dependencies.collectGroups(playUrl);
+          } catch {
+            dependencies.log("cdn-candidate-collection-failed");
+          }
+          return groups;
+        }
+        function commitCurrent(groups) {
+          updateCurrentCandidates(extractCandidates(groups));
+          ensureHealthForCurrentHosts();
+          return groups;
+        }
+        function captureCurrent(playUrl) {
+          return commitCurrent(collectCurrent(playUrl));
+        }
+        function prospectiveHealth(groups) {
+          const candidates = extractCandidates(groups);
+          const candidateHostHash = hashCandidateHosts(candidates.map((candidate) => candidate.host));
+          const networkHint = currentNetworkHint();
+          if (healthHostHash === candidateHostHash && healthNetworkHint === networkHint && dependencies.now() < healthValidUntil) return healthByHost;
+          return readMatchingCache(candidateHostHash, networkHint, candidates)?.hosts ?? /* @__PURE__ */ Object.create(null);
+        }
+        function publishRecoveryGroups(groups, enabled) {
+          try {
+            dependencies.publishRecoveryGroups(groups, enabled);
+          } catch {
+            dependencies.log("cdn-recovery-publication-failed");
+          }
+        }
+        function scheduleAutoProbe() {
+          if (backgroundScheduled || inFlight || !currentCandidates.length) return;
+          backgroundScheduled = true;
+          const scheduleId = ++backgroundScheduleId;
+          dependencies.scheduleBackground(() => {
+            if (scheduleId !== backgroundScheduleId) return;
+            backgroundScheduled = false;
+            if (normalizeMode(dependencies.getMode()) !== "auto") return;
+            void probeCurrentPlayUrlCdn2().catch(() => {
+              dependencies.log("cdn-background-probe-failed");
+            });
+          });
+        }
+        function scheduleAutoProbeAfterActiveDrain() {
+          const drain = activeControllerDrain;
+          const runGeneration = generation;
+          const runHostHash = currentHostHash;
+          if (pendingAutoProbeDrain === drain) {
+            pendingAutoProbeDrainGeneration = runGeneration;
+            pendingAutoProbeDrainHostHash = runHostHash;
+            return;
+          }
+          pendingAutoProbeDrain = drain;
+          pendingAutoProbeDrainGeneration = runGeneration;
+          pendingAutoProbeDrainHostHash = runHostHash;
+          void drain.then(() => {
+            if (pendingAutoProbeDrain !== drain) return;
+            const latestGeneration = pendingAutoProbeDrainGeneration;
+            const latestHostHash = pendingAutoProbeDrainHostHash;
+            pendingAutoProbeDrain = void 0;
+            pendingAutoProbeDrainGeneration = -1;
+            pendingAutoProbeDrainHostHash = "";
+            if (latestGeneration !== generation || latestHostHash !== currentHostHash || normalizeMode(dependencies.getMode()) !== "auto") return;
+            scheduleAutoProbe();
+          });
+        }
+        function applyCdnPolicy2(playUrl) {
+          const mode = normalizeMode(dependencies.getMode());
+          if (!playUrl || typeof playUrl !== "object") {
+            publishRecoveryGroups([], mode === "auto");
+            return playUrl;
+          }
+          if (mode === "manual") {
+            const host = dependencies.getManualHost();
+            if (normalizeHost(host)) {
+              try {
+                const replacement = dependencies.replaceManual(
+                  playUrl,
+                  host,
+                  dependencies.getManualReplaceAkamai() === "Y" ? "Y" : FALSE
+                );
+                replaceObjectContents(playUrl, replacement);
+              } catch {
+                dependencies.log("cdn-manual-replacement-failed");
+              }
+            }
+            publishRecoveryGroups(captureCurrent(playUrl), false);
+            return playUrl;
+          }
+          if (mode === "safe" || mode === "auto") {
+            captureCurrent(playUrl);
+            ensureHealthForCurrentHosts();
+            try {
+              dependencies.optimize(playUrl, { mode, hostHealth: healthByHost });
+            } catch {
+              dependencies.log("cdn-selection-failed");
+            }
+            const finalGroups = captureCurrent(playUrl);
+            publishRecoveryGroups(finalGroups, mode === "auto");
+            if (mode === "auto") scheduleAutoProbe();
+            return playUrl;
+          }
+          publishRecoveryGroups(captureCurrent(playUrl), false);
+          return playUrl;
+        }
+        function transformCdnPolicyForFinalDelivery2(playUrl) {
+          const mode = normalizeMode(dependencies.getMode());
+          if (!playUrl || typeof playUrl !== "object") return playUrl;
+          if (mode === "manual") {
+            const host = dependencies.getManualHost();
+            if (normalizeHost(host)) {
+              try {
+                const replacement = dependencies.replaceManual(
+                  playUrl,
+                  host,
+                  dependencies.getManualReplaceAkamai() === "Y" ? "Y" : FALSE
+                );
+                replaceObjectContents(playUrl, replacement);
+              } catch {
+                dependencies.log("cdn-manual-replacement-failed");
+              }
+            }
+            return playUrl;
+          }
+          if (mode === "safe" || mode === "auto") {
+            const initialGroups = collectCurrent(playUrl);
+            try {
+              dependencies.optimize(playUrl, {
+                mode,
+                hostHealth: prospectiveHealth(initialGroups)
+              });
+            } catch {
+              dependencies.log("cdn-selection-failed");
+            }
+          }
+          return playUrl;
+        }
+        function beginFinalCdnDelivery2() {
+          finalDeliveryOrder += 1;
+          return finalDeliveryOrder;
+        }
+        function hasSupersedingFinalDelivery(deliveryOrder) {
+          return pendingFinalDeliveries.some((pending) => pending.deliveryOrder > deliveryOrder);
+        }
+        function commitFinalCdnDelivery(playUrl, deliveryOrder) {
+          if (deliveryOrder < latestAcceptedFinalDeliveryOrder) return;
+          latestAcceptedFinalDeliveryOrder = deliveryOrder;
+          const finalGroups = collectCurrent(playUrl);
+          if (hasSupersedingFinalDelivery(deliveryOrder)) return;
+          commitCurrent(finalGroups);
+          if (hasSupersedingFinalDelivery(deliveryOrder)) return;
+          const mode = normalizeMode(dependencies.getMode());
+          if (hasSupersedingFinalDelivery(deliveryOrder)) return;
+          publishRecoveryGroups(finalGroups, mode === "auto");
+          if (hasSupersedingFinalDelivery(deliveryOrder)) return;
+          if (mode === "auto") scheduleAutoProbe();
+        }
+        function observeFinalCdnDelivery2(playUrl, deliveryOrder) {
+          if (!playUrl || typeof playUrl !== "object") return playUrl;
+          const acceptedOrder = Number.isSafeInteger(deliveryOrder) && deliveryOrder > 0 ? deliveryOrder : beginFinalCdnDelivery2();
+          finalDeliveryOrder = Math.max(finalDeliveryOrder, acceptedOrder);
+          if (acceptedOrder < latestAcceptedFinalDeliveryOrder) return playUrl;
+          pendingFinalDeliveries.push({ playUrl, deliveryOrder: acceptedOrder });
+          if (processingFinalDeliveries) return playUrl;
+          processingFinalDeliveries = true;
+          try {
+            while (pendingFinalDeliveries.length > 0) {
+              const pending = pendingFinalDeliveries.shift();
+              try {
+                commitFinalCdnDelivery(pending.playUrl, pending.deliveryOrder);
+              } catch {
+                try {
+                  dependencies.log("cdn-final-delivery-publication-failed");
+                } catch {
+                }
+              }
+            }
+          } finally {
+            processingFinalDeliveries = false;
+          }
+          return playUrl;
+        }
+        function selectProbeTargets() {
+          const indexesByHost = /* @__PURE__ */ new Map();
+          const targets = [];
+          for (const candidate of currentCandidates) {
+            if (!candidate.probeAllowed) continue;
+            const existingIndex = indexesByHost.get(candidate.host);
+            if (existingIndex === void 0) {
+              indexesByHost.set(candidate.host, targets.length);
+              targets.push({ ...candidate });
+              continue;
+            }
+            if (candidate.bandwidthBps !== void 0) {
+              targets[existingIndex].bandwidthBps = Math.max(
+                targets[existingIndex].bandwidthBps ?? 0,
+                candidate.bandwidthBps
+              );
+            }
+          }
+          return targets;
+        }
+        async function probeCandidate(candidate, byteCap, timeoutMs, stage) {
+          const fetchImpl = dependencies.fetch;
+          if (!candidate.probeAllowed || !fetchImpl || byteCap <= 0) {
+            return {
+              host: candidate.host,
+              kind: "unprobeable",
+              bytes: 0,
+              observedBytes: 0,
+              budgetBytes: 0,
+              safeToContinue: true,
+              stage,
+              ...candidate.bandwidthBps === void 0 ? {} : { bandwidthBps: candidate.bandwidthBps }
+            };
+          }
+          const controller = dependencies.createAbortController();
+          trackActiveController(controller);
+          const startedAt = dependencies.now();
+          let reader;
+          let responseBody;
+          let streamDone = false;
+          let timedOut = false;
+          let cleanupRequested = false;
+          let requestOutcomeChosen = false;
+          let accountedBytes = 0;
+          let observedBytes = 0;
+          let timerHandle = 0;
+          let readerCleanup;
+          let bodyCleanup;
+          let readerLockReleased = false;
+          let cleanupProven = true;
+          let lateCleanupSettled = false;
+          let requestSettled = false;
+          const observeCleanup = (cleanup) => {
+            cleanupProven && (cleanupProven = cleanup.completedWithinBudget);
+            if (!cleanup.completedWithinBudget) {
+              void cleanup.settled.then(() => {
+                lateCleanupSettled = true;
+                if (requestSettled) releaseActiveController(controller);
+              });
+            }
+            return cleanup.completedWithinBudget;
+          };
+          const releaseReaderLock = () => {
+            if (!reader || readerLockReleased) return;
+            try {
+              reader.releaseLock();
+              readerLockReleased = true;
+            } catch {
+            }
+          };
+          const cleanupReader = () => {
+            if (!reader) return Promise.resolve(true);
+            if (!readerCleanup) {
+              readerCleanup = (async () => {
+                let completed = true;
+                try {
+                  if (!streamDone) {
+                    completed = observeCleanup(
+                      await cancelWithBudget(() => reader.cancel(), controller, timeoutMs)
+                    );
+                  }
+                } finally {
+                  releaseReaderLock();
+                }
+                return completed;
+              })();
+            }
+            return readerCleanup;
+          };
+          const cleanupAvailableResource = () => {
+            if (reader) return cleanupReader();
+            if (!responseBody) return Promise.resolve(true);
+            if (!bodyCleanup) {
+              bodyCleanup = cancelWithBudget(() => responseBody.cancel(), controller, timeoutMs).then(observeCleanup);
+            }
+            return bodyCleanup;
+          };
+          const snapshot = (kind) => ({
+            host: candidate.host,
+            kind,
+            bytes: accountedBytes,
+            observedBytes,
+            budgetBytes: Math.max(accountedBytes, observedBytes),
+            safeToContinue: true,
+            stage,
+            ...candidate.bandwidthBps === void 0 ? {} : { bandwidthBps: candidate.bandwidthBps }
+          });
+          const timeoutToken = /* @__PURE__ */ Symbol("timeout");
+          const abortToken = /* @__PURE__ */ Symbol("abort");
+          let resolveAbort;
+          const abortResult = new Promise((resolve) => {
+            resolveAbort = resolve;
+          });
+          const onAbort = () => {
+            cleanupRequested = true;
+            if (!requestOutcomeChosen) resolveAbort(abortToken);
+          };
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+          const timeoutResult = new Promise((resolve) => {
+            timerHandle = dependencies.setTimeout(() => {
+              timedOut = true;
+              cleanupRequested = true;
+              controller.abort();
+              resolve(timeoutToken);
+            }, timeoutMs);
+          });
+          const requestResult = (async () => {
+            try {
+              const response = await fetchImpl(candidate.url, {
+                method: "GET",
+                mode: "cors",
+                credentials: "omit",
+                cache: "no-store",
+                redirect: "error",
+                signal: controller.signal
+              });
+              responseBody = response.body;
+              if (cleanupRequested) {
+                await cleanupAvailableResource();
+                return snapshot(timedOut ? "failure" : "unprobeable");
+              }
+              if (response.type === "opaque" || response.ok === false) {
+                requestOutcomeChosen = true;
+                await cleanupAvailableResource();
+                return snapshot(response.type === "opaque" ? "unprobeable" : "failure");
+              }
+              reader = responseBody?.getReader();
+              if (!reader) {
+                requestOutcomeChosen = true;
+                return snapshot("unprobeable");
+              }
+              if (cleanupRequested) {
+                await cleanupReader();
+                return snapshot(timedOut ? "failure" : "unprobeable");
+              }
+              let firstByteAt;
+              while (accountedBytes < byteCap && !cleanupRequested) {
+                const chunk = await reader.read();
+                if (chunk.done) {
+                  streamDone = true;
+                  break;
+                }
+                const available2 = chunk.value?.byteLength ?? 0;
+                observedBytes = Math.min(Number.MAX_SAFE_INTEGER, observedBytes + available2);
+                if (cleanupRequested) return snapshot(timedOut ? "failure" : "unprobeable");
+                if (firstByteAt === void 0) firstByteAt = dependencies.now();
+                accountedBytes += Math.min(available2, byteCap - accountedBytes);
+              }
+              if (cleanupRequested) return snapshot(timedOut ? "failure" : "unprobeable");
+              const endedAt = dependencies.now();
+              const elapsedMs = Math.max(1, endedAt - (firstByteAt ?? startedAt));
+              requestOutcomeChosen = true;
+              if (accountedBytes === 0) return snapshot("unprobeable");
+              const throughputKbps = accountedBytes > 0 ? accountedBytes * 8 / elapsedMs : void 0;
+              return {
+                ...snapshot("success"),
+                ttfbMs: Math.max(0, (firstByteAt ?? endedAt) - startedAt),
+                throughputKbps,
+                ...throughputKbps === void 0 || candidate.bandwidthBps === void 0 ? {} : { bitrateMargin: throughputKbps / (candidate.bandwidthBps / 1e3) }
+              };
+            } finally {
+              if (reader) {
+                await cleanupReader();
+                releaseReaderLock();
+              }
+            }
+          })().finally(() => {
+            requestSettled = true;
+            if (cleanupProven || lateCleanupSettled) releaseActiveController(controller);
+          });
+          let outcome;
+          try {
+            const winner = await Promise.race([requestResult, timeoutResult, abortResult]);
+            outcome = winner === timeoutToken ? snapshot("failure") : winner === abortToken ? snapshot(timedOut ? "failure" : "unprobeable") : winner;
+          } catch {
+            outcome = snapshot(timedOut ? "failure" : "unprobeable");
+          } finally {
+            dependencies.clearTimeout(timerHandle);
+            if (cleanupRequested) {
+              await cleanupAvailableResource();
+              await Promise.resolve();
+              await Promise.resolve();
+            }
+            controller.signal.removeEventListener("abort", onAbort);
+          }
+          const finalOutcome = timedOut ? snapshot("failure") : outcome;
+          const safeToContinue = requestSettled && cleanupProven;
+          return {
+            ...finalOutcome,
+            budgetBytes: safeToContinue ? Math.max(finalOutcome.bytes, finalOutcome.observedBytes) : Math.max(byteCap, finalOutcome.observedBytes),
+            safeToContinue
+          };
+        }
+        function updateHealth(outcome) {
+          if (outcome.kind === "unprobeable") return;
+          const previous = normalizeHealth2(healthByHost[outcome.host], outcome.host) ?? { host: outcome.host };
+          const previousSuccesses = previous.successes ?? 0;
+          const previousFailures = previous.failures ?? 0;
+          const previousSamples = previous.samples ?? 0;
+          if (outcome.kind === "failure") {
+            healthByHost[outcome.host] = {
+              ...previous,
+              failures: previousFailures + 1,
+              samples: previousSamples + 1
+            };
+            return;
+          }
+          const nextSuccesses = previousSuccesses + 1;
+          const previousMeasuredBytes = previous.measuredBytes ?? 0;
+          const sampleBytes = outcome.bytes;
+          const measuredBytes = previousMeasuredBytes + sampleBytes;
+          healthByHost[outcome.host] = {
+            ...previous,
+            successes: nextSuccesses,
+            failures: previousFailures,
+            samples: previousSamples + 1,
+            throughputKbps: outcome.throughputKbps === void 0 ? previous.throughputKbps : previous.throughputKbps === void 0 || previousMeasuredBytes === 0 ? outcome.throughputKbps : (previous.throughputKbps * previousMeasuredBytes + outcome.throughputKbps * sampleBytes) / Math.max(1, measuredBytes),
+            ttfbMs: outcome.ttfbMs === void 0 ? previous.ttfbMs : ((previous.ttfbMs ?? outcome.ttfbMs) * previousSuccesses + outcome.ttfbMs) / nextSuccesses,
+            measuredBytes
+          };
+        }
+        function statusFromOutcomes(outcomes, total, budgetLimitedHosts, incomplete = false) {
+          const byHost = /* @__PURE__ */ new Map();
+          for (const outcome of outcomes) {
+            const hostOutcomes = byHost.get(outcome.host) ?? [];
+            hostOutcomes.push(outcome);
+            byHost.set(outcome.host, hostOutcomes);
+          }
+          const healthyHosts = [];
+          const failedHosts = [];
+          const unprobeableHosts = policyBlockedHosts(currentCandidates);
+          for (const [host, hostOutcomes] of byHost) {
+            if (hostOutcomes.some((outcome) => outcome.kind === "success")) healthyHosts.push(host);
+            else if (hostOutcomes.some((outcome) => outcome.kind === "failure")) failedHosts.push(host);
+            else unprobeableHosts.push(host);
+          }
+          healthyHosts.sort();
+          failedHosts.sort();
+          const sortedUnprobeableHosts = uniqueSorted(unprobeableHosts);
+          const sortedBudgetLimitedHosts = uniqueSorted(budgetLimitedHosts);
+          const hostDiagnostics = [];
+          for (const [host, hostOutcomes] of byHost) {
+            const successful = hostOutcomes.filter((outcome) => outcome.kind === "success");
+            const representative = successful[successful.length - 1] ?? hostOutcomes[hostOutcomes.length - 1];
+            const classification = successful.length ? "healthy" : hostOutcomes.some((outcome) => outcome.kind === "failure") ? "failed" : "unprobeable";
+            hostDiagnostics.push({
+              host,
+              classification,
+              stagesCompleted: hostOutcomes.length,
+              accountedBytes: hostOutcomes.reduce((sum, outcome) => sum + outcome.bytes, 0),
+              observedBytes: hostOutcomes.reduce((sum, outcome) => sum + outcome.observedBytes, 0),
+              ...representative.throughputKbps === void 0 ? {} : { throughputKbps: representative.throughputKbps },
+              ...representative.ttfbMs === void 0 ? {} : { ttfbMs: representative.ttfbMs },
+              ...representative.bandwidthBps === void 0 ? {} : { bandwidthBps: representative.bandwidthBps },
+              ...representative.bitrateMargin === void 0 ? {} : { bitrateMargin: representative.bitrateMargin }
+            });
+          }
+          for (const host of policyBlockedHosts(currentCandidates)) {
+            if (byHost.has(host)) continue;
+            hostDiagnostics.push({
+              host,
+              classification: "unprobeable",
+              stagesCompleted: 0,
+              accountedBytes: 0,
+              observedBytes: 0
+            });
+          }
+          for (const host of sortedBudgetLimitedHosts) {
+            hostDiagnostics.push({
+              host,
+              classification: "budget-limited",
+              stagesCompleted: 0,
+              accountedBytes: 0,
+              observedBytes: 0
+            });
+          }
+          hostDiagnostics.sort((left, right) => left.host.localeCompare(right.host));
+          let state;
+          let message;
+          const complete = outcomes.length === total && !incomplete;
+          if (healthyHosts.length && complete && !failedHosts.length && !sortedUnprobeableHosts.length && !sortedBudgetLimitedHosts.length) {
+            state = "ready";
+            message = "CDN health probe completed.";
+          } else if (!complete || sortedBudgetLimitedHosts.length || [healthyHosts.length, failedHosts.length, sortedUnprobeableHosts.length].filter(Boolean).length > 1) {
+            state = "partial";
+            message = "CDN health probe completed with partial results.";
+          } else if (failedHosts.length) {
+            state = "failed";
+            message = "CDN health probe did not find a healthy host.";
+          } else {
+            state = "unprobeable";
+            message = "CDN health could not be measured in this browser context.";
+          }
+          return {
+            state,
+            message,
+            source: "network",
+            candidateHosts: uniqueSorted(currentCandidates.map((candidate) => candidate.host)),
+            probedHosts: uniqueSorted(outcomes.map((outcome) => outcome.host)),
+            healthyHosts,
+            failedHosts,
+            unprobeableHosts: sortedUnprobeableHosts,
+            budgetLimitedHosts: sortedBudgetLimitedHosts,
+            hostDiagnostics,
+            completed: outcomes.length,
+            total,
+            updatedAt: dependencies.now()
+          };
+        }
+        function compareProbeRank(left, right) {
+          const leftThroughputKnown = left.throughputKbps !== void 0;
+          const rightThroughputKnown = right.throughputKbps !== void 0;
+          if (leftThroughputKnown !== rightThroughputKnown) return leftThroughputKnown ? -1 : 1;
+          if (left.throughputKbps !== right.throughputKbps) {
+            return (right.throughputKbps ?? 0) - (left.throughputKbps ?? 0);
+          }
+          const leftMarginKnown = left.bitrateMargin !== void 0;
+          const rightMarginKnown = right.bitrateMargin !== void 0;
+          if (leftMarginKnown !== rightMarginKnown) return leftMarginKnown ? -1 : 1;
+          if (left.bitrateMargin !== right.bitrateMargin) {
+            return (right.bitrateMargin ?? 0) - (left.bitrateMargin ?? 0);
+          }
+          const leftTtfbKnown = left.ttfbMs !== void 0;
+          const rightTtfbKnown = right.ttfbMs !== void 0;
+          if (leftTtfbKnown !== rightTtfbKnown) return leftTtfbKnown ? -1 : 1;
+          return (left.ttfbMs ?? Number.MAX_SAFE_INTEGER) - (right.ttfbMs ?? Number.MAX_SAFE_INTEGER);
+        }
+        async function runProbe(runGeneration) {
+          const runNetworkHint = currentNetworkHint();
+          const allTargets = selectProbeTargets();
+          if (!allTargets.length) {
+            const candidateHosts2 = uniqueSorted(currentCandidates.map((candidate) => candidate.host));
+            const next2 = candidateHosts2.length ? {
+              state: "unprobeable",
+              message: "No current CDN candidates are eligible for active probing.",
+              candidateHosts: candidateHosts2,
+              probedHosts: [],
+              healthyHosts: [],
+              failedHosts: [],
+              unprobeableHosts: candidateHosts2,
+              budgetLimitedHosts: [],
+              hostDiagnostics: candidateHosts2.map((host) => ({
+                host,
+                classification: "unprobeable",
+                stagesCompleted: 0,
+                accountedBytes: 0,
+                observedBytes: 0
+              })),
+              completed: 0,
+              total: 0,
+              updatedAt: dependencies.now()
+            } : emptyStatus("No CDN candidates are available for probing.");
+            publish(next2);
+            if (next2.state === "unprobeable") rememberUnprobeable(next2, runGeneration);
+            return cloneStatus(next2);
+          }
+          const budgetLimitedHosts = /* @__PURE__ */ new Set();
+          const candidateHosts = uniqueSorted(currentCandidates.map((candidate) => candidate.host));
+          publish({
+            state: "probing",
+            message: "Testing current CDN hosts.",
+            source: "network",
+            candidateHosts,
+            probedHosts: [],
+            healthyHosts: [],
+            failedHosts: [],
+            unprobeableHosts: policyBlockedHosts(currentCandidates),
+            budgetLimitedHosts: [],
+            hostDiagnostics: policyBlockedHosts(currentCandidates).map((host) => ({
+              host,
+              classification: "unprobeable",
+              stagesCompleted: 0,
+              accountedBytes: 0,
+              observedBytes: 0
+            })),
+            completed: 0,
+            total: allTargets.length,
+            updatedAt: dependencies.now()
+          });
+          const outcomes = [];
+          const totalStartedAt = dependencies.now();
+          let accountedRemaining = limits.maxTotalBytes;
+          let observedRemaining = limits.maxTotalBytes;
+          let totalAttempts = allTargets.length;
+          let contextValid = true;
+          let cleanupSafe = true;
+          const probeStage = async (targets, requestedCap, stage) => {
+            const stageOutcomes = [];
+            const stageStartedAt = dependencies.now();
+            let offset = 0;
+            while (offset < targets.length) {
+              if (currentNetworkHint() !== runNetworkHint || runGeneration !== generation) {
+                contextValid = false;
+                break;
+              }
+              const totalRemainingMs = limits.totalTimeoutMs - Math.max(0, dependencies.now() - totalStartedAt);
+              const stageRemainingMs = limits.stageTimeoutMs - Math.max(0, dependencies.now() - stageStartedAt);
+              if (totalRemainingMs <= 0 || stageRemainingMs <= 0 || !cleanupSafe) break;
+              const batch = targets.slice(offset, offset + limits.maxConcurrent);
+              const availableBytes = Math.min(accountedRemaining, Math.max(0, observedRemaining));
+              let caps;
+              if (stage === 1) {
+                const runnableCount = Math.min(batch.length, Math.floor(availableBytes / requestedCap));
+                if (runnableCount === 0) {
+                  targets.slice(offset).forEach((target2) => budgetLimitedHosts.add(target2.host));
+                  break;
+                }
+                caps = Array.from({ length: runnableCount }, () => requestedCap);
+              } else {
+                const batchBudget = Math.min(availableBytes, requestedCap * batch.length);
+                const baseCap = Math.floor(batchBudget / batch.length);
+                const extraBytes = batchBudget % batch.length;
+                caps = batch.map((_, index) => Math.min(
+                  requestedCap,
+                  baseCap + (index < extraBytes ? 1 : 0)
+                ));
+              }
+              const runnable = batch.slice(0, caps.length).map((candidate, index) => ({ candidate, cap: caps[index] })).filter((entry) => entry.cap > 0);
+              if (!runnable.length) break;
+              const reservedBytes = runnable.reduce((sum, entry) => sum + entry.cap, 0);
+              accountedRemaining -= reservedBytes;
+              const timeoutMs = Math.max(1, Math.min(
+                limits.requestTimeoutMs,
+                stageRemainingMs,
+                totalRemainingMs
+              ));
+              const batchOutcomes = await Promise.all(runnable.map((entry) => probeCandidate(entry.candidate, entry.cap, timeoutMs, stage)));
+              if (currentNetworkHint() !== runNetworkHint || runGeneration !== generation) {
+                contextValid = false;
+                break;
+              }
+              let accountedCharge = 0;
+              let observedCharge = 0;
+              for (let index = 0; index < batchOutcomes.length; index += 1) {
+                const outcome = batchOutcomes[index];
+                accountedCharge += outcome.safeToContinue ? outcome.bytes : runnable[index].cap;
+                observedCharge += outcome.budgetBytes;
+                cleanupSafe && (cleanupSafe = outcome.safeToContinue);
+                outcomes.push(outcome);
+                stageOutcomes.push(outcome);
+                updateHealth(outcome);
+              }
+              accountedRemaining += Math.max(0, reservedBytes - accountedCharge);
+              observedRemaining -= observedCharge;
+              offset += runnable.length;
+              publish({
+                ...statusFromOutcomes(outcomes, totalAttempts, [...budgetLimitedHosts], !cleanupSafe),
+                state: "probing",
+                message: "Testing current CDN hosts."
+              });
+            }
+            return stageOutcomes;
+          };
+          const initialOutcomes = await probeStage(allTargets, limits.initialBytesPerRequest, 1);
+          const targetOrder = new Map(allTargets.map((target2, index) => [target2.host, index]));
+          const initialStageComplete = contextValid && cleanupSafe && initialOutcomes.length === allTargets.length;
+          const followupTargets = limits.maxStages < 2 || !initialStageComplete ? [] : initialOutcomes.map((outcome) => ({ outcome, index: targetOrder.get(outcome.host) ?? Number.MAX_SAFE_INTEGER })).filter((entry) => entry.outcome.kind === "success").sort((left, right) => compareProbeRank(left.outcome, right.outcome) || left.index - right.index).slice(0, 2).map((entry) => allTargets[entry.index]);
+          totalAttempts += followupTargets.length;
+          if (followupTargets.length) {
+            await probeStage(followupTargets, limits.maxBytesPerRequest, 2);
+          }
+          if (!contextValid || runGeneration !== generation) {
+            ensureHealthForCurrentHosts();
+            return cloneStatus(status);
+          }
+          const cacheableRound = cleanupSafe && budgetLimitedHosts.size === 0 && policyBlockedHosts(currentCandidates).length === 0 && initialOutcomes.length === allTargets.length && outcomes.length === totalAttempts && !outcomes.some((outcome) => outcome.kind === "unprobeable");
+          healthNetworkHint = runNetworkHint;
+          if (cacheableRound) {
+            healthHostHash = currentHostHash;
+            healthValidUntil = dependencies.now() + CDN_HEALTH_CACHE_TTL_MS;
+            writeCache();
+          } else {
+            healthHostHash = "";
+            healthValidUntil = 0;
+            try {
+              dependencies.storage?.removeItem(CDN_HEALTH_CACHE_KEY);
+            } catch {
+              dependencies.log("cdn-health-cache-discard-failed");
+            }
+          }
+          const next = statusFromOutcomes(outcomes, totalAttempts, [...budgetLimitedHosts], !cleanupSafe);
+          publish(next);
+          if (next.state === "unprobeable") rememberUnprobeable(next, runGeneration);
+          else clearUnprobeableSuppression();
+          return cloneStatus(next);
+        }
+        function startProbe(runGeneration) {
+          const promise = runProbe(runGeneration).finally(() => {
+            if (inFlight === promise) inFlight = void 0;
+            if (runGeneration !== generation && normalizeMode(dependencies.getMode()) === "auto") {
+              if (activeControllers.size > 0) scheduleAutoProbeAfterActiveDrain();
+              else scheduleAutoProbe();
+            }
+          });
+          inFlight = promise;
+          return promise;
+        }
+        async function runForcedProbeAfterFence() {
+          while (true) {
+            if (activeControllers.size > 0) await activeControllerDrain;
+            ensureHealthForCurrentHosts();
+            if (activeControllers.size > 0) continue;
+            const runGeneration = generation;
+            const result = await (inFlight ?? startProbe(runGeneration));
+            const terminal = result.state !== "probing" && (result.state !== "idle" || result.candidateHosts.length === 0);
+            if (runGeneration === generation && terminal) return cloneStatus(result);
+          }
+        }
+        function probeCurrentPlayUrlCdn2(options = {}) {
+          ensureHealthForCurrentHosts();
+          if (options.force && fencedProbe) return fencedProbe;
+          if (inFlight) return inFlight;
+          if (activeControllers.size > 0) {
+            if (!options.force) {
+              if (normalizeMode(dependencies.getMode()) === "auto") {
+                scheduleAutoProbeAfterActiveDrain();
+              }
+              return Promise.resolve(cloneStatus(status));
+            }
+            if (fencedProbe) return fencedProbe;
+            const promise = runForcedProbeAfterFence().finally(() => {
+              if (fencedProbe === promise) fencedProbe = void 0;
+            });
+            fencedProbe = promise;
+            return promise;
+          }
+          if (!options.force && unprobeableGeneration === generation && dependencies.now() < unprobeableUntil && suppressedUnprobeableStatus) {
+            return Promise.resolve(cloneStatus(suppressedUnprobeableStatus));
+          }
+          if (!options.force && healthHostHash === currentHostHash && dependencies.now() < healthValidUntil && Object.keys(healthByHost).length) {
+            return Promise.resolve(cloneStatus(status));
+          }
+          return startProbe(generation);
+        }
+        function clearCdnHealthCache2() {
+          generation += 1;
+          abortActiveProbes();
+          inFlight = void 0;
+          backgroundScheduled = false;
+          backgroundScheduleId += 1;
+          healthByHost = /* @__PURE__ */ Object.create(null);
+          healthHostHash = "";
+          healthNetworkHint = "";
+          healthValidUntil = 0;
+          clearUnprobeableSuppression();
+          try {
+            dependencies.storage?.removeItem(CDN_HEALTH_CACHE_KEY);
+          } catch {
+            dependencies.log("cdn-health-cache-clear-failed");
+          }
+          publish(emptyStatus("CDN health cache cleared."));
+        }
+        function getCdnProbeStatus2() {
+          return cloneStatus(status);
+        }
+        function subscribeCdnProbeStatus2(listener) {
+          listeners.add(listener);
+          try {
+            listener(cloneStatus(status));
+          } catch {
+            dependencies.log("cdn-probe-listener-failed");
+          }
+          return () => listeners.delete(listener);
+        }
+        return {
+          applyCdnPolicy: applyCdnPolicy2,
+          transformCdnPolicyForFinalDelivery: transformCdnPolicyForFinalDelivery2,
+          beginFinalCdnDelivery: beginFinalCdnDelivery2,
+          observeFinalCdnDelivery: observeFinalCdnDelivery2,
+          probeCurrentPlayUrlCdn: probeCurrentPlayUrlCdn2,
+          clearCdnHealthCache: clearCdnHealthCache2,
+          getCdnProbeStatus: getCdnProbeStatus2,
+          subscribeCdnProbeStatus: subscribeCdnProbeStatus2
+        };
+      }
+      var defaultRuntime = createCdnRuntime();
+      var applyCdnPolicy = defaultRuntime.applyCdnPolicy;
+      var transformCdnPolicyForFinalDelivery = defaultRuntime.transformCdnPolicyForFinalDelivery;
+      var beginFinalCdnDelivery = defaultRuntime.beginFinalCdnDelivery;
+      var observeFinalCdnDelivery = defaultRuntime.observeFinalCdnDelivery;
+      var probeCurrentPlayUrlCdn = defaultRuntime.probeCurrentPlayUrlCdn;
+      var clearCdnHealthCache = defaultRuntime.clearCdnHealthCache;
+      var getCdnProbeStatus = defaultRuntime.getCdnProbeStatus;
+      var subscribeCdnProbeStatus = defaultRuntime.subscribeCdnProbeStatus;
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_playurl.ts
+      function isPlayUrlPayload(value) {
+        return !!value && typeof value === "object" && (!!value.dash || !!value.durl);
+      }
+      function findPlayUrlPayload(value) {
+        const candidates = [
+          value?.result?.video_info,
+          value?.data?.video_info,
+          value?.video_info,
+          value?.result,
+          value?.data,
+          value
+        ];
+        return candidates.find(isPlayUrlPayload);
+      }
+      function applyCdnPolicyToPlayUrlResponse(value) {
+        const playUrl = findPlayUrlPayload(value);
+        if (playUrl) {
+          transformCdnPolicyForFinalDelivery(playUrl);
+        }
+        return value;
+      }
+      function beginFinalCdnPlayUrlDelivery() {
+        return beginFinalCdnDelivery();
+      }
+      function observeFinalCdnPlayUrlResponse(value, deliveryOrder) {
+        const playUrl = findPlayUrlPayload(value);
+        observeFinalCdnDelivery(playUrl ?? {}, deliveryOrder);
+        return value;
+      }
+      function deliverFinalCdnPlayUrlResponse(value, deliveryOrder, deliver) {
+        try {
+          observeFinalCdnPlayUrlResponse(value, deliveryOrder);
+        } catch {
+        }
+        return deliver(value);
+      }
+
       // packages/unblock-area-limit/src/feature/bili/area_limit_for_vue.ts
       var callbackCount = 1e3;
       function appendScript(node, innerHTML, props) {
@@ -3557,8 +7350,92 @@ function scriptSource(invokeBy) {
           Object.keys(season.epMap).forEach((epId) => removeEpAreaLimit(season.epMap[epId]));
         }
       }
+      function clonePlayInfoJson(value) {
+        if (!value || typeof value !== "object") return value;
+        return JSON.parse(JSON.stringify(value));
+      }
+      function createPlayInfoDelivery(rawValue) {
+        const cloneWithPlayInfoAliases = () => {
+          const delivery2 = clonePlayInfoJson(rawValue);
+          const playInfo = delivery2;
+          if (playInfo?.result?.video_info && playInfo?.video_info) {
+            playInfo.video_info = playInfo.result.video_info;
+          }
+          return delivery2;
+        };
+        let delivery;
+        try {
+          delivery = cloneWithPlayInfoAliases();
+        } catch (error) {
+          util_warn("clone playinfo delivery failed", error);
+          return rawValue;
+        }
+        try {
+          applyCdnPolicyToPlayUrlResponse(delivery);
+          observeFinalCdnPlayUrlResponse(delivery);
+          return delivery;
+        } catch (error) {
+          util_warn("apply CDN policy to playinfo failed", error);
+          try {
+            return cloneWithPlayInfoAliases();
+          } catch (cloneError) {
+            util_warn("clone fail-open playinfo failed", cloneError);
+            return rawValue;
+          }
+        }
+      }
+      var cdnOnlyDeliveryAccessors = /* @__PURE__ */ new WeakSet();
+      function installCdnOnlyPlayInfoDelivery(property) {
+        const target2 = window;
+        const descriptor = Object.getOwnPropertyDescriptor(target2, property);
+        if (descriptor?.get && cdnOnlyDeliveryAccessors.has(descriptor.get) || descriptor?.set && cdnOnlyDeliveryAccessors.has(descriptor.set)) return;
+        if (descriptor && !descriptor.configurable) {
+          if ("value" in descriptor && descriptor.writable) {
+            target2[property] = createPlayInfoDelivery(descriptor.value);
+            util_warn("cannot watch non-configurable CDN-only playinfo; transformed current value only", property);
+          } else {
+            util_warn("cannot watch non-configurable CDN-only playinfo", property);
+          }
+          return;
+        }
+        if (descriptor && !("value" in descriptor)) {
+          const getter2 = descriptor.get ? function() {
+            return createPlayInfoDelivery(descriptor.get.call(this));
+          } : void 0;
+          const setter2 = descriptor.set ? function(value) {
+            descriptor.set.call(this, value);
+          } : void 0;
+          if (getter2) cdnOnlyDeliveryAccessors.add(getter2);
+          if (setter2) cdnOnlyDeliveryAccessors.add(setter2);
+          Object.defineProperty(target2, property, {
+            configurable: true,
+            enumerable: descriptor.enumerable,
+            get: getter2,
+            set: setter2
+          });
+          return;
+        }
+        let delivery = createPlayInfoDelivery(descriptor?.value);
+        const getter = () => delivery;
+        const setter = descriptor?.writable === false ? void 0 : (value) => {
+          delivery = createPlayInfoDelivery(value);
+        };
+        cdnOnlyDeliveryAccessors.add(getter);
+        if (setter) cdnOnlyDeliveryAccessors.add(setter);
+        Object.defineProperty(target2, property, {
+          configurable: true,
+          enumerable: descriptor?.enumerable ?? true,
+          get: getter,
+          set: setter
+        });
+      }
       function area_limit_for_vue() {
-        if (isClosed()) return;
+        if (balh_config.is_closed) return;
+        if (isClosed()) {
+          installCdnOnlyPlayInfoDelivery("__playinfo__");
+          installCdnOnlyPlayInfoDelivery("__PLAYURL_HYDRATE_DATA__");
+          return;
+        }
         if (!(util_page.av() && balh_config.enable_in_av || util_page.new_bangumi())) {
           return;
         }
@@ -3613,7 +7490,8 @@ function scriptSource(invokeBy) {
           history.replaceState = wrapHistory(history.replaceState, true);
         }
         function replacePlayInfo() {
-          const initialPlayInfo = window.__playinfo__;
+          const initialPlayInfo = createPlayInfoDelivery(window.__playinfo__);
+          window.__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(window.__PLAYURL_HYDRATE_DATA__);
           util_debug("window.__playinfo__", initialPlayInfo);
           window.__playinfo__origin = initialPlayInfo;
           let playinfo = void 0;
@@ -3621,7 +7499,7 @@ function scriptSource(invokeBy) {
           let currentPlayInfoEpId;
           let currentPlayInfoRequestId = 0;
           let playerStatusRequestId;
-          const proxyPlayInfoCachePrefix = "balh_proxy_playinfo_v1:";
+          const proxyPlayInfoCachePrefix = "balh_proxy_playinfo_v2:";
           const proxyPlayInfoReloadPrefix = "balh_proxy_playinfo_reload_v1:";
           const proxyPlayInfoCacheTtl = 10 * 60 * 1e3;
           const proxyPlayUrlRequestTimeout2 = 8e3;
@@ -3895,7 +7773,10 @@ function scriptSource(invokeBy) {
               });
               try {
                 player.updateRequestConfig({
-                  reqHttpPlayUrlInfo: () => Promise2.resolve({ status: 200, data: value })
+                  reqHttpPlayUrlInfo: () => Promise2.resolve({
+                    status: 200,
+                    data: createPlayInfoDelivery(value)
+                  })
                 });
                 const result = player.reload();
                 if (result?.catch) {
@@ -3980,54 +7861,7 @@ function scriptSource(invokeBy) {
             if (playUrl.dash) {
               Objects.convertKeyToSnakeCase(playUrl.dash);
             }
-            let normalized = playUrl;
-            if (!window.__balh_app_only__ && balh_config.upos_server) {
-              normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
-            }
-            preferNonAkamaiDashUrls2(normalized?.dash);
-            return normalized;
-          }
-          function preferNonAkamaiDashUrls2(dash) {
-            if (!dash) return;
-            const streams = [
-              ...Array.isArray(dash.video) ? dash.video : [],
-              ...Array.isArray(dash.audio) ? dash.audio : [],
-              ...Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []
-            ];
-            if (dash.flac?.audio) streams.push(dash.flac.audio);
-            for (const stream of streams) {
-              preferNonAkamaiStreamUrls2(stream);
-            }
-          }
-          function preferNonAkamaiStreamUrls2(stream) {
-            if (!stream || typeof stream !== "object") return;
-            const baseUrl = stream.base_url ?? stream.baseUrl;
-            const backupUrls = [
-              ...Array.isArray(stream.backup_url) ? stream.backup_url : [],
-              ...Array.isArray(stream.backupUrl) ? stream.backupUrl : []
-            ];
-            const urls = uniqueStrings2([baseUrl, ...backupUrls]);
-            if (urls.length < 2) return;
-            const nonAkamaiUrls = urls.filter((url) => !isAkamaiUrl2(url));
-            if (!nonAkamaiUrls.length) return;
-            const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl2)];
-            const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls;
-            stream.base_url = nextBaseUrl;
-            stream.baseUrl = nextBaseUrl;
-            stream.backup_url = nextBackupUrls;
-            stream.backupUrl = nextBackupUrls;
-          }
-          function uniqueStrings2(items) {
-            const seen = /* @__PURE__ */ new Set();
-            return items.filter((item) => {
-              if (typeof item !== "string" || !item) return false;
-              if (seen.has(item)) return false;
-              seen.add(item);
-              return true;
-            });
-          }
-          function isAkamaiUrl2(url) {
-            return /(^|\/\/)[^/]*akamaized\.net\//.test(url);
+            return playUrl;
           }
           function isTransientProxyError2(error) {
             const message = describeProxyError2(error);
@@ -4051,7 +7885,11 @@ function scriptSource(invokeBy) {
             ]);
           }
           function requestProxyCandidateWithRetry2(candidate, epId, requestId, request, retryIndex = 0, preferredError) {
+            if (!isCurrentPlayInfoRequest(epId, requestId)) {
+              return Promise2.reject(new Error("stale proxy playurl"));
+            }
             return request().catch((error) => {
+              if (!isCurrentPlayInfoRequest(epId, requestId)) return Promise2.reject(error);
               const nextPreferredError = choosePreferredProxyError2(preferredError, error);
               const delay = getProxyRetryDelay2(error, retryIndex);
               if (delay === void 0) return Promise2.reject(nextPreferredError);
@@ -4134,6 +7972,9 @@ function scriptSource(invokeBy) {
             });
             let lastCandidateError;
             const requestCandidate = (index) => {
+              if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                return Promise2.reject(new Error("stale proxy playurl"));
+              }
               const candidate = candidates[index];
               if (!candidate) return Promise2.reject(lastCandidateError || new Error("proxy playurl failed"));
               const candidateParams = new URLSearchParams(params);
@@ -4156,11 +7997,18 @@ function scriptSource(invokeBy) {
                 return isBilibiliApiProxy ? `${candidate.proxyHost}/pgc/player/web/playurl?${query}` : `${candidate.proxyHost}?${query}`;
               })();
               return requestProxyCandidateWithRetry2(candidate, epId, requestId, () => requestProxyJson2(url).then((json) => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) {
+                  return Promise2.reject(new Error("stale proxy playurl"));
+                }
                 const playUrl = shouldUseMobiPlayUrl && json?.data?.video_info ? fixThailandPlayUrlJson(json) : window.__balh_app_only__ === true && json?.type === "DASH" ? fixMobiPlayUrlJson(json) : Promise2.resolve(json?.result?.video_info ?? json?.data?.video_info ?? json?.result ?? json?.data);
                 return playUrl.then((playUrl2) => ({ json, playUrl: playUrl2 }));
               }).then(({ json, playUrl }) => {
                 const normalizedPlayUrl = normalizeProxyPlayUrl2(playUrl);
                 if ((json?.code === 0 || normalizedPlayUrl?.code === 0 || shouldUseMobiPlayUrl && normalizedPlayUrl?.dash) && normalizedPlayUrl?.dash) {
+                  if (!shouldApplyProxyPlayInfo(value, requestId)) {
+                    return Promise2.reject(new Error("stale proxy playurl"));
+                  }
+                  const resultValue = clonePlayInfoJson(value);
                   util_debug("replace playinfo by proxy success", {
                     epId,
                     proxyHost: redactProxyHost2(candidate.proxyHost),
@@ -4168,21 +8016,22 @@ function scriptSource(invokeBy) {
                     videoCount: normalizedPlayUrl.dash?.video?.length,
                     audioCount: normalizedPlayUrl.dash?.audio?.length
                   });
-                  value.result.play_video_type = "dash";
-                  delete value.result.play_check;
-                  value.result.video_info = normalizedPlayUrl;
-                  value.video_info = normalizedPlayUrl;
-                  removePlayInfoAreaLimit(value);
-                  storeBangumiArea2(value, candidate.area);
+                  resultValue.result.play_video_type = "dash";
+                  delete resultValue.result.play_check;
+                  resultValue.result.video_info = normalizedPlayUrl;
+                  resultValue.video_info = normalizedPlayUrl;
+                  removePlayInfoAreaLimit(resultValue);
+                  storeBangumiArea2(resultValue, candidate.area);
                   playerStatusForRequest(epId, requestId, "解析成功，正在启动播放器", {
                     detail: `${candidate.label}服务器，用时${Date.now() - startedAt}ms`,
                     state: "success"
                   });
-                  hidePlayerStatusWhenVideoReady(getPlayInfoEpId(value), requestId);
-                  return value;
+                  hidePlayerStatusWhenVideoReady(getPlayInfoEpId(resultValue), requestId);
+                  return resultValue;
                 }
                 return Promise2.reject(json);
               })).catch((error) => {
+                if (!isCurrentPlayInfoRequest(epId, requestId)) return Promise2.reject(error);
                 lastCandidateError = choosePreferredProxyError2(lastCandidateError, error);
                 playerStatusForRequest(epId, requestId, `正在尝试下一个解析服务器`, {
                   detail: `${candidate.label}失败：${describeProxyError2(error)}`
@@ -4284,13 +8133,13 @@ function scriptSource(invokeBy) {
                     if (!pendingPlayInfo) {
                       return Promise2.reject(new Error("proxy playurl missing"));
                     }
-                    return pendingPlayInfo.then((value2) => {
-                      if (pendingRequestId !== currentPlayInfoRequestId) {
+                    return pendingPlayInfo.then((rawValue) => {
+                      if (!shouldApplyProxyPlayInfo(rawValue, pendingRequestId)) {
                         return Promise2.reject(new Error("stale proxy playurl"));
                       }
-                      cachePlayInfo(value2, false);
-                      window.__PLAYURL_HYDRATE_DATA__ = value2;
-                      return { status: 200, data: value2 };
+                      cachePlayInfo(rawValue, false);
+                      window.__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(rawValue);
+                      return { status: 200, data: createPlayInfoDelivery(rawValue) };
                     }).catch((error) => {
                       util_warn("replace playinfo by proxy failed", error);
                       return Promise2.reject(error);
@@ -4332,7 +8181,7 @@ function scriptSource(invokeBy) {
                 state: "success"
               });
               cachePlayInfo(cachedPlayInfo, false);
-              window.__PLAYURL_HYDRATE_DATA__ = cachedPlayInfo;
+              window.__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(cachedPlayInfo);
               deferNanoCreatePlayer(Promise2.resolve(cachedPlayInfo), cachedPlayInfo, requestId2);
               const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(cachedPlayInfo);
               reloadOnceAfterProxyReady(cachedPlayInfo, playerReloadScheduled ? 3e3 : 0);
@@ -4349,13 +8198,13 @@ function scriptSource(invokeBy) {
             cachePlayInfo(value, false);
             deferNanoCreatePlayer(playInfoPromise, value, requestId);
             const pendingRequestId = requestId;
-            playInfoPromise.then((value2) => {
-              if (!shouldApplyProxyPlayInfo(value2, pendingRequestId)) return;
-              cachePlayInfo(value2, false);
-              window.__PLAYURL_HYDRATE_DATA__ = value2;
-              storeProxyPlayInfo(value2);
-              const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(value2);
-              reloadOnceAfterProxyReady(value2, playerReloadScheduled ? 3e3 : 0);
+            playInfoPromise.then((rawValue) => {
+              if (!shouldApplyProxyPlayInfo(rawValue, pendingRequestId)) return;
+              storeProxyPlayInfo(rawValue);
+              cachePlayInfo(rawValue, false);
+              window.__PLAYURL_HYDRATE_DATA__ = createPlayInfoDelivery(rawValue);
+              const playerReloadScheduled = reloadExistingPlayerWithProxyPlayInfo(rawValue);
+              reloadOnceAfterProxyReady(rawValue, playerReloadScheduled ? 3e3 : 0);
             }).catch((error) => util_warn("replace hydration playinfo failed", error));
             return true;
           }
@@ -4379,10 +8228,11 @@ function scriptSource(invokeBy) {
             }
           }
           function cachePlayInfo(value, updateCurrentPromise = true) {
-            playinfo = value;
+            playinfo = createPlayInfoDelivery(value);
             if (value && updateCurrentPromise) {
               setCurrentPlayInfoPromise(Promise2.resolve(value), getPlayInfoEpId(value));
             }
+            return playinfo;
           }
           replaceHydrationPlayInfo(initialPlayInfo);
           Object.defineProperty(window, "__playinfo__", {
@@ -4757,8 +8607,8 @@ function scriptSource(invokeBy) {
           subtitle_ui_present: boolLabel(!!document.body?.innerText?.includes("多语言字幕")),
           player_status: playerStatus?.innerText?.trim() || "",
           player_status_state: playerStatus?.dataset?.state || "",
-          video_current_time: video ? finiteNumber(video.currentTime) : "",
-          video_duration: video ? finiteNumber(video.duration) : "",
+          video_current_time: video ? finiteNumber2(video.currentTime) : "",
+          video_duration: video ? finiteNumber2(video.duration) : "",
           video_paused: video ? boolLabel(video.paused) : "",
           video_ready_state: video?.readyState ?? "",
           video_network_state: video?.networkState ?? "",
@@ -4840,7 +8690,7 @@ function scriptSource(invokeBy) {
         const value = values.find((value2) => value2 != null && value2 !== "" && value2 !== "0");
         return value == null ? "" : String(value);
       }
-      function finiteNumber(value) {
+      function finiteNumber2(value) {
         return Number.isFinite(value) ? Math.round(value * 1e3) / 1e3 : "";
       }
       function formatMediaError(error) {
@@ -5043,6 +8893,193 @@ function scriptSource(invokeBy) {
         }
       };
 
+      // packages/unblock-area-limit/src/feature/bili/restore_comments.ts
+      var moduleSelector = "#comment-module";
+      var componentSelector = "bili-comments";
+      var bangumiPath = /^\/bangumi\/play\/(?:ep|ss)\d+\/?$/;
+      var commentsHiddenKey = "balh_hide_comments";
+      var commentsPreferenceEvent = "balh-comments-preference-change";
+      var stopCurrent;
+      var savedDisplays = /* @__PURE__ */ new WeakMap();
+      function isBangumiCommentsPreferenceAvailable() {
+        return location.hostname === "www.bilibili.com";
+      }
+      function readBangumiCommentsHidden() {
+        try {
+          return window.localStorage.getItem(commentsHiddenKey) === "true";
+        } catch {
+          return false;
+        }
+      }
+      function writeBangumiCommentsHidden(hidden) {
+        try {
+          window.localStorage.setItem(commentsHiddenKey, String(hidden));
+        } catch {
+          return false;
+        }
+        window.dispatchEvent(new CustomEvent(commentsPreferenceEvent, { detail: hidden }));
+        return true;
+      }
+      function startRestoreBangumiComments(enabled) {
+        if (stopCurrent) {
+          if (enabled) return stopCurrent;
+          stopCurrent();
+        }
+        if (!enabled || !isBangumiCommentsPreferenceAvailable() || typeof MutationObserver === "undefined") return () => void 0;
+        let activeModule;
+        let childObserver;
+        let styleObserver;
+        let stopped = false;
+        function detachModule() {
+          childObserver?.disconnect();
+          styleObserver?.disconnect();
+          childObserver = void 0;
+          styleObserver = void 0;
+          const savedDisplay = activeModule && savedDisplays.get(activeModule);
+          if (activeModule && savedDisplay && activeModule.style.getPropertyValue("display") === "none" && activeModule.style.getPropertyPriority("display") === "important") {
+            if (savedDisplay.value) activeModule.style.setProperty("display", savedDisplay.value, savedDisplay.priority);
+            else activeModule.style.removeProperty("display");
+          }
+          if (activeModule) savedDisplays.delete(activeModule);
+          activeModule = void 0;
+        }
+        function suspendForRoute() {
+          detachModule();
+        }
+        function refreshRoute() {
+          if (!isBangumiPage()) {
+            suspendForRoute();
+            return;
+          }
+          if (!activeModule) {
+            const module = document.querySelector(moduleSelector);
+            if (module) watchModule(module);
+          } else if (hasValidComponent(activeModule)) {
+            applyVisibility(activeModule);
+          }
+        }
+        function containsValidComponent(node) {
+          if (!(node instanceof Element)) return false;
+          return node.matches(componentSelector) && validParams(node) || hasValidComponent(node);
+        }
+        function watchModule(module) {
+          if (activeModule === module) return;
+          detachModule();
+          if (!isBangumiPage()) return;
+          activeModule = module;
+          if (hasValidComponent(module)) applyVisibility(module);
+          childObserver = new MutationObserver((records) => {
+            if (!isBangumiPage()) {
+              suspendForRoute();
+              return;
+            }
+            const addedValidComponent = records.some((record) => Array.from(record.addedNodes).some(containsValidComponent));
+            const updatedValidParams = records.some((record) => record.type === "attributes" && record.target instanceof Element && record.target.matches(componentSelector) && validParams(record.target));
+            if ((addedValidComponent || updatedValidParams) && hasValidComponent(module)) {
+              applyVisibility(module);
+            }
+          });
+          childObserver.observe(module, { childList: true, attributes: true, attributeFilter: ["data-params"], subtree: true });
+          styleObserver = new MutationObserver(() => {
+            if (!isBangumiPage()) {
+              suspendForRoute();
+              return;
+            }
+            if (hasValidComponent(module)) applyVisibility(module);
+          });
+          styleObserver.observe(module, { attributes: true, attributeFilter: ["style"] });
+        }
+        function findModule(node) {
+          if (!(node instanceof Element)) return null;
+          return node.matches(moduleSelector) ? node : node.querySelector(moduleSelector);
+        }
+        const discover = new MutationObserver((records) => {
+          if (!isBangumiPage()) {
+            suspendForRoute();
+            return;
+          }
+          if (activeModule && !activeModule.isConnected) {
+            detachModule();
+          }
+          if (activeModule) return;
+          const currentModule = document.querySelector(moduleSelector);
+          if (currentModule) {
+            watchModule(currentModule);
+            return;
+          }
+          for (const record of records) record.addedNodes.forEach((node) => {
+            const module = findModule(node);
+            if (module?.isConnected) watchModule(module);
+          });
+        });
+        discover.observe(document, { childList: true, subtree: true });
+        const existing = document.querySelector(moduleSelector);
+        if (existing) watchModule(existing);
+        const onPreferenceChange = () => {
+          refreshRoute();
+        };
+        const onStorage = (event) => {
+          if (event.key !== commentsHiddenKey && event.key !== null) return;
+          onPreferenceChange();
+        };
+        const onPageShow = () => refreshRoute();
+        window.addEventListener(commentsPreferenceEvent, onPreferenceChange);
+        window.addEventListener("storage", onStorage);
+        window.addEventListener("pageshow", onPageShow);
+        window.addEventListener("popstate", onPageShow);
+        window.addEventListener("hashchange", onPageShow);
+        const cleanup = () => {
+          if (stopped) return;
+          stopped = true;
+          discover.disconnect();
+          detachModule();
+          window.removeEventListener("pagehide", onPageHide);
+          window.removeEventListener(commentsPreferenceEvent, onPreferenceChange);
+          window.removeEventListener("storage", onStorage);
+          window.removeEventListener("pageshow", onPageShow);
+          window.removeEventListener("popstate", onPageShow);
+          window.removeEventListener("hashchange", onPageShow);
+          if (stopCurrent === cleanup) stopCurrent = void 0;
+        };
+        const onPageHide = (event) => {
+          if (!event.persisted) cleanup();
+        };
+        stopCurrent = cleanup;
+        window.addEventListener("pagehide", onPageHide);
+        return cleanup;
+      }
+      function isBangumiPage() {
+        return isBangumiCommentsPreferenceAvailable() && bangumiPath.test(location.pathname);
+      }
+      function validParams(component) {
+        const params = component.getAttribute("data-params")?.split(",");
+        return !!params && params.length === 2 && params.every((value) => /^[1-9]\d*$/.test(value));
+      }
+      function hasValidComponent(module) {
+        return Array.from(module.querySelectorAll(componentSelector)).some(validParams);
+      }
+      function applyVisibility(module) {
+        if (!isBangumiPage()) return false;
+        if (readBangumiCommentsHidden()) {
+          if (module.style.getPropertyValue("display") === "none" && module.style.getPropertyPriority("display") === "important") return false;
+          savedDisplays.set(module, {
+            value: module.style.getPropertyValue("display"),
+            priority: module.style.getPropertyPriority("display")
+          });
+          module.style.setProperty("display", "none", "important");
+          return true;
+        }
+        const changed = module.style.getPropertyValue("display") === "none";
+        const savedDisplay = savedDisplays.get(module);
+        if (changed && savedDisplay?.value && savedDisplay.value !== "none") {
+          module.style.setProperty("display", savedDisplay.value, savedDisplay.priority);
+        } else if (changed) {
+          module.style.removeProperty("display");
+        }
+        savedDisplays.delete(module);
+        return changed;
+      }
+
       // packages/unblock-area-limit/src/feature/bili/settings.css
       var settings_default = '#balh-settings {\n    font-size: 12px;\n    color: #6d757a;\n}\n\n#balh-settings h1 {\n    color: #161a1e;\n}\n\n#balh-settings a {\n    color: #00a1d6;\n}\n\n#balh-settings a:hover {\n    color: #f25d8e;\n}\n\n#balh-settings input {\n    margin-left: 3px;\n    margin-right: 3px;\n}\n\n#balh-settings label {\n    width: 100%;\n    display: inline-block;\n    cursor: pointer;\n}\n\n#balh-settings label:after {\n    content: "";\n    width: 0;\n    height: 1px;\n    background: #4285f4;\n    transition: width .3s;\n    display: block;\n}\n\n#balh-settings label:hover:after {\n    width: 100%;\n}\n\n#balh-settings form {\n    margin: 0;\n}\n\n#balh-settings input[type="radio"] {\n    appearance: radio;\n}\n\n#balh-settings input[type="checkbox"] {\n    appearance: checkbox;\n}\n\n@keyframes balh-settings-bg {\n    from {\n        background: rgba(0, 0, 0, 0);\n    }\n\n    to {\n        background: rgba(0, 0, 0, .7);\n    }\n}\n';
 
@@ -5084,6 +9121,7 @@ function scriptSource(invokeBy) {
         pingLoop();
       };
       function settings2() {
+        const validUposServers = /* @__PURE__ */ new Set(["ali", "ks3", "kodo", "cos", "bos", "hw"]);
         const floatingSettingsHiddenSelectors = [
           '.bpx-player-container[data-screen="web"]',
           '.bpx-player-container[data-screen="full"]',
@@ -5275,6 +9313,7 @@ function scriptSource(invokeBy) {
         }
         function _showSettings() {
           document.body.appendChild(settingsDOM);
+          refreshCommentsPreferenceControl();
           var form = settingsDOM.querySelector("form");
           Object.getOwnPropertyNames(form.elements).forEach(function(name) {
             if (name.startsWith("balh_")) {
@@ -5287,6 +9326,8 @@ function scriptSource(invokeBy) {
               }
             }
           });
+          syncCdnSettingsControls();
+          renderCdnProbeStatus(getCdnProbeStatus());
           document.body.style.overflow = "hidden";
         }
         function showSettings() {
@@ -5296,10 +9337,6 @@ function scriptSource(invokeBy) {
           window.addEventListener("message", (event) => {
             if (event.data === "balh-show-setting") {
               _showSettings();
-              const uposServer = document.getElementById("upos-server");
-              if (uposServer) {
-                uposServer.value = balh_config.upos_server || "";
-              }
             }
           });
         }
@@ -5318,6 +9355,7 @@ function scriptSource(invokeBy) {
         function onSettingsFormChange(e) {
           const target2 = e.target;
           var name = target2.name;
+          if (!name.startsWith("balh_")) return;
           var value = target2.type === "checkbox" ? target2.checked ? r.const.TRUE : r.const.FALSE : target2.value.trim();
           if (name.startsWith("balh_server_custom")) {
             if (r.regex.bilibili_api_proxy.test(`https://${value}`)) {
@@ -5331,6 +9369,46 @@ function scriptSource(invokeBy) {
           }
           balh_config[name.replace("balh_", "")] = value;
           util_debug(name, " => ", value);
+          if (name === "balh_cdn_mode") {
+            syncCdnSettingsControls();
+          }
+        }
+        function syncCdnSettingsControls() {
+          const cdnMode = settingsDOM.querySelector('select[name="balh_cdn_mode"]');
+          const uposServer = settingsDOM.querySelector("#upos-server");
+          const replaceAkamai = settingsDOM.querySelector("#balh-upos-replace-akamai");
+          if (cdnMode) {
+            cdnMode.value = balh_config.cdn_mode;
+          }
+          if (uposServer) {
+            uposServer.value = balh_config.upos_server || "";
+          }
+          if (replaceAkamai) {
+            replaceAkamai.disabled = balh_config.cdn_mode !== "manual" || !validUposServers.has(balh_config.upos_server || "");
+          }
+        }
+        function refreshCommentsPreferenceControl() {
+          const hidden = readBangumiCommentsHidden();
+          const setting = settingsDOM?.querySelector("#balh-comments-setting");
+          const button = settingsDOM?.querySelector("#balh-comments-toggle");
+          const status = settingsDOM?.querySelector("#balh-comments-state");
+          if (setting) setting.style.display = isBangumiCommentsPreferenceAvailable() ? "" : "none";
+          if (button) button.textContent = hidden ? "显示评论区" : "关闭评论区";
+          if (status) status.textContent = hidden ? "评论区当前已关闭。" : "评论区当前已显示。";
+        }
+        function onCommentsPreferenceClick() {
+          const error = settingsDOM.querySelector("#balh-comments-error");
+          const nextHidden = !readBangumiCommentsHidden();
+          if (!writeBangumiCommentsHidden(nextHidden)) {
+            if (error) error.textContent = "保存失败，请重试。";
+            refreshCommentsPreferenceControl();
+            return;
+          }
+          if (error) error.textContent = "";
+          refreshCommentsPreferenceControl();
+        }
+        function onCommentsStorageChange(event) {
+          if (event.key === "balh_hide_comments" || event.key === null) refreshCommentsPreferenceControl();
         }
         function onCopyClick(event) {
           let issueLink = document.getElementById("balh-issue-link");
@@ -5386,11 +9464,38 @@ function scriptSource(invokeBy) {
         let customHKServerCheckText;
         let customCNServerCheckText;
         let customTHServerCheckText;
+        let cdnProbeStatusText;
+        const renderCdnProbeStatus = (status) => {
+          if (!cdnProbeStatusText) return;
+          const messages = {
+            "Cached CDN health is ready.": "已载入 CDN 测速缓存。",
+            "CDN health probe completed.": "CDN 测速已完成。",
+            "CDN health probe completed with partial results.": "CDN 测速已完成，部分主机无法测量。",
+            "CDN health probe did not find a healthy host.": "CDN 测速未找到可确认的健康主机。",
+            "CDN health could not be measured in this browser context.": "当前浏览器环境无法测量 CDN。",
+            "Testing current CDN hosts.": "正在测试当前视频 CDN…",
+            "No CDN candidates are available for probing.": "尚未捕获到可测试的当前视频 CDN。",
+            "CDN health cache cleared.": "CDN 测速缓存已清除。"
+          };
+          const candidateHosts = Array.isArray(status?.candidateHosts) ? status.candidateHosts : [];
+          const hosts = candidateHosts.length ? ` ${candidateHosts.join(", ")}` : "";
+          const message = messages[status?.message] || status?.message || status?.state || "尚未测试";
+          cdnProbeStatusText.textContent = `${message}${hosts}`;
+        };
+        const testCurrentVideoCdn = () => {
+          renderCdnProbeStatus({ message: "正在测试当前视频 CDN…" });
+          probeCurrentPlayUrlCdn({ force: true }).then(renderCdnProbeStatus).catch(() => renderCdnProbeStatus({ message: "测试失败，请查看控制台中的脱敏日志" }));
+        };
+        const clearCdnCache = () => {
+          clearCdnHealthCache();
+          renderCdnProbeStatus(getCdnProbeStatus());
+        };
+        subscribeCdnProbeStatus(renderCdnProbeStatus);
         var settingsDOM = createElement("div", { id: "balh-settings", style: { position: "fixed", top: 0, bottom: 0, left: 0, right: 0, background: "rgba(0,0,0,.7)", animationName: "balh-settings-bg", animationDuration: ".5s", zIndex: 1e4, cursor: "pointer" }, event: { click: function(e) {
           if (e.target === this) util_ui_msg.close(), document.body.style.overflow = "", this.remove();
         } } }, [
           createElement("style", {}, [createElement("text", settings_default)]),
-          createElement("div", { style: { position: "absolute", background: "#FFF", borderRadius: "10px", padding: "20px", top: "50%", left: "50%", width: "600px", transform: "translate(-50%,-50%)", cursor: "default" } }, [
+          createElement("div", { style: { position: "absolute", background: "#FFF", borderRadius: "10px", padding: "20px", top: "50%", left: "50%", width: "min(600px, calc(100vw - 48px))", maxHeight: "calc(100vh - 48px)", overflowY: "auto", transform: "translate(-50%,-50%)", cursor: "default" } }, [
             createElement("h1", {}, [createElement("text", `${GM_info.script.name} v${GM_info.script.version} 参数设置`)]),
             createElement("br"),
             createElement("h6", { style: { color: "#d01d00", display: balh_config.server_custom ? "none" : "" } }, [createElement("text", "BiliPlus已被屏蔽，请填写自定义代理服务, 详见: "), createElement("a", { href: "https://github.com/JoeyTeng/bilibili-helper/blob/dev/packages/unblock-area-limit/README.md#%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BB%A3%E7%90%86%E6%9C%8D%E5%8A%A1%E5%99%A8", target: "_blank" }, [createElement("text", "帮助>自定义代理服务器")])]),
@@ -5486,8 +9591,24 @@ function scriptSource(invokeBy) {
               ]),
               createElement("br"),
               createElement("div", { id: "balh_server_ping", style: { whiteSpace: "pre-wrap", overflow: "auto" } }, []),
+              createElement("div", {}, [
+                createElement("text", "视频 CDN："),
+                createElement("select", { name: "balh_cdn_mode", title: "变更后切换清晰度或刷新生效" }, [
+                  createElement("option", { value: "safe" }, [createElement("text", "安全排序（默认）")]),
+                  createElement("option", { value: "auto" }, [createElement("text", "自动测速与排序")]),
+                  createElement("option", { value: "original" }, [createElement("text", "保留 B 站原始顺序")]),
+                  createElement("option", { value: "manual" }, [createElement("text", "手动替换 UPOS")])
+                ]),
+                createElement("text", "　"),
+                createElement("button", { type: "button", event: { click: testCurrentVideoCdn } }, [createElement("text", "测试当前视频 CDN")]),
+                createElement("text", "　"),
+                createElement("a", { href: "javascript:;", event: { click: clearCdnCache } }, [createElement("text", "清除测速缓存")]),
+                createElement("br"),
+                cdnProbeStatusText = createElement("span", { id: "balh-cdn-probe-status", role: "status", "aria-live": "polite", style: { color: "#666", fontSize: "12px" } }, [createElement("text", "尚未测试")])
+              ]),
+              createElement("br"),
               createElement("div", { style: { display: "" } }, [
-                createElement("text", "upos服务器："),
+                createElement("text", "UPOS 服务器（仅手动模式）："),
                 createElement("br"),
                 createElement("div", { style: { display: "flex" } }, [
                   createElement("div", { title: "变更后 切换清晰度 或 刷新 生效", style: { flex: 1 } }, [
@@ -5497,11 +9618,16 @@ function scriptSource(invokeBy) {
                       id: "upos-server",
                       event: {
                         change: function() {
-                          let server = this.value;
-                          let message = window.$("#upos-server-message");
+                          const server = this.value;
                           balh_config.upos_server = server;
-                          document.getElementById("balh-upos-replace-akamai").disabled = !server;
-                          message.text(`已保存`);
+                          if (validUposServers.has(server)) {
+                            balh_config.cdn_mode = "manual";
+                          }
+                          syncCdnSettingsControls();
+                          const message = settingsDOM.querySelector("#upos-server-message");
+                          if (message) {
+                            message.textContent = "已保存";
+                          }
                         }
                       }
                     }, [
@@ -5515,7 +9641,7 @@ function scriptSource(invokeBy) {
                     ]),
                     createElement("span", { "id": "upos-server-message" })
                   ]),
-                  createElement("label", { style: { flex: 1 }, title: "开启upos替换时, 是否替换`akamaized.net`" }, [createElement("input", { id: "balh-upos-replace-akamai", type: "checkbox", name: "balh_upos_replace_akamai", disabled: balh_config.upos_server ? void 0 : "true" }), createElement("text", "替换akamai"), createElement("a", { href: "https://github.com/ipcjs/bilibili-helper/pull/762#discussion_r569911774" }, [createElement("text", "(？)")])])
+                  createElement("label", { style: { flex: 1 }, title: "开启upos替换时, 是否替换`akamaized.net`" }, [createElement("input", { id: "balh-upos-replace-akamai", type: "checkbox", name: "balh_upos_replace_akamai", disabled: "true" }), createElement("text", "替换akamai"), createElement("a", { href: "https://github.com/ipcjs/bilibili-helper/pull/762#discussion_r569911774" }, [createElement("text", "(？)")])])
                 ]),
                 createElement("br")
               ]),
@@ -5525,6 +9651,19 @@ function scriptSource(invokeBy) {
                 createElement("label", { style: { flex: 1 } }, [createElement("input", { type: "radio", name: "balh_mode", value: r.const.mode.DEFAULT }), createElement("text", "默认：自动判断")]),
                 createElement("label", { style: { flex: 1 } }, [createElement("input", { type: "radio", name: "balh_mode", value: r.const.mode.REPLACE }), createElement("text", "替换：在需要时处理番剧")]),
                 createElement("label", { style: { flex: 1 } }, [createElement("input", { type: "radio", name: "balh_mode", value: r.const.mode.REDIRECT }), createElement("text", "重定向：完全代理所有番剧")])
+              ]),
+              createElement("br"),
+              createElement("div", { id: "balh-comments-setting", role: "group", "aria-label": "番剧评论区设置" }, [
+                createElement("text", "番剧评论区： "),
+                createElement("button", {
+                  id: "balh-comments-toggle",
+                  type: "button",
+                  "aria-describedby": "balh-comments-scope balh-comments-state balh-comments-error",
+                  event: { click: onCommentsPreferenceClick }
+                }, [createElement("text", readBangumiCommentsHidden() ? "显示评论区" : "关闭评论区")]),
+                createElement("span", { id: "balh-comments-scope" }, [createElement("text", "仅保存在当前浏览器配置中；清除哔哩哔哩网站数据后恢复默认。")]),
+                createElement("span", { id: "balh-comments-state", "aria-live": "polite" }, [createElement("text", readBangumiCommentsHidden() ? "评论区当前已关闭。" : "评论区当前已显示。")]),
+                createElement("span", { id: "balh-comments-error", role: "status", "aria-live": "polite" })
               ]),
               createElement("br"),
               createElement("text", "其他："),
@@ -5573,6 +9712,9 @@ function scriptSource(invokeBy) {
             ])
           ])
         ]);
+        refreshCommentsPreferenceControl();
+        window.addEventListener(commentsPreferenceEvent, refreshCommentsPreferenceControl);
+        window.addEventListener("storage", onCommentsStorageChange);
         util_init(() => {
           if (!(util_page.player() || util_page.av() && !balh_config.enable_in_av)) {
             addSettingsButton();
@@ -5612,6 +9754,28 @@ function scriptSource(invokeBy) {
         RegExps2.url = (url2) => new RegExp(`^(https?:)?//${_raw(url2)}`);
         RegExps2.urlPath = (path) => new RegExp(`^(https?:)?//[\\w\\-\\.]+${_raw(path)}`);
       })(RegExps || (RegExps = {}));
+
+      // packages/unblock-area-limit/src/feature/bili/cdn_playurl_endpoint.ts
+      var PLAYURL_PATHS_BY_HOST = /* @__PURE__ */ new Map([
+        ["api.bilibili.com", /* @__PURE__ */ new Set([
+          "/x/player/playurl",
+          "/x/player/wbi/playurl",
+          "/pgc/player/web/playurl",
+          "/pgc/player/web/v2/playurl",
+          "/pugv/player/web/playurl"
+        ])],
+        ["interface.bilibili.com", /* @__PURE__ */ new Set([
+          "/v2/playurl"
+        ])]
+      ]);
+      var LEGACY_PLAYURL_PATHS = /* @__PURE__ */ new Set([
+        "/player/web_api/playurl",
+        "/player/web_api/v2/playurl"
+      ]);
+      function isSupportedCdnPlayUrlEndpoint(hostname, pathname) {
+        if (hostname && LEGACY_PLAYURL_PATHS.has(pathname)) return true;
+        return PLAYURL_PATHS_BY_HOST.get(hostname)?.has(pathname) ?? false;
+      }
 
       // node_modules/.pnpm/opencc-js@1.0.5/node_modules/opencc-js/dist/esm/full.js
       var Trie = class {
@@ -6068,15 +10232,33 @@ function scriptSource(invokeBy) {
       var proxyPlayUrlRequestTimeout = 8e3;
       var transientProxyRetryDelays = [500, 1200];
       var entitlementProxyRetryDelays = [700, 1600];
-      function injectFetch() {
+      function injectFetch({ cdnOnly = false } = {}) {
         const originFetch = window.fetch;
         window.fetch = async function(input, init) {
-          const request = rewriteSubtitleMetadataFetchInput(input, init);
-          const originResponse = await originFetch(request.input, request.init);
+          const request = cdnOnly ? { input, init, url: getFetchUrl(input) } : rewriteSubtitleMetadataFetchInput(input, init);
+          const routed = prepareCdnRecoveryFetchInput(request.input, request.init);
+          let originResult;
+          try {
+            originResult = originFetch.call(this, routed.input, request.init);
+          } catch (error) {
+            routed.discard();
+            throw error;
+          }
+          routed.commit();
+          const originResponse = await originResult;
           const url = request.url;
           if (url) {
+            if (cdnOnly) {
+              if (isPgcPlayUrlUrl(url) || isOtherPlayUrlUrl(url)) {
+                return handlePlayUrlCdnFetch(originResponse);
+              }
+              return originResponse;
+            }
             if (isPgcPlayUrlUrl(url)) {
               return handlePgcPlayUrlFetch(url, originResponse);
+            }
+            if (isOtherPlayUrlUrl(url)) {
+              return handlePlayUrlCdnFetch(originResponse);
             }
             if (url.match(RegExps.url("api.bilibili.com/x/space/wbi/acc/info?"))) {
               const json = await originResponse.json();
@@ -6095,7 +10277,7 @@ function scriptSource(invokeBy) {
                 const response = rewriteSubtitleWebViewResponse(buffer, { generateSub: true });
                 if (response) {
                   util_debug("/x/v2/subtitle/web/view", "generated subtitle by fetch");
-                  return new Response(response, responseInit(originResponse));
+                  return rebuiltResponse(response, originResponse);
                 }
               } catch (error) {
                 util_debug("/x/v2/subtitle/web/view fetch rewrite failed", error);
@@ -6119,6 +10301,48 @@ function scriptSource(invokeBy) {
           }
           return originResponse;
         };
+      }
+      function prepareCdnRecoveryFetchInput(input, init) {
+        const unchanged = {
+          input,
+          commit() {
+          },
+          discard() {
+          }
+        };
+        let prepared;
+        try {
+          const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+          if (!isGetMethod(method)) return unchanged;
+          const url = getFetchUrl(input);
+          if (!url) return unchanged;
+          prepared = prepareCdnRecoveryRequestUrl(url, method);
+          const decision = prepared.decision;
+          let routedInput = input;
+          if (decision.routed && typeof decision.url === "string" && decision.url !== url) {
+            if (typeof input === "string") routedInput = decision.url;
+            else if (input instanceof URL) routedInput = new URL(decision.url, document.location.href);
+            else if (input instanceof Request) routedInput = new Request(decision.url, input);
+            else {
+              prepared.discard();
+              return unchanged;
+            }
+          }
+          return {
+            input: routedInput,
+            commit: () => prepared.commit(),
+            discard: () => prepared.discard()
+          };
+        } catch (_) {
+          try {
+            prepared?.discard();
+          } catch {
+          }
+        }
+        return unchanged;
+      }
+      function isGetMethod(method) {
+        return typeof method === "string" && method.length === 3 && (method[0] === "G" || method[0] === "g") && (method[1] === "E" || method[1] === "e") && (method[2] === "T" || method[2] === "t");
       }
       function rewriteSubtitleMetadataFetchInput(input, init) {
         const url = getFetchUrl(input);
@@ -6184,7 +10408,32 @@ function scriptSource(invokeBy) {
         return `${parsedUrl.origin}${parsedUrl.pathname}?${parsedUrl.searchParams}`;
       }
       function isPgcPlayUrlUrl(url) {
-        return (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) || url.match(RegExps.url("api.bilibili.com/pgc/player/web/v2/playurl"))) && !new URL(url, document.location.href).searchParams.get("balh_ajax");
+        const parsed = parseSupportedCdnPlayUrlUrl(url);
+        return parsed?.hostname === "api.bilibili.com" && (parsed.pathname === "/pgc/player/web/playurl" || parsed.pathname === "/pgc/player/web/v2/playurl") && !parsed.searchParams.get("balh_ajax");
+      }
+      function isOtherPlayUrlUrl(url) {
+        const parsed = parseSupportedCdnPlayUrlUrl(url);
+        return !!parsed && (parsed.hostname === "api.bilibili.com" && (parsed.pathname === "/x/player/playurl" || parsed.pathname === "/x/player/wbi/playurl") || parsed.hostname === "interface.bilibili.com" && parsed.pathname === "/v2/playurl");
+      }
+      function parseSupportedCdnPlayUrlUrl(url) {
+        if (!/^(?:https?:)?\/\//.test(url)) return null;
+        try {
+          const parsed = new URL(url, document.location.href);
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+          return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null;
+        } catch {
+          return null;
+        }
+      }
+      async function handlePlayUrlCdnFetch(originResponse) {
+        try {
+          const json = await originResponse.clone().json();
+          applyCdnPolicyToPlayUrlResponse(json);
+          return jsonResponse(json, originResponse);
+        } catch (error) {
+          util_warn("fetch playurl CDN selection failed", error);
+          return originResponse;
+        }
       }
       async function handlePgcPlayUrlFetch(url, originResponse) {
         let originJson;
@@ -6198,7 +10447,8 @@ function scriptSource(invokeBy) {
         const isV1 = reqUrl.pathname === "/pgc/player/web/playurl";
         const originPlayUrl = getPlayUrlPayload(originJson, isV1);
         if (!balh_config.blocked_vip && !originJson?.code && !isAreaLimitForPlayUrl(originPlayUrl)) {
-          return originResponse;
+          applyCdnPolicyToPlayUrlResponse(originJson);
+          return jsonResponse(originJson, originResponse);
         }
         try {
           const proxiedPlayUrl = await fetchPgcPlayUrlByProxy(reqUrl);
@@ -6214,6 +10464,7 @@ function scriptSource(invokeBy) {
           if (isEntitlementProxyError(error)) {
             return jsonResponse(proxyErrorResponse(error), originResponse);
           }
+          applyCdnPolicyToPlayUrlResponse(originJson);
           return jsonResponse(originJson, originResponse);
         }
       }
@@ -6279,7 +10530,7 @@ function scriptSource(invokeBy) {
       }
       function toPgcPlayUrl(reqUrl) {
         const params = new URLSearchParams(reqUrl.search);
-        if (isBangumiPage() && !params.has("module")) {
+        if (isBangumiPage2() && !params.has("module")) {
           params.set("module", "bangumi");
         }
         return `//api.bilibili.com/pgc/player/web/playurl?${params}`;
@@ -6408,56 +10659,10 @@ function scriptSource(invokeBy) {
         if (playUrl.dash) {
           Objects.convertKeyToSnakeCase(playUrl.dash);
         }
-        let normalized = playUrl;
-        if (!window.__balh_app_only__ && balh_config.upos_server) {
-          normalized = Converters.replaceUpos(normalized, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai ?? FALSE);
-        }
-        preferNonAkamaiDashUrls(normalized?.dash);
-        return normalized;
+        applyCdnPolicyToPlayUrlResponse(playUrl);
+        return playUrl;
       }
-      function preferNonAkamaiDashUrls(dash) {
-        if (!dash) return;
-        const streams = [
-          ...Array.isArray(dash.video) ? dash.video : [],
-          ...Array.isArray(dash.audio) ? dash.audio : [],
-          ...Array.isArray(dash.dolby?.audio) ? dash.dolby.audio : []
-        ];
-        if (dash.flac?.audio) streams.push(dash.flac.audio);
-        for (const stream of streams) {
-          preferNonAkamaiStreamUrls(stream);
-        }
-      }
-      function preferNonAkamaiStreamUrls(stream) {
-        if (!stream || typeof stream !== "object") return;
-        const baseUrl = stream.base_url ?? stream.baseUrl;
-        const backupUrls = [
-          ...Array.isArray(stream.backup_url) ? stream.backup_url : [],
-          ...Array.isArray(stream.backupUrl) ? stream.backupUrl : []
-        ];
-        const urls = uniqueStrings([baseUrl, ...backupUrls]);
-        if (urls.length < 2) return;
-        const nonAkamaiUrls = urls.filter((url) => !isAkamaiUrl(url));
-        if (!nonAkamaiUrls.length) return;
-        const reorderedUrls = [...nonAkamaiUrls, ...urls.filter(isAkamaiUrl)];
-        const [nextBaseUrl, ...nextBackupUrls] = reorderedUrls;
-        stream.base_url = nextBaseUrl;
-        stream.baseUrl = nextBaseUrl;
-        stream.backup_url = nextBackupUrls;
-        stream.backupUrl = nextBackupUrls;
-      }
-      function uniqueStrings(items) {
-        const seen = /* @__PURE__ */ new Set();
-        return items.filter((item) => {
-          if (typeof item !== "string" || !item) return false;
-          if (seen.has(item)) return false;
-          seen.add(item);
-          return true;
-        });
-      }
-      function isAkamaiUrl(url) {
-        return /(^|\/\/)[^/]*akamaized\.net\//.test(url);
-      }
-      function isBangumiPage() {
+      function isBangumiPage2() {
         return /\/bangumi\/play\//.test(window.location.pathname);
       }
       function redactProxyHost(proxyHost) {
@@ -6526,20 +10731,69 @@ function scriptSource(invokeBy) {
         if (input instanceof Request) return input.url;
         return void 0;
       }
-      function responseInit(response) {
-        return {
-          headers: response.headers,
-          status: response.status,
-          statusText: response.statusText
+      var staleRebuiltBodyHeaders = [
+        "accept-ranges",
+        "content-digest",
+        "content-encoding",
+        "content-length",
+        "content-md5",
+        "content-range",
+        "digest",
+        "etag",
+        "last-modified",
+        "repr-digest",
+        "transfer-encoding"
+      ];
+      var rebuiltResponseMetadata = /* @__PURE__ */ new WeakMap();
+      function responseMetadata(response) {
+        return rebuiltResponseMetadata.get(response) || {
+          url: response.url,
+          redirected: response.redirected,
+          type: response.type
         };
       }
-      function jsonResponse(json, response) {
+      function rebuiltResponseHeaders(response) {
         const headers = new Headers(response.headers);
-        headers.set("content-type", "application/json; charset=utf-8");
-        return new Response(JSON.stringify(json), {
-          ...responseInit(response),
-          headers
+        for (const header of staleRebuiltBodyHeaders) {
+          headers.delete(header);
+        }
+        return headers;
+      }
+      function rebuiltResponse(body, response, headers = rebuiltResponseHeaders(response)) {
+        const rewritten = new Response(body, {
+          headers,
+          status: response.status,
+          statusText: response.statusText
         });
+        return preserveResponseMetadata(rewritten, responseMetadata(response));
+      }
+      function preserveResponseMetadata(response, metadata) {
+        const nativeClone = response.clone;
+        rebuiltResponseMetadata.set(response, metadata);
+        for (const key of ["url", "redirected", "type"]) {
+          try {
+            Object.defineProperty(response, key, { configurable: true, value: metadata[key] });
+          } catch (_) {
+          }
+        }
+        try {
+          Object.defineProperty(response, "clone", {
+            configurable: true,
+            writable: true,
+            value: function() {
+              const cloned = nativeClone.call(this);
+              const receiverMetadata = rebuiltResponseMetadata.get(this);
+              return receiverMetadata ? preserveResponseMetadata(cloned, receiverMetadata) : cloned;
+            }
+          });
+        } catch (_) {
+        }
+        return response;
+      }
+      function jsonResponse(json, response) {
+        const headers = rebuiltResponseHeaders(response);
+        headers.set("content-type", "application/json; charset=utf-8");
+        return rebuiltResponse(JSON.stringify(json), response, headers);
       }
       function injectFetch4Mobile() {
         util_debug("injectFetch4Mobile");
@@ -6586,13 +10840,441 @@ function scriptSource(invokeBy) {
         );
       }
 
+      // packages/unblock-area-limit/src/feature/bili/cdn_final_delivery_observer.ts
+      var REPAIR_DELAYS_MS = [0, 50, 250, 1e3];
+      var fetchObserverStates = /* @__PURE__ */ new WeakMap();
+      var xhrObserverStates = /* @__PURE__ */ new WeakMap();
+      var fetchSlotGetters = /* @__PURE__ */ new WeakSet();
+      var xhrSlotGetters = /* @__PURE__ */ new WeakSet();
+      var deferredXhrDeliveries = /* @__PURE__ */ new WeakMap();
+      var installed = false;
+      var activeFetchObserver;
+      var activeXhrObserver;
+      function deferFinalCdnPlayUrlXhrDelivery(xhr, deliveryOrder) {
+        try {
+          if (typeof xhr === "object" && xhr !== null || typeof xhr === "function") {
+            if (Number.isSafeInteger(deliveryOrder) && deliveryOrder > 0) {
+              deferredXhrDeliveries.set(xhr, deliveryOrder);
+            }
+          }
+        } catch {
+        }
+        return xhr;
+      }
+      function installCdnFinalDeliveryObservers() {
+        if (installed) {
+          repairObserverSlots();
+          return;
+        }
+        installed = true;
+        repairObserverSlots();
+        for (const delayMs of REPAIR_DELAYS_MS) {
+          try {
+            window.setTimeout(repairObserverSlots, delayMs);
+          } catch {
+          }
+        }
+        try {
+          window.document.addEventListener("DOMContentLoaded", repairObserverSlots, {
+            capture: true,
+            once: true
+          });
+        } catch {
+        }
+      }
+      function repairObserverSlots() {
+        if (!installed) return;
+        installFetchObserverSlot();
+        installXhrObserverSlot();
+      }
+      function installFetchObserverSlot() {
+        let current;
+        let descriptor;
+        try {
+          descriptor = Object.getOwnPropertyDescriptor(window, "fetch");
+          if (descriptor?.get && fetchSlotGetters.has(descriptor.get)) return;
+          if (descriptor && !("value" in descriptor)) {
+            deactivateFetchObserver();
+            return;
+          }
+          current = descriptor ? descriptor.value : window.fetch;
+        } catch {
+          return;
+        }
+        if (typeof current !== "function") return;
+        let exposed = exposeFetchObserver(current);
+        if (descriptor && !descriptor.configurable) {
+          try {
+            window.fetch = exposed;
+          } catch {
+          }
+          return;
+        }
+        const getter = () => exposed;
+        const setter = (value) => {
+          if (value === exposed) return;
+          exposed = typeof value === "function" ? exposeFetchObserver(value) : value;
+        };
+        fetchSlotGetters.add(getter);
+        try {
+          Object.defineProperty(window, "fetch", {
+            configurable: true,
+            enumerable: descriptor?.enumerable ?? true,
+            get: getter,
+            set: setter
+          });
+        } catch {
+          try {
+            window.fetch = exposed;
+          } catch {
+          }
+        }
+      }
+      function createFetchObserver(predecessor) {
+        const state = { active: false };
+        const observer = async function finalCdnObservedFetch(input, init) {
+          let deliveryOrder;
+          const requestUrl = readFetchUrl(input);
+          if (state.active && isObservedPlayUrl(requestUrl)) {
+            try {
+              deliveryOrder = beginFinalCdnPlayUrlDelivery();
+            } catch {
+            }
+          }
+          const response = await predecessor.call(this, input, init);
+          if (deliveryOrder === void 0) return response;
+          try {
+            observeFinalCdnPlayUrlResponse(await response.clone().json(), deliveryOrder);
+          } catch {
+          }
+          return response;
+        };
+        fetchObserverStates.set(observer, state);
+        return observer;
+      }
+      function exposeFetchObserver(value) {
+        if (activeFetchObserver && activeFetchObserver !== value) {
+          deactivateFetchObserver();
+        }
+        const observer = fetchObserverStates.has(value) ? value : createFetchObserver(value);
+        const state = fetchObserverStates.get(observer);
+        if (state) state.active = true;
+        activeFetchObserver = observer;
+        return observer;
+      }
+      function deactivateFetchObserver() {
+        if (!activeFetchObserver) return;
+        const state = fetchObserverStates.get(activeFetchObserver);
+        if (state) state.active = false;
+      }
+      function installXhrObserverSlot() {
+        let current;
+        let descriptor;
+        try {
+          descriptor = Object.getOwnPropertyDescriptor(window, "XMLHttpRequest");
+          if (descriptor?.get && xhrSlotGetters.has(descriptor.get)) return;
+          if (descriptor && !("value" in descriptor)) {
+            deactivateXhrObserver();
+            return;
+          }
+          current = descriptor ? descriptor.value : window.XMLHttpRequest;
+        } catch {
+          return;
+        }
+        if (typeof current !== "function") return;
+        let exposed = exposeXhrObserver(current);
+        if (descriptor && !descriptor.configurable) {
+          try {
+            window.XMLHttpRequest = exposed;
+          } catch {
+          }
+          return;
+        }
+        const getter = () => exposed;
+        const setter = (value) => {
+          if (value === exposed) return;
+          exposed = typeof value === "function" ? exposeXhrObserver(value) : value;
+        };
+        xhrSlotGetters.add(getter);
+        try {
+          Object.defineProperty(window, "XMLHttpRequest", {
+            configurable: true,
+            enumerable: descriptor?.enumerable ?? true,
+            get: getter,
+            set: setter
+          });
+        } catch {
+          try {
+            window.XMLHttpRequest = exposed;
+          } catch {
+          }
+        }
+      }
+      function createXhrObserver(predecessor) {
+        const state = { active: false };
+        const requestStates = /* @__PURE__ */ new WeakMap();
+        let Observer;
+        try {
+          const predecessorOpen = predecessor.prototype.open;
+          Observer = class FinalCdnObservedXMLHttpRequest extends predecessor {
+            constructor() {
+              super();
+              const requestState = { deferredObservation: false, observedDone: false };
+              requestStates.set(this, requestState);
+              try {
+                this.addEventListener("readystatechange", () => {
+                  let readyState;
+                  try {
+                    readyState = this.readyState;
+                  } catch {
+                    return;
+                  }
+                  if (readyState !== 4) {
+                    if (readyState === 1) requestState.observedDone = false;
+                    return;
+                  }
+                  if (requestState.observedDone) return;
+                  requestState.observedDone = true;
+                  if (requestState.deliveryOrder !== void 0 && !requestState.deferredObservation) {
+                    observeFinalXhrResponse(this, requestState.deliveryOrder);
+                  }
+                });
+              } catch {
+              }
+            }
+            open(...args) {
+              const requestState = requestStates.get(this);
+              if (!requestState) return predecessorOpen.apply(this, args);
+              const previousOrder = requestState.deliveryOrder;
+              const previousDeferredObservation = requestState.deferredObservation;
+              const previousObservedDone = requestState.observedDone;
+              let nextOrder;
+              let deferredOrder;
+              const requestUrl = readXhrOpenUrl(args[1]);
+              if (state.active && isObservedPlayUrl(requestUrl)) {
+                try {
+                  deferredOrder = deferredXhrDeliveries.get(this);
+                  deferredXhrDeliveries.delete(this);
+                } catch {
+                }
+                if (deferredOrder !== void 0) {
+                  nextOrder = deferredOrder;
+                } else {
+                  try {
+                    nextOrder = beginFinalCdnPlayUrlDelivery();
+                  } catch {
+                  }
+                }
+              }
+              requestState.deliveryOrder = nextOrder;
+              requestState.deferredObservation = deferredOrder !== void 0;
+              requestState.observedDone = false;
+              try {
+                return predecessorOpen.apply(this, args);
+              } catch (error) {
+                if (requestState.deliveryOrder === nextOrder) {
+                  if (deferredOrder !== void 0) {
+                    try {
+                      deferredXhrDeliveries.set(this, deferredOrder);
+                    } catch {
+                    }
+                  }
+                  requestState.deliveryOrder = previousOrder;
+                  requestState.deferredObservation = previousDeferredObservation;
+                  requestState.observedDone = previousObservedDone;
+                }
+                throw error;
+              }
+            }
+          };
+        } catch {
+          return predecessor;
+        }
+        xhrObserverStates.set(Observer, state);
+        return Observer;
+      }
+      function exposeXhrObserver(value) {
+        if (activeXhrObserver && activeXhrObserver !== value) {
+          deactivateXhrObserver();
+        }
+        const observer = xhrObserverStates.has(value) ? value : createXhrObserver(value);
+        const state = xhrObserverStates.get(observer);
+        if (state) state.active = true;
+        activeXhrObserver = observer;
+        return observer;
+      }
+      function deactivateXhrObserver() {
+        if (!activeXhrObserver) return;
+        const state = xhrObserverStates.get(activeXhrObserver);
+        if (state) state.active = false;
+      }
+      function observeFinalXhrResponse(xhr, deliveryOrder) {
+        let responseUrl;
+        try {
+          responseUrl = xhr.responseURL;
+        } catch {
+          return;
+        }
+        if (!isObservedPlayUrl(responseUrl)) return;
+        try {
+          const responseType = xhr.responseType;
+          if (responseType && responseType !== "json" && responseType !== "text") return;
+          const response = xhr.response;
+          if (isJsonCompatibleResponseObject(response)) {
+            observeFinalCdnPlayUrlResponse(response, deliveryOrder);
+            return;
+          }
+          if (typeof response === "string") {
+            observeFinalCdnPlayUrlResponse(JSON.parse(response), deliveryOrder);
+            return;
+          }
+        } catch {
+        }
+        try {
+          observeFinalCdnPlayUrlResponse(JSON.parse(xhr.responseText), deliveryOrder);
+        } catch {
+        }
+      }
+      function isJsonCompatibleResponseObject(value) {
+        if (!value || typeof value !== "object") return false;
+        if (Array.isArray(value)) return true;
+        const prototype = Object.getPrototypeOf(value);
+        return prototype === Object.prototype || prototype === null;
+      }
+      function readXhrOpenUrl(value) {
+        try {
+          if (typeof value === "string") return value;
+          if (value instanceof URL) return value.href;
+        } catch {
+        }
+        return null;
+      }
+      function readFetchUrl(input) {
+        try {
+          if (typeof input === "string") return input;
+          if (input instanceof URL) return input.href;
+          if (input instanceof Request) return input.url;
+        } catch {
+        }
+        return null;
+      }
+      function isObservedPlayUrl(rawUrl) {
+        return observedPlayUrlRequestKey(rawUrl) !== null;
+      }
+      function observedPlayUrlRequestKey(rawUrl) {
+        try {
+          const value = typeof rawUrl === "string" ? rawUrl : rawUrl instanceof URL ? rawUrl.href : null;
+          if (!value) return null;
+          const parsed = new URL(value, window.location.href);
+          if (parsed.protocol !== "https:" || !isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname)) {
+            return null;
+          }
+          return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+        } catch {
+          return null;
+        }
+      }
+
       // packages/unblock-area-limit/src/feature/bili/area_limit_xhr_.ts
       var area_limit_xhr = /* @__PURE__ */ (() => {
+        const deferredJqueryXhrFactoryPredecessors = /* @__PURE__ */ new WeakMap();
+        function bindFinalCdnDeliveryToJqueryXhrFactory(jquery, param, deliveryOrder) {
+          let xhrFactory = typeof param.xhr === "function" ? param.xhr : jquery.ajaxSettings && typeof jquery.ajaxSettings.xhr === "function" ? jquery.ajaxSettings.xhr : void 0;
+          if (!xhrFactory) return false;
+          while (deferredJqueryXhrFactoryPredecessors.has(xhrFactory)) {
+            xhrFactory = deferredJqueryXhrFactoryPredecessors.get(xhrFactory);
+          }
+          const wrappedFactory = function(...args) {
+            const xhr = xhrFactory.apply(this, args);
+            try {
+              return deferFinalCdnPlayUrlXhrDelivery(xhr, deliveryOrder);
+            } catch {
+              return xhr;
+            }
+          };
+          deferredJqueryXhrFactoryPredecessors.set(wrappedFactory, xhrFactory);
+          param.xhr = wrappedFactory;
+          return true;
+        }
+        function transformCdnRecoveryOpenUrl(url) {
+          try {
+            const prepared = prepareCdnRecoveryRequestUrl(url, "GET");
+            return {
+              url: prepared.decision.url,
+              commit: () => prepared.commit(),
+              rollback: () => prepared.discard()
+            };
+          } catch {
+            return url;
+          }
+        }
+        function injectCdnOnlyXhr() {
+          injectXhr({
+            transformOpenUrl: transformCdnRecoveryOpenUrl,
+            transformRequest: () => null,
+            transformResponse: ({ url, response, xhr }) => {
+              if (!isCdnPlayUrlUrl(url)) return null;
+              try {
+                const json = response !== null && typeof response === "object" ? JSON.parse(JSON.stringify(response)) : JSON.parse(xhr.responseText);
+                if (!findPlayUrlPayload(json)) return null;
+                return applyCdnPolicyToPlayUrlResponse(json);
+              } catch (error) {
+                util_warn("XHR playurl CDN-only selection failed", error);
+                return null;
+              }
+            }
+          });
+        }
+        function isCdnPlayUrlUrl(url) {
+          if (typeof url !== "string") return false;
+          return isWebPlayUrlUrl(url) || isInterfacePlayUrlUrl(url) || isPgcPlayUrlUrl2(url);
+        }
+        function isWebPlayUrlUrl(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && parsed.hostname === "api.bilibili.com" && (parsed.pathname === "/x/player/playurl" || parsed.pathname === "/x/player/wbi/playurl");
+        }
+        function isWebV1PlayUrlUrl(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && parsed.hostname === "api.bilibili.com" && parsed.pathname === "/x/player/playurl";
+        }
+        function isPgcPlayUrlUrl2(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && parsed.hostname === "api.bilibili.com" && (parsed.pathname === "/pgc/player/web/playurl" || parsed.pathname === "/pgc/player/web/v2/playurl");
+        }
+        function isPgcV1PlayUrlUrl(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && parsed.hostname === "api.bilibili.com" && parsed.pathname === "/pgc/player/web/playurl";
+        }
+        function isInterfacePlayUrlUrl(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && parsed.hostname === "interface.bilibili.com" && parsed.pathname === "/v2/playurl";
+        }
+        function isLegacyPlayUrlUrl(url) {
+          const parsed = parseSupportedCdnPlayUrlUrl2(url);
+          return !!parsed && (parsed.pathname === "/player/web_api/playurl" || parsed.pathname === "/player/web_api/v2/playurl");
+        }
+        function parseSupportedCdnPlayUrlUrl2(url) {
+          if (typeof url !== "string" || !/^(?:https?:)?\/\//.test(url)) return null;
+          try {
+            const parsed = new URL(url, document.location.href);
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+            return isSupportedCdnPlayUrlEndpoint(parsed.hostname, parsed.pathname) ? parsed : null;
+          } catch {
+            return null;
+          }
+        }
         return function() {
-          if (isClosed()) return;
+          if (isClosed()) {
+            if (!balh_config.is_closed && !balh_config.server_custom) {
+              injectFetch({ cdnOnly: true });
+              injectCdnOnlyXhr();
+            }
+            return;
+          }
           injectFetch();
           function injectXhr2() {
             injectXhr({
+              transformOpenUrl: transformCdnRecoveryOpenUrl,
               /// {@template xhr_transform_response}
               /// 转换响应数据, 处理简单的情况
               /// - url: 响应的url
@@ -6749,17 +11431,30 @@ function scriptSource(invokeBy) {
                   util_debug("/subtitle", url);
                   const json = JSON.parse(xhr.responseText);
                   return rewriteSubtitleBodyJson(json, url);
-                } else if (url.match(RegExps.url("api.bilibili.com/x/player/playurl"))) {
-                  util_debug("/x/player/playurl", "origin", `block: ${container.__block_response}`, xhr.response);
-                } else if (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) || url.match(RegExps.url("api.bilibili.com/pgc/player/web/v2/playurl")) && !Strings.getSearchParam(url, "balh_ajax")) {
+                } else if (isWebPlayUrlUrl(url)) {
+                  util_debug(new URL(url, document.location.href).pathname, "origin", `block: ${container.__block_response}`);
+                  try {
+                    const json = xhr.response !== null && typeof xhr.response === "object" ? JSON.parse(JSON.stringify(xhr.response)) : JSON.parse(xhr.responseText);
+                    return applyCdnPolicyToPlayUrlResponse(json);
+                  } catch (error) {
+                    util_warn("XHR playurl CDN selection failed", error);
+                    return null;
+                  }
+                } else if (isPgcPlayUrlUrl2(url) && !Strings.getSearchParam(url, "balh_ajax")) {
                   const reqUrl = new URL(url, document.location.href);
                   const isV1 = reqUrl.pathname === "/pgc/player/web/playurl";
-                  let json = typeof xhr.response === "object" ? xhr.response : JSON.parse(xhr.responseText);
+                  let json;
+                  try {
+                    json = typeof xhr.response === "object" ? xhr.response : JSON.parse(xhr.responseText);
+                  } catch (error) {
+                    util_warn("XHR PGC playurl CDN selection failed", error);
+                    return null;
+                  }
                   if (!container.__redirect || !isV1 && isAreaLimitForPlayUrl2(json.result)) {
                     if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl2(json.result)) {
                       areaLimit(true);
                       let requestUrl = isV1 ? container.__url : `//api.bilibili.com/pgc/player/web/playurl${reqUrl.search}`;
-                      if (isBangumiPage2()) {
+                      if (isBangumiPage3()) {
                         requestUrl += `&module=bangumi`;
                       }
                       return bilibiliApis._playurl.asyncAjax(requestUrl).then((data2) => {
@@ -6772,6 +11467,7 @@ function scriptSource(invokeBy) {
                       areaLimit(false);
                     }
                   }
+                  return applyCdnPolicyToPlayUrlResponse(json);
                 } else if (url.match(RegExps.url("api.bilibili.com/pgc/view/web/freya/season"))) {
                   let json = JSON.parse(xhr.response);
                   util_debug("/pgc/view/web/freya/season", "origin", `area_limit`, json.data.viewUserStatus.area_limit);
@@ -6815,7 +11511,7 @@ function scriptSource(invokeBy) {
                     return rewriteSubtitleWebViewResponse(response, { generateSub: balh_config.generate_sub }) || response;
                   });
                 }
-                if (url.match(RegExps.url("api.bilibili.com/x/player/playurl")) && balh_config.enable_in_av) {
+                if (isWebV1PlayUrlUrl(url) && balh_config.enable_in_av) {
                   util_debug("/x/player/playurl");
                   return bilibiliApis._playurl.asyncAjax(url).then((data2) => {
                     if (!data2.code) {
@@ -6829,9 +11525,9 @@ function scriptSource(invokeBy) {
                     util_debug("/x/player/playurl", "proxy", data2);
                     return data2;
                   });
-                } else if (url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) && !Strings.getSearchParam(url, "balh_ajax") && needRedirect()) {
+                } else if (isPgcV1PlayUrlUrl(url) && !Strings.getSearchParam(url, "balh_ajax") && needRedirect()) {
                   container.__redirect = true;
-                  if (isBangumiPage2()) {
+                  if (isBangumiPage3()) {
                     url += `&module=bangumi`;
                   }
                   return bilibiliApis._playurl.asyncAjax(url).then((data2) => {
@@ -6900,8 +11596,9 @@ function scriptSource(invokeBy) {
           }
           function injectAjax() {
             util_debug("injectAjax at:", window.jQuery);
-            let originalAjax = $.ajax;
-            $.ajax = function(arg0, arg1) {
+            const jquery = $;
+            let originalAjax = jquery.ajax;
+            jquery.ajax = function(arg0, arg1) {
               let param;
               if (arg1 === void 0) {
                 param = arg0;
@@ -6912,9 +11609,129 @@ function scriptSource(invokeBy) {
               let oriSuccess = param.success;
               let oriError = param.error;
               let mySuccess, myError;
-              let dispatchResultTransformer = (p) => p.then((r2) => {
-                oriSuccess(r2);
-              }).catch((e) => oriError(e));
+              let finalCdnDeliveryOrder;
+              let observeFinalCdnPlayUrlDelivery = false;
+              const finalDoneCallbacks = [];
+              const finalDoneGateByXhr = /* @__PURE__ */ new WeakMap();
+              let finalSuccessDeliveryState = "pending";
+              let finalSuccessValue;
+              let finalSuccessCallbackArgs;
+              let finalSuccessCallbackContext;
+              let finalSuccessFallbackContext;
+              let finalSuccessFallbackXhr;
+              let optionSuccessCallbacksQueued = false;
+              let rawSuccessResolverBound = false;
+              let rawSuccessResolved = false;
+              const finalSuccessInvocationArgs = () => {
+                const args = finalSuccessCallbackArgs ? finalSuccessCallbackArgs.slice() : [void 0, "success", finalSuccessFallbackXhr];
+                args[0] = finalSuccessValue;
+                return args;
+              };
+              const invokeFinalSuccessCallback = (success) => success.apply(
+                rawSuccessResolved ? finalSuccessCallbackContext : finalSuccessFallbackContext,
+                finalSuccessInvocationArgs()
+              );
+              const deliverFinalSuccess = (value) => {
+                finalSuccessDeliveryState = "delivering";
+                finalSuccessValue = value;
+                try {
+                  for (let index = 0; index < finalDoneCallbacks.length; index += 1) {
+                    invokeFinalSuccessCallback(finalDoneCallbacks[index]);
+                  }
+                } catch (error) {
+                  finalSuccessDeliveryState = "failed";
+                  throw error;
+                }
+                finalSuccessDeliveryState = "delivered";
+              };
+              const rethrowFinalSuccessCallbackError = (error) => {
+                try {
+                  window.setTimeout(() => {
+                    throw error;
+                  }, 0);
+                } catch {
+                }
+              };
+              const enqueueFinalDoneCallback = (success) => {
+                if (typeof success !== "function") return;
+                if (finalSuccessDeliveryState === "delivered") {
+                  invokeFinalSuccessCallback(success);
+                } else {
+                  finalDoneCallbacks.push(success);
+                }
+              };
+              const enqueueOptionSuccessCallbacks = () => {
+                if (optionSuccessCallbacksQueued) return;
+                optionSuccessCallbacksQueued = true;
+                const register = (success) => {
+                  if (Array.isArray(success)) {
+                    success.forEach(register);
+                  } else {
+                    enqueueFinalDoneCallback(success);
+                  }
+                };
+                register(oriSuccess);
+              };
+              const bindRawSuccessResolver = (xhr2, predecessorDone) => {
+                if (rawSuccessResolverBound) return true;
+                try {
+                  predecessorDone.call(xhr2, mySuccess);
+                  rawSuccessResolverBound = true;
+                  return true;
+                } catch {
+                  return false;
+                }
+              };
+              const installFinalDoneGate = (xhr2) => {
+                try {
+                  if (!xhr2 || !["object", "function"].includes(typeof xhr2)) return false;
+                  const installedGate = finalDoneGateByXhr.get(xhr2);
+                  if (installedGate && xhr2.done === installedGate) return true;
+                  const predecessorDone = xhr2.done;
+                  if (typeof predecessorDone !== "function") return false;
+                  if (!oriSuccess && !bindRawSuccessResolver(xhr2, predecessorDone)) return false;
+                  const gatedDone = function(...successCallbacks) {
+                    const register = (success) => {
+                      if (Array.isArray(success)) {
+                        success.forEach(register);
+                      } else if (success === mySuccess) {
+                        if (bindRawSuccessResolver(xhr2, predecessorDone)) {
+                          enqueueOptionSuccessCallbacks();
+                        }
+                      } else {
+                        enqueueFinalDoneCallback(success);
+                      }
+                    };
+                    successCallbacks.forEach(register);
+                    return xhr2;
+                  };
+                  xhr2.done = gatedDone;
+                  if (xhr2.done !== gatedDone) return false;
+                  finalDoneGateByXhr.set(xhr2, gatedDone);
+                  return true;
+                } catch {
+                  return false;
+                }
+              };
+              let dispatchResultTransformer = (p) => {
+                if (!observeFinalCdnPlayUrlDelivery) {
+                  return p.then((r2) => oriSuccess(r2)).catch((e) => oriError(e));
+                }
+                return p.then(
+                  (r2) => {
+                    try {
+                      deliverFinalCdnPlayUrlResponse(
+                        r2,
+                        finalCdnDeliveryOrder,
+                        deliverFinalSuccess
+                      );
+                    } catch (error) {
+                      rethrowFinalSuccessCallbackError(error);
+                    }
+                  },
+                  (e) => oriError(e)
+                );
+              };
               let oriResultTransformer;
               let oriResultTransformerWhenProxyError;
               let one_api;
@@ -6933,14 +11750,31 @@ function scriptSource(invokeBy) {
                     return json;
                   }
                 });
-              } else if (param.url.match(RegExps.urlPath("/player/web_api/playurl")) || param.url.match(RegExps.urlPath("/player/web_api/v2/playurl")) || param.url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl")) || balh_config.enable_in_av && param.url.match(RegExps.url("interface.bilibili.com/v2/playurl"))) {
+              } else if (isLegacyPlayUrlUrl(param.url) || isPgcV1PlayUrlUrl(param.url) || balh_config.enable_in_av && isInterfacePlayUrlUrl(param.url)) {
+                observeFinalCdnPlayUrlDelivery = true;
+                try {
+                  finalCdnDeliveryOrder = beginFinalCdnPlayUrlDelivery();
+                } catch {
+                }
+                if (finalCdnDeliveryOrder !== void 0) {
+                  try {
+                    const bound = bindFinalCdnDeliveryToJqueryXhrFactory(
+                      jquery,
+                      param,
+                      finalCdnDeliveryOrder
+                    );
+                    if (!bound) finalCdnDeliveryOrder = void 0;
+                  } catch {
+                    finalCdnDeliveryOrder = void 0;
+                  }
+                }
                 let isNewPlayurl;
-                if (isNewPlayurl = param.url.match(RegExps.url("api.bilibili.com/pgc/player/web/playurl"))) {
+                if (isNewPlayurl = isPgcV1PlayUrlUrl(param.url)) {
                   if (param.data) {
                     param.url += `?${Object.keys(param.data).map((key) => `${key}=${param.data[key]}`).join("&")}`;
                     param.data = void 0;
                   }
-                  if (isBangumiPage2()) {
+                  if (isBangumiPage3()) {
                     param.url += `&module=bangumi`;
                   }
                   param.url += `&balh_ajax=1`;
@@ -6955,10 +11789,10 @@ function scriptSource(invokeBy) {
                   }
                   if (balh_config.blocked_vip || json.code || isAreaLimitForPlayUrl2(json)) {
                     areaLimit(true);
-                    return one_api.asyncAjax(param.url).catch((e) => json);
+                    return one_api.asyncAjax(param.url).catch((e) => applyCdnPolicyToPlayUrlResponse(json));
                   } else {
                     areaLimit(false);
-                    return json;
+                    return applyCdnPolicyToPlayUrlResponse(json);
                   }
                 });
                 const oriDispatchResultTransformer = dispatchResultTransformer;
@@ -6982,7 +11816,7 @@ function scriptSource(invokeBy) {
                       result: r2
                     };
                   }
-                  return r2;
+                  return applyCdnPolicyToPlayUrlResponse(r2);
                 }).compose(oriDispatchResultTransformer);
               } else if (param.url.match(RegExps.url("interface.bilibili.com/player?"))) {
                 if (balh_config.blocked_vip) {
@@ -7016,7 +11850,13 @@ function scriptSource(invokeBy) {
               }
               if (one_api && oriResultTransformer) {
                 let oriResultPromise = new Promise2((resolve, reject) => {
-                  mySuccess = resolve;
+                  mySuccess = function(...args) {
+                    if (rawSuccessResolved) return;
+                    rawSuccessResolved = true;
+                    finalSuccessCallbackContext = this;
+                    finalSuccessCallbackArgs = args;
+                    resolve(args[0]);
+                  };
                   myError = reject;
                 });
                 if (needRedirect()) {
@@ -7025,6 +11865,18 @@ function scriptSource(invokeBy) {
                   oriResultPromise.compose(oriResultTransformer).compose(dispatchResultTransformer);
                 }
               }
+              if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                const oriBeforeSend = param.beforeSend === void 0 ? jquery.ajaxSettings && jquery.ajaxSettings.beforeSend : param.beforeSend;
+                param.beforeSend = function(...args) {
+                  finalSuccessFallbackContext = this;
+                  finalSuccessFallbackXhr = args[0];
+                  installFinalDoneGate(args[0]);
+                  if (!oriBeforeSend) return;
+                  const result = oriBeforeSend.apply(this, args);
+                  installFinalDoneGate(args[0]);
+                  return result;
+                };
+              }
               if (oriSuccess && mySuccess) {
                 param.success = mySuccess;
               }
@@ -7032,7 +11884,14 @@ function scriptSource(invokeBy) {
                 param.error = myError;
               }
               let xhr = originalAjax.apply(this, [param]);
-              if (!oriSuccess && mySuccess) {
+              if (observeFinalCdnPlayUrlDelivery && mySuccess) {
+                if (!finalSuccessFallbackXhr) finalSuccessFallbackXhr = xhr;
+                if (finalSuccessFallbackContext === void 0) {
+                  finalSuccessFallbackContext = param.context || param;
+                }
+                installFinalDoneGate(xhr);
+                enqueueOptionSuccessCallbacks();
+              } else if (!oriSuccess && mySuccess) {
                 xhr.done(mySuccess);
                 xhr.done = function(success) {
                   oriSuccess = success;
@@ -7067,7 +11926,7 @@ function scriptSource(invokeBy) {
             util_debug(`season_type: ${season_type}`);
             return season_type != null;
           }
-          function isBangumiPage2() {
+          function isBangumiPage3() {
             const queries = window.__NEXT_DATA__?.props?.pageProps?.dehydratedState?.queries;
             const seasonData = queries?.find?.((query) => {
               const key = query?.queryKey?.[0];
@@ -7566,10 +12425,7 @@ function scriptSource(invokeBy) {
                   if (data2.dash) {
                     Objects.convertKeyToSnakeCase(data2.dash);
                   }
-                  if (!window.__balh_app_only__ && balh_config.upos_server) {
-                    return Converters.replaceUpos(data2, uposMap[balh_config.upos_server], balh_config.upos_replace_akamai);
-                  }
-                  return data2;
+                  return applyCdnPolicyToPlayUrlResponse(data2);
                 });
               }
             });
@@ -7662,8 +12518,13 @@ function scriptSource(invokeBy) {
         version_remind();
         switch_to_old_player();
         area_limit_for_vue();
+        startRestoreBangumiComments(!balh_config.is_closed);
         hide_adblock_tips();
         area_limit_xhr();
+        if (!balh_config.is_closed) {
+          installCdnRecoveryMonitor();
+          installCdnFinalDeliveryObservers();
+        }
         remove_pre_ad();
         check_html5();
         redirect_to_bangumi_or_insert_player();
@@ -7679,6 +12540,8 @@ function scriptSource(invokeBy) {
             balh_config.blocked_vip,
             "server:",
             balh_config.server,
+            "cdn_mode:",
+            balh_config.cdn_mode,
             "upos_server:",
             balh_config.upos_server,
             "flv_prefer_ws:",
@@ -7715,6 +12578,10 @@ function scriptSource(invokeBy) {
             },
             showSettings: settings3.show,
             _setupSettings: settings3.setup,
+            testCurrentVideoCdn: probeCurrentPlayUrlCdn,
+            clearCdnHealthCache,
+            getCdnProbeStatus,
+            getCdnRecoveryStatus: getCdnRecoveryStatus2,
             set1080P: function() {
               const settings4 = JSON.parse(localStorage.bilibili_player_settings);
               const oldQuality = settings4.setting_config.defquality;
