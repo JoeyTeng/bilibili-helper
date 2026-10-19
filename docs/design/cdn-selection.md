@@ -1,9 +1,9 @@
 # CDN Selection Architecture
 
 状态：Stage 1（响应选择）、Stage 2（本机两阶段探测）与 Stage 3（stall recovery）
-均已合并到 `dev`。Joey 在 UK-local 环境完成人工播放验收并明确授权发布前，不得创建
-稳定版 tag、发布稳定版或刷新 `main`。自动 live E2E 只能提供辅助证据，不能替代这项
-人工验收。
+均已合并到 `dev`。Joey 已于 2026-10-19 完成 UK-local 人工播放验收，并明确授权
+`v8.11.0` 发布。稳定发布仍须满足人工验收与明确授权条件；自动 live E2E 只能提供
+辅助证据，不能替代这项人工验收。
 
 本文定义 BALH 浏览器端 CDN 选择的规范边界。它适用于 Bilibili 原始 playurl
 响应和 BALH 代理返回的 playurl 响应，也适用于 Vue、`fetch`、`XMLHttpRequest`

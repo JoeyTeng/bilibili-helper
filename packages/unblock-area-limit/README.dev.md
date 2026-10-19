@@ -78,9 +78,9 @@ Stage 1（响应适配）、Stage 2（上述探测）和 Stage 3 均已完成并
 pool 只允许作为非默认实验性排序提示，并且只能引用当前 exact signed candidate
 group 中已经存在的 URL。
 
-Joey 完成 UK-local 人工播放验收并明确授权发布前，稳定 tag/release 与 `main` 刷新
-均被阻塞。仓库 live E2E gate 只能提供自动辅助证据，不能替代人工验收；精确命令由
-根 README 维护。
+Joey 已于 2026-10-19 完成 UK-local 人工播放验收，并明确授权 `v8.11.0` 发布。
+稳定发布仍须满足人工验收与明确授权条件；仓库 live E2E gate 只能提供自动辅助证据，
+不能替代人工验收。精确命令和稳定版发布流程由根 README 维护。
 
 ### 登录/登出
 
