@@ -6,11 +6,13 @@ Last updated: 2026-10-19
 
 - [ ] Add a guided issue template link for diagnostic reports.
   - Keep the current report copy flow local-only, but prefill issue title/body only when the payload is small enough for a URL.
+- [ ] Perform and record a later UK-local field check of real stall and cache recovery. These
+  behaviors were not exercised in the `v8.11.0` installed-candidate trial.
 
 ## Completed
 
-- [x] 完成 UK-local 人工播放验收并授权准备 `v8.11.0` 发布。
-  - Evidence and limits are recorded in
+- [x] Joey 接受 `v8.11.0` 已安装候选的正常播放与原生评论试用，并明确指示继续发布。
+  - 真实 stall/cache recovery 未在本次试用中测试；证据与范围记录于
     [Native Bangumi Comments](project_journal/2026/10/2026-10-18-native-bangumi-comments.md).
 
 - [x] 完成并合并 CDN selection Stage 3 stall recovery。

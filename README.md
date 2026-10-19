@@ -107,9 +107,11 @@ pnpm run test:cdn-switcher:latest
 
 这是新的 GreasyFork 分发脚本，不作为旧 `ipcjs` 脚本的自动升级路径发布。Userscript metadata 中的 `@namespace` 已切换到 `https://github.com/JoeyTeng`，旧脚本用户需要按新脚本重新安装。
 
-CDN selection 的三个阶段已经全部合并，且 UK-local 人工播放验收已于 2026-10-19
-完成并获得 `v8.11.0` 发布授权；按下方正常发布流程完成
-稳定 tag、Release 附件和 `main` 刷新。真实站点 live E2E 只是自动辅助证据，不能替代人工验收。
+CDN selection 的三个阶段已经全部合并。Joey 于 2026-10-19 接受本机安装候选的正常
+播放与评论试用，并明确指示继续发布 `v8.11.0`；本版本按此范围采用
+[特定发布决定](docs/design/cdn-selection.md#compatibility-and-acceptance)，继续下方
+稳定 tag、Release 附件和 `main` 刷新流程。真实 stall/cache 恢复仍未人工验证，保留为
+后续现场验证项；真实站点 live E2E 只按自动辅助证据记录。
 
 发布新版本时，在 `dev` 分支打稳定版 `vX.Y.Z` tag。release workflow 会：
 

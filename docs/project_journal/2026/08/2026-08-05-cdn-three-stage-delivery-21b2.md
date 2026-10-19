@@ -18,9 +18,10 @@ superseded_by:
   [PR #13](https://github.com/JoeyTeng/bilibili-helper/pull/13) 交付；Stage 3 由
   [PR #14](https://github.com/JoeyTeng/bilibili-helper/pull/14) 交付，三个阶段均已进入
   `dev`。
-- 三个阶段实现及 UK-local 人工播放验收构成本 program 的完成范围。
-- UK-local 人工播放验收与发布授权已于 2026-10-19 完成。本 program 的 scope 为实现和验收；
-  本次批准的发布版本为 `v8.11.0`，发布走常规流程。
+- 三个阶段实现及 `v8.11.0` release-specific trial 构成本 program 的完成范围。该版本
+  接受的人工范围是正常播放、原生评论的已安装候选试用，以及 Joey 明确指示继续发布。
+- 真实 stall/cache recovery 未在该人工试用中执行，不能记作已人工验收；后续 UK-local
+  现场验证保留为独立事项，不阻塞本次明确授权的 `v8.11.0` 发布。
 
 ## Stage Status
 
@@ -211,12 +212,15 @@ superseded_by:
 
 ## Release Gate
 
-- Joey 在 UK-local 环境完成真实浏览器验收并明确授权准备发布。测试使用本机 Chrome
-  的 Codex profile 和 Tampermonkey `5.5.1`，将既有 `8.10.0` 更新为完整 `8.11.0`
-  候选；候选源码为 `dc00e20`。`ep247368` 第 99 话的视频时间从 `00:01` 推进至
-  `02:30`，原生评论显示 90 条。系统音频全程静音且已核实。
+- 在 UK-local 真实 Chrome Codex profile 中，agent 使用 Tampermonkey `5.5.1` 将既有
+  `8.10.0` 安装更新为完整 `8.11.0` 候选（源码 `dc00e20`）。在 `ep247368` 第 99 话，
+  视频时间从 `00:01` 推进至 `02:30`，原生评论显示 90 条；系统音频全程静音且已核实。
+- Joey 观察该已安装候选后表示结果看起来没问题，并明确指示继续发布。此决定接受的
+  `v8.11.0` 人工范围为正常播放与原生评论安装试用。
 - 本次人工验收没有验证真实 stall 或 cache 恢复，不构成这些路径的现场证据。验收时，
   `v8.11.0` 候选尚未打 tag 或发布。
+- 自动 live E2E 与受控 recovery gate 是辅助证据，不替代上述 UK-local 人工试用，也不
+  将未执行的真实 stall/cache recovery 升格为人工验收结果。
 - 2026-08-06 的仓库 live E2E gate 已通过：BVID `BV17x411w7KC` 在 Chrome
   `151.0.7922.72` 中真实播放推进；2 个 candidate/probed host 均 healthy，probe
   attempts 为 `completed=4` / `total=4`，持久化 2 个 host，并在重载后的新 runtime
@@ -232,7 +236,8 @@ superseded_by:
 
 ## Next Steps
 
-1. 按常规流程完成 `v8.11.0` 稳定发布。
+1. 按常规流程完成已获授权的 `v8.11.0` 稳定发布。
+2. 后续另行完成并记录 UK-local 真实 stall 与 cache recovery 现场验证。
 
 ## Evidence
 

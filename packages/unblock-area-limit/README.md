@@ -125,7 +125,11 @@ candidate pool 不属于当前交付。
 再次排序、替换 `Response` / XHR 对象或拼接 URL。最新版 CDN Switcher 的两种加载顺序
 均由下列固定 snapshot gate 覆盖。
 
-仓库的真实站点 live E2E gate 是自动辅助证据，不能替代 Joey 在 UK-local 环境的人工播放验收。三个阶段已经全部合并，且人工验收与 `v8.11.0` 发布授权已于 2026-10-19 完成。精确 live E2E 命令由仓库根 README 维护。
+三个阶段已经全部合并。Joey 于 2026-10-19 接受本机安装候选的正常播放与评论试用，
+并明确指示继续发布 `v8.11.0`；本版本的
+[发布决定](../../docs/design/cdn-selection.md#compatibility-and-acceptance) 按该实际范围记录。
+真实 stall/cache 恢复仍未人工验证；仓库 live E2E gate 只提供自动辅助证据。精确命令
+由仓库根 README 维护。
 
 #### CDN Switcher 兼容性
 

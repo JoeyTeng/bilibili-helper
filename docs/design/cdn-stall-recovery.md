@@ -463,6 +463,12 @@ Stage 3 capability has four explicit terminal results:
 `UNSUPPORTED` and `INCONCLUSIVE` are non-success results for the Stage 3-specific capability gate
 and must never fall through to a generic `PASS`. They do not replace UK-local manual acceptance.
 
+For `v8.11.0`, the [release-specific acceptance decision](cdn-selection.md#compatibility-and-acceptance)
+uses the installed normal-playback and comments trial followed by Joey's explicit instruction to
+publish. Live stall/cache recovery remains manually unverified and stays a follow-up validation
+item. This release decision does not convert its capability result into `PASS` or claim manual
+recovery acceptance.
+
 ## Porting checklist
 
 When reusing this design in another userscript or player integration:

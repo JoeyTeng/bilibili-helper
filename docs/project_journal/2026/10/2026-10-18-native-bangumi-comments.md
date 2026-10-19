@@ -66,12 +66,14 @@ The same committed implementation was tested against five additional valid fixtu
 
 ## UK Manual Release Acceptance — 2026-10-19
 
-- The existing `8.10.0` installation was updated to the complete `8.11.0` candidate
+- The agent updated the existing `8.10.0` installation to the complete `8.11.0` candidate
   built from source commit `dc00e20` in the real local Chrome Codex profile using Tampermonkey
   `5.5.1`. The BALH candidate metadata used `@name 解除B站区域限制` and
   `@namespace https://github.com/JoeyTeng`.
 - On `ep247368`, episode 99 playback advanced from `00:01` to `02:30`, and the native comments
   component displayed 90 comments. System audio remained muted throughout and muting was verified.
-- Joey confirmed the result looked good and explicitly authorized publication. At acceptance
-  time, the candidate had not been tagged or published. This manual check did not exercise real stall or
-  cache recovery; it does not claim acceptance of those behaviors.
+- Joey reviewed the installed candidate, said it looked good, and explicitly instructed us to
+  continue with publication. This is the release-specific acceptance decision for normal playback
+  and the installed native-comments trial. At acceptance time, the candidate had not been tagged
+  or published. Real stall/cache recovery was not exercised and remains future field validation;
+  this trial does not claim acceptance of those behaviors.
