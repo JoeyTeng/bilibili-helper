@@ -92,7 +92,7 @@ XHR subclass 与异步 fallback 的组合兼容回归由 `pnpm run test:xhr-comp
 pnpm run test:cdn-switcher:latest
 ```
 
-当前已验证的 Bilibili Video CDN Switcher 版本为 `0.1.4`；兼容 gate 覆盖 Fetch/XHR、
+当前已验证的 Bilibili Video CDN Switcher 版本为 `0.1.5`；兼容 gate 覆盖 Fetch/XHR、
 两种脚本加载顺序、downstream 最终响应候选发布和 future-route recovery。完整范围和源文件校验值见
 [CDN Switcher 兼容性](packages/unblock-area-limit/README.md#cdn-switcher-兼容性)。
 
@@ -107,9 +107,9 @@ pnpm run test:cdn-switcher:latest
 
 这是新的 GreasyFork 分发脚本，不作为旧 `ipcjs` 脚本的自动升级路径发布。Userscript metadata 中的 `@namespace` 已切换到 `https://github.com/JoeyTeng`，旧脚本用户需要按新脚本重新安装。
 
-CDN selection 的三个阶段已经全部合并。Joey 完成 UK-local 人工播放验收并明确授权
-发布前，不得创建稳定版 tag、发布稳定版或刷新 `main`。真实站点 live E2E 只是自动
-辅助证据，不替代这项人工验收。
+CDN selection 的三个阶段已经全部合并，且 UK-local 人工播放验收已于 2026-10-19
+完成并获得 `v8.11.0` 发布授权；按下方正常发布流程完成
+稳定 tag、Release 附件和 `main` 刷新。真实站点 live E2E 只是自动辅助证据，不能替代人工验收。
 
 发布新版本时，在 `dev` 分支打稳定版 `vX.Y.Z` tag。release workflow 会：
 
