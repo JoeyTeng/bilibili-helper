@@ -32,6 +32,8 @@ function scriptContent() {
 
     bili.area_limit_for_vue()
 
+    bili.startRestoreBangumiComments(!balh_config.is_closed)
+
     bili.hide_adblock_tips()
 
     bili.area_limit_xhr()
